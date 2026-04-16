@@ -599,6 +599,31 @@ def build_preview(data: dict) -> str:
     )
 
 
+async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostica las credenciales de Twitter probando GET /2/users/me y POST /2/tweets."""
+    await update.message.reply_text("Probando credenciales de Twitter...")
+
+    def run_test():
+        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+        lines = []
+
+        # Test 1: verificar identidad (solo lectura)
+        r1 = requests.get("https://api.twitter.com/2/users/me", auth=auth)
+        lines.append(f"GET /users/me → {r1.status_code}: {r1.text[:150]}")
+
+        # Test 2: intentar tweet de prueba
+        r2 = requests.post(
+            "https://api.twitter.com/2/tweets",
+            json={"text": "Test de conexion desde MundoEmpresarial bot"},
+            auth=auth,
+        )
+        lines.append(f"POST /tweets → {r2.status_code}: {r2.text[:200]}")
+        return "\n\n".join(lines)
+
+    result = await asyncio.to_thread(run_test)
+    await update.message.reply_text(result)
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_in = update.message.text.strip()
 
@@ -812,6 +837,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
+    app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_"))
     app.add_handler(CallbackQueryHandler(handle_button))
