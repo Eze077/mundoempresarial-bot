@@ -338,7 +338,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     Publica en WordPress con categorías auto-detectadas, etiquetas,
     SEO completo y Rank Math. Si destacado=True agrega cat. Destacados.
     """
-    s_title  = seo_title(data["title"])
+    s_title  = data["title"] if data.get("title_edited") else seo_title(data["title"])
     s_kw     = focus_keyword(data["title"])
     s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug   = url_slug(data["title"])
@@ -396,7 +396,7 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
     - URL del post en WordPress (Twitter lo acorta a ~23 chars)
     - Hasta 4 hashtags derivados del título + #Pymes fijo (o hashtags_override)
     """
-    title = seo_title(data["title"])
+    title = data["title"] if data.get("title_edited") else seo_title(data["title"])
 
     if hashtags_override is not None:
         hashtags = hashtags_override
@@ -555,7 +555,7 @@ def scrape(url: str) -> dict:
 
 async def publish_to_channel(bot, data: dict, wp_url: str):
     """Publica la nota en el canal de Telegram con imagen, título y link."""
-    s_title = seo_title(data["title"])
+    s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
     text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({wp_url})"
     try:
         if data.get("image_url"):
@@ -619,7 +619,7 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True) -> InlineKeyboardMa
 
 def build_preview(data: dict) -> str:
     """Genera el texto de preview con los datos SEO calculados."""
-    s_title = seo_title(data["title"])
+    s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
     s_kw    = focus_keyword(data["title"])
     s_desc  = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug  = url_slug(data["title"])
@@ -714,6 +714,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No hay nota activa. Manda un link primero.")
             return
         data["title"] = text_in          # actualizar título
+        data["title_edited"] = True       # no recortar título manual
         context.user_data["article"] = data
         preview = build_preview(data)
         kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True))
