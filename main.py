@@ -98,12 +98,55 @@ def extract_tags(title: str) -> list:
     return list(dict.fromkeys(words))[:6]
 
 
+def pyme_summary(text: str, excerpt: str) -> str:
+    """
+    Genera un resumen de hasta 240 caracteres en lenguaje simple
+    para empresarios pyme, monotributistas y profesionales.
+    Usa el excerpt (og:description) como base por ser ya un resumen.
+    """
+    raw = (excerpt or text or "").strip()
+    # Quedarse con la primera oración completa si cabe en 240 chars
+    for sep in (".", "?", "!"):
+        idx = raw.find(sep)
+        if 60 < idx <= 237:
+            return raw[: idx + 1]
+    # Si no, cortar en límite de palabra
+    if len(raw) <= 240:
+        return raw
+    cut = raw[:237]
+    boundary = cut.rfind(" ")
+    return (cut[:boundary] if boundary > 150 else cut) + "..."
+
+
+def pyme_box(text: str, excerpt: str) -> str:
+    """Recuadro 'RESUMEN PARA PYMES' con estilo visual inline."""
+    summary = pyme_summary(text, excerpt)
+    return (
+        '\n<div style="'
+        "background:#eaf4fb;"
+        "border-left:5px solid #1a6fa8;"
+        "padding:16px 20px;"
+        "margin:32px 0 16px 0;"
+        "border-radius:0 6px 6px 0;"
+        '">'
+        '<p style="margin:0 0 8px 0;font-size:13px;font-weight:700;'
+        'letter-spacing:1px;color:#1a6fa8;text-transform:uppercase;">'
+        "&#128196; Resumen para Pymes"
+        "</p>"
+        f'<p style="margin:0;font-size:15px;line-height:1.6;color:#222;">'
+        f"{summary}"
+        "</p>"
+        "</div>\n"
+    )
+
+
 def format_content(data: dict) -> str:
     """
     Estructura SEO del contenido:
     - Párrafo de apertura en negrita (lead)
     - Cuerpo en párrafos limpios
     - H2 cada 5 párrafos para facilitar la lectura
+    - Recuadro RESUMEN PARA PYMES
     - Fuente al pie con rel=noopener
     """
     paragraphs = [p.strip() for p in data["text"].split("\n") if p.strip()]
@@ -111,7 +154,8 @@ def format_content(data: dict) -> str:
     if not paragraphs:
         return (
             f'<p>{data["excerpt"]}</p>\n'
-            f'<p><em>Fuente: <a href="{data["source_url"]}" '
+            + pyme_box(data["text"], data["excerpt"])
+            + f'<p><em>Fuente: <a href="{data["source_url"]}" '
             f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
         )
 
@@ -122,17 +166,18 @@ def format_content(data: dict) -> str:
 
     for i, para in enumerate(paragraphs):
         if i == 0:
-            # Lead paragraph en negrita — incluye keyword natural
             parts.append(f"<p><strong>{para}</strong></p>")
         else:
-            # H2 cada 5 párrafos (mejora estructura y tiempo en página)
             if i % 5 == 0 and h2_index < len(h2_labels):
                 parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
                 h2_index += 1
             parts.append(f"<p>{para}</p>")
 
+    # Recuadro RESUMEN PARA PYMES antes de la fuente
+    parts.append(pyme_box(data["text"], data["excerpt"]))
+
     parts.append(
-        f'\n<p><em>Fuente: <a href="{data["source_url"]}" '
+        f'<p><em>Fuente: <a href="{data["source_url"]}" '
         f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
     )
     return "\n".join(parts)
