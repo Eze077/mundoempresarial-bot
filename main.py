@@ -500,45 +500,38 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    if not url.startswith(("http://", "https://")):
-        await update.message.reply_text("Enviame un link valido (que empiece con http)")
-        return
+CAT_NAMES = {
+    95: "AFIP", 88: "Agro", 1048: "Coberturas", 89: "Comercio",
+    99: "Congreso", 337: "Destacados", 239: "Digitalización Pymes",
+    94: "Economía", 96: "Empresas", 100: "Gobierno", 90: "Industria",
+    103: "Informes", 97: "Internacional", 98: "Nacional", 91: "Opinión",
+    101: "Poder Judicial", 87: "Política", 338: "Principales",
+    102: "Provincias", 92: "Servicios", 93: "Sindicatos",
+}
 
-    msg = await update.message.reply_text("Analizando la nota...")
+PREVIEW_KB = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("Publicar", callback_data="pub"),
+        InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
+    ],
+    [
+        InlineKeyboardButton("Cambiar titulo", callback_data="change_title"),
+        InlineKeyboardButton("Cancelar", callback_data="cancel"),
+    ],
+])
 
-    try:
-        data = await asyncio.to_thread(scrape, url)
-    except Exception as e:
-        logger.error(f"scrape: {e}")
-        await msg.edit_text("No pude leer la nota. El link funciona?")
-        return
 
-    context.user_data["article"] = data
-
-    # Datos SEO y categorías detectadas
-    s_title  = seo_title(data["title"])
-    s_kw     = focus_keyword(data["title"])
-    s_desc   = meta_description(data["excerpt"], data["text"])
-    s_slug   = url_slug(data["title"])
-    words    = len(data["text"].split())
-    cat_ids  = detect_categories(data["title"], data["text"], data["excerpt"])
-
-    # Nombres de categorías para mostrar en preview
-    CAT_NAMES = {
-        95: "AFIP", 88: "Agro", 1048: "Coberturas", 89: "Comercio",
-        99: "Congreso", 337: "Destacados", 239: "Digitalización Pymes",
-        94: "Economía", 96: "Empresas", 100: "Gobierno", 90: "Industria",
-        103: "Informes", 97: "Internacional", 98: "Nacional", 91: "Opinión",
-        101: "Poder Judicial", 87: "Política", 338: "Principales",
-        102: "Provincias", 92: "Servicios", 93: "Sindicatos",
-    }
-    cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
-
+def build_preview(data: dict) -> str:
+    """Genera el texto de preview con los datos SEO calculados."""
+    s_title = seo_title(data["title"])
+    s_kw    = focus_keyword(data["title"])
+    s_desc  = meta_description(data["excerpt"], data["text"], kw=s_kw)
+    s_slug  = url_slug(data["title"])
+    words   = len(data["text"].split())
+    cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
+    cats_str    = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
     tag_preview = " · ".join(extract_tags(data["title"])[:5])
-
-    preview = (
+    return (
         f"*{s_title}*\n\n"
         f"*Keyword:* {s_kw}\n"
         f"*Slug:* /{s_slug}\n"
@@ -548,13 +541,41 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Imagen: {'Si' if data['image_url'] else 'No'}  |  Palabras: ~{words}"
     )
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Publicar", callback_data="pub"),
-        InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
-    ], [
-        InlineKeyboardButton("Cancelar", callback_data="cancel"),
-    ]])
-    await msg.edit_text(preview, parse_mode="Markdown", reply_markup=kb)
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text_in = update.message.text.strip()
+
+    # ── Si el bot espera un nuevo título, procesar como título ──
+    if context.user_data.get("waiting_for_title"):
+        context.user_data["waiting_for_title"] = False
+        data = context.user_data.get("article")
+        if not data:
+            await update.message.reply_text("No hay nota activa. Manda un link primero.")
+            return
+        data["title"] = text_in          # actualizar título
+        context.user_data["article"] = data
+        preview = build_preview(data)
+        await update.message.reply_text(
+            preview, parse_mode="Markdown", reply_markup=PREVIEW_KB
+        )
+        return
+
+    # ── Flujo normal: procesar URL ──
+    if not text_in.startswith(("http://", "https://")):
+        await update.message.reply_text("Enviame un link valido (que empiece con http)")
+        return
+
+    msg = await update.message.reply_text("Analizando la nota...")
+
+    try:
+        data = await asyncio.to_thread(scrape, text_in)
+    except Exception as e:
+        logger.error(f"scrape: {e}")
+        await msg.edit_text("No pude leer la nota. El link funciona?")
+        return
+
+    context.user_data["article"] = data
+    await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=PREVIEW_KB)
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -562,7 +583,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "cancel":
+        context.user_data.pop("waiting_for_title", None)
         await query.edit_message_text("Cancelado.")
+        return
+
+    if query.data == "change_title":
+        context.user_data["waiting_for_title"] = True
+        await query.edit_message_text(
+            "Escribi el nuevo titulo para la nota\n"
+            "(solo escribilo como mensaje normal):"
+        )
         return
 
     data = context.user_data.get("article")
