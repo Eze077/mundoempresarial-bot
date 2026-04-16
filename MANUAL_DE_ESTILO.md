@@ -109,9 +109,13 @@ Para una nota de 600 palabras con keyword de 1 palabra, la keyword debe aparecer
 | Keyword presente | Obligatorio | **36** |
 | Keyword en primera mitad | Primeras 30 chars aprox. | **3** |
 | Contiene un numero | Digitos, no letras | **1** |
-| Largo maximo | **60 caracteres** | - |
+| Largo maximo | **60 caracteres** (automatico) | - |
 | Corte | En limite de palabra, sin puntos suspensivos | - |
 | Power words | Palabras de impacto ("clave", "record", "alerta") | **1** |
+
+**Titulo manual vs. automatico:**
+- Por defecto el bot recorta el titulo a 60 caracteres (limite SEO).
+- Si se usa el boton **"Cambiar titulo"**, el titulo ingresado se publica **tal cual**, sin recorte ni modificacion. El operador es responsable de respetar el largo y las reglas SEO.
 
 **Buenos ejemplos:**
 - *AFIP extiende el plazo para monotributistas* (keyword "AFIP" al inicio)
