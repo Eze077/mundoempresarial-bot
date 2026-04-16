@@ -39,8 +39,23 @@ HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    )
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.google.com/",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Cache-Control": "max-age=0",
 }
 
 # Palabras vacías en español para extracción de keywords
@@ -559,7 +574,10 @@ def _extract_jsonld(soup: BeautifulSoup) -> dict | None:
 
 
 def scrape(url: str) -> dict:
-    resp = requests.get(url, headers=HEADERS_BROWSER, timeout=15)
+    # Usar Session para manejar cookies como un navegador real
+    session = requests.Session()
+    session.headers.update(HEADERS_BROWSER)
+    resp = session.get(url, timeout=15)
     resp.raise_for_status()
 
     html = _fix_encoding(resp)
