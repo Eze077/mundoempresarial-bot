@@ -45,6 +45,78 @@ STOP_WORDS = {
     "también", "cuando", "donde", "quien", "cuyo", "aunque", "porque",
 }
 
+# ID de la categoría Destacados
+CAT_DESTACADOS = 337
+
+# Mapa de categorías WordPress → palabras clave (minúsculas)
+CATEGORY_KEYWORDS = {
+    95:  ["afip", "arca", "impuesto", "impuestos", "factura", "facturación",
+          "monotributo", "monotributista", "iva", "ganancias", "declaración jurada",
+          "fisco", "recaudación", "blanqueo", "renta", "retención", "percepción"],
+    88:  ["agro", "campo", "agricultura", "ganadería", "soja", "trigo", "maíz",
+          "cosecha", "agroexportación", "rural", "agroindustria", "granos", "bovino",
+          "porcino", "tambero", "siembra"],
+    1048:["cobertura", "seguro", "seguros", "aseguradora", "póliza", "reaseguro",
+          "superintendencia de seguros"],
+    89:  ["comercio", "retail", "venta", "ventas", "consumo", "consumidor",
+          "minorista", "mayorista", "shopping", "supermercado", "inflación de precios"],
+    99:  ["congreso", "diputados", "senado", "senadores", "legislatura",
+          "proyecto de ley", "cámara", "sesión", "legislativo"],
+    239: ["digital", "digitalización", "tecnología", "software", "app", "aplicación",
+          "ecommerce", "e-commerce", "startup", "inteligencia artificial", "ia",
+          "fintech", "blockchain", "automatización", "plataforma"],
+    94:  ["economía", "inflación", "dólar", "tipo de cambio", "reservas",
+          "banco central", "bcra", "pbi", "recesión", "crecimiento", "cepo",
+          "devaluación", "tasas", "tasa", "deuda", "déficit", "superávit",
+          "ajuste fiscal", "fmi", "bono", "bonos", "merval"],
+    96:  ["empresa", "empresas", "pyme", "pymes", "negocio", "negocios",
+          "emprendimiento", "ceo", "directivo", "corporativo", "holding",
+          "fusión", "adquisición", "inversión", "exportador"],
+    100: ["gobierno", "ministerio", "ministro", "presidencia", "jefatura",
+          "milei", "decreto", "resolución", "secretaría", "subsecretaría",
+          "licitación", "obra pública", "estado"],
+    90:  ["industria", "manufactura", "fábrica", "producción", "acero",
+          "petroquímica", "automotriz", "autopartista", "textil", "metalmecánica",
+          "pymes industriales", "parque industrial"],
+    103: ["informe", "encuesta", "estadística", "datos", "relevamiento",
+          "estudio", "ranking", "índice", "indec", "ipc", "emae"],
+    97:  ["internacional", "mundial", "global", "exterior", "exportación",
+          "importación", "china", "eeuu", "estados unidos", "brasil", "trump",
+          "unión europea", "fondo monetario", "banco mundial", "mercosur"],
+    98:  ["argentina", "nacional", "país", "nación", "porteño", "bonaerense"],
+    91:  ["opinión", "análisis", "columna", "reflexión", "editorial", "perspectiva"],
+    101: ["judicial", "juicio", "tribunal", "corte suprema", "juez", "causa",
+          "condena", "fallo", "imputado", "procesado", "fiscalía"],
+    87:  ["política", "político", "elecciones", "partido", "candidato",
+          "kirchner", "peronismo", "oficialismo", "oposición", "coalición",
+          "campaña electoral", "gobernador", "intendente"],
+    102: ["provincia", "provincial", "municipal", "ciudad", "gobernación",
+          "municipio", "intendencia", "presupuesto provincial"],
+    92:  ["servicio", "servicios", "salud", "educación", "transporte",
+          "energía", "luz", "gas", "agua", "tarifas", "utilities"],
+    93:  ["sindicato", "gremio", "sindical", "paritaria", "salario", "sueldo",
+          "convenio colectivo", "huelga", "paro", "cgt", "uom", "camioneros"],
+}
+
+def detect_categories(title: str, text: str, excerpt: str) -> list:
+    """
+    Detecta hasta 3 categorías relevantes comparando keywords del contenido
+    con el mapa CATEGORY_KEYWORDS. El título tiene triple peso.
+    Devuelve lista de IDs ordenada por relevancia.
+    """
+    corpus = (title + " " + title + " " + title + " " + excerpt + " " + (text[:600] or "")).lower()
+    scores = {}
+    for cat_id, kws in CATEGORY_KEYWORDS.items():
+        score = sum(corpus.count(kw) for kw in kws)
+        if score > 0:
+            scores[cat_id] = score
+
+    if not scores:
+        return [98]  # fallback: Nacional
+
+    ranked = sorted(scores, key=scores.get, reverse=True)
+    return ranked[:3]
+
 
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
 
@@ -240,36 +312,46 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
     return None
 
 
-def publish_post(data: dict, image_id: int | None) -> str | None:
+def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> str | None:
     """
-    Publica en WordPress con:
-    - Título SEO (50-60 chars)
-    - Slug limpio
-    - Excerpt = meta descripción (120-155 chars)
-    - Etiquetas automáticas
-    - Rank Math: title, description, focus_keyword, robots
-    - Estructura de contenido con H2 y lead en negrita
+    Publica en WordPress con categorías auto-detectadas, etiquetas,
+    SEO completo y Rank Math. Si destacado=True agrega cat. Destacados.
     """
-    s_title = seo_title(data["title"])
-    s_desc  = meta_description(data["excerpt"], data["text"])
-    s_kw    = focus_keyword(data["title"])
-    s_slug  = url_slug(data["title"])
-    content = format_content(data)
-    tag_ids = get_or_create_tags(extract_tags(data["title"]))
+    s_title  = seo_title(data["title"])
+    s_desc   = meta_description(data["excerpt"], data["text"])
+    s_kw     = focus_keyword(data["title"])
+    s_slug   = url_slug(data["title"])
+    content  = format_content(data)
+
+    # Categorías auto-detectadas + opcional Destacados
+    cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
+    if destacado and CAT_DESTACADOS not in cat_ids:
+        cat_ids = [CAT_DESTACADOS] + cat_ids
+
+    # Etiquetas: del título + primeras palabras clave del texto
+    tag_names = extract_tags(data["title"])
+    first_para = (data["text"].split("\n")[0] if data["text"] else "")
+    tag_names += [
+        w.strip('.,;:!?()[]"\'«»—').capitalize()
+        for w in first_para.split()
+        if w.lower().strip('.,;:!?()[]"\'«»—') not in STOP_WORDS and len(w) > 4
+    ]
+    tag_names = list(dict.fromkeys(tag_names))[:8]  # sin duplicados, máx 8
+    tag_ids = get_or_create_tags(tag_names)
 
     payload = {
-        "title":   s_title,
-        "content": content,
-        "excerpt": s_desc,
-        "status":  "publish",
-        "slug":    s_slug,
-        "tags":    tag_ids,
+        "title":      s_title,
+        "content":    content,
+        "excerpt":    s_desc,
+        "status":     "publish",
+        "slug":       s_slug,
+        "categories": cat_ids,
+        "tags":       tag_ids,
         "meta": {
-            # Rank Math SEO
-            "rank_math_title":         s_title,
-            "rank_math_description":   s_desc,
-            "rank_math_focus_keyword": s_kw,
-            "rank_math_robots":        ["index", "follow"],
+            "rank_math_title":            s_title,
+            "rank_math_description":      s_desc,
+            "rank_math_focus_keyword":    s_kw,
+            "rank_math_robots":           ["index", "follow"],
             "rank_math_og_content_image": data.get("image_url", ""),
         },
     }
@@ -341,24 +423,41 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["article"] = data
 
-    # Preview con datos SEO generados
-    s_title = seo_title(data["title"])
-    s_kw    = focus_keyword(data["title"])
-    s_desc  = meta_description(data["excerpt"], data["text"])
-    s_slug  = url_slug(data["title"])
-    words   = len(data["text"].split())
+    # Datos SEO y categorías detectadas
+    s_title  = seo_title(data["title"])
+    s_kw     = focus_keyword(data["title"])
+    s_desc   = meta_description(data["excerpt"], data["text"])
+    s_slug   = url_slug(data["title"])
+    words    = len(data["text"].split())
+    cat_ids  = detect_categories(data["title"], data["text"], data["excerpt"])
+
+    # Nombres de categorías para mostrar en preview
+    CAT_NAMES = {
+        95: "AFIP", 88: "Agro", 1048: "Coberturas", 89: "Comercio",
+        99: "Congreso", 337: "Destacados", 239: "Digitalización Pymes",
+        94: "Economía", 96: "Empresas", 100: "Gobierno", 90: "Industria",
+        103: "Informes", 97: "Internacional", 98: "Nacional", 91: "Opinión",
+        101: "Poder Judicial", 87: "Política", 338: "Principales",
+        102: "Provincias", 92: "Servicios", 93: "Sindicatos",
+    }
+    cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
+
+    tag_preview = " · ".join(extract_tags(data["title"])[:5])
 
     preview = (
-        f"*Titulo SEO:* {s_title}\n"
+        f"*{s_title}*\n\n"
         f"*Keyword:* {s_kw}\n"
-        f"*Slug:* {s_slug}\n\n"
-        f"*Meta descripcion:*\n{s_desc}\n\n"
-        f"Imagen: {'Si' if data['image_url'] else 'No'}  |  "
-        f"Palabras: ~{words}"
+        f"*Slug:* /{s_slug}\n"
+        f"*Categorias:* {cats_str}\n"
+        f"*Etiquetas:* {tag_preview}\n\n"
+        f"_{s_desc}_\n\n"
+        f"Imagen: {'Si' if data['image_url'] else 'No'}  |  Palabras: ~{words}"
     )
 
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Publicar", callback_data="pub"),
+        InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
+    ], [
         InlineKeyboardButton("Cancelar", callback_data="cancel"),
     ]])
     await msg.edit_text(preview, parse_mode="Markdown", reply_markup=kb)
@@ -377,17 +476,20 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error: no hay nota pendiente.")
         return
 
-    await query.edit_message_text("Publicando...")
+    destacado = query.data == "pub_dest"
+    label = "destacada " if destacado else ""
+    await query.edit_message_text(f"Publicando nota {label}...")
 
     image_id = None
     if data["image_url"]:
         alt = seo_title(data["title"])
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
-    post_url = await asyncio.to_thread(publish_post, data, image_id)
+    post_url = await asyncio.to_thread(publish_post, data, image_id, destacado)
 
     if post_url:
-        await query.edit_message_text(f"Publicado!\n\n{post_url}")
+        suffix = " (Destacados)" if destacado else ""
+        await query.edit_message_text(f"Publicado{suffix}!\n\n{post_url}")
     else:
         await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
 
