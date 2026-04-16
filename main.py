@@ -5,6 +5,7 @@ import asyncio
 import base64
 import unicodedata
 import requests
+import tweepy
 from bs4 import BeautifulSoup
 import trafilatura
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,9 +24,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-WP_URL = os.environ.get("WP_URL", "https://mundoempresarial.ar").rstrip("/")
+WP_URL  = os.environ.get("WP_URL", "https://mundoempresarial.ar").rstrip("/")
 WP_USER = os.environ["WP_USER"]
 WP_PASS = os.environ["WP_PASS"]
+
+TWITTER_API_KEY    = os.environ.get("TWITTER_API_KEY", "")
+TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET", "")
+TWITTER_TOKEN      = os.environ.get("TWITTER_ACCESS_TOKEN", "")
+TWITTER_SECRET     = os.environ.get("TWITTER_ACCESS_SECRET", "")
 
 HEADERS_BROWSER = {
     "User-Agent": (
@@ -379,6 +385,50 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     return None
 
 
+# ── Twitter / X ───────────────────────────────────────────────────────────────
+
+def build_tweet(data: dict, wp_url: str) -> str:
+    """
+    Arma el texto del tweet:
+    - Título (hasta 200 chars para dejar espacio al URL y hashtags)
+    - URL del post en WordPress (Twitter lo acorta a ~23 chars)
+    - Hasta 4 hashtags derivados del título + #Pymes fijo
+    """
+    title = seo_title(data["title"])
+
+    # Hashtags: tags del título + siempre #Pymes
+    raw_tags = extract_tags(data["title"])[:3]
+    hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+
+    tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
+
+    # Twitter tiene límite de 280 chars; si excede, acortar el título
+    if len(tweet) > 280:
+        max_title = 280 - len(wp_url) - len(hashtags) - 6  # 6 = saltos de línea
+        title = title[:max_title].rsplit(" ", 1)[0]
+        tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
+
+    return tweet
+
+
+def post_tweet(data: dict, wp_url: str) -> str | None:
+    """Publica en Twitter/X. Devuelve la URL del tweet o None si falla."""
+    try:
+        client = tweepy.Client(
+            consumer_key=TWITTER_API_KEY,
+            consumer_secret=TWITTER_API_SECRET,
+            access_token=TWITTER_TOKEN,
+            access_token_secret=TWITTER_SECRET,
+        )
+        tweet_text = build_tweet(data, wp_url)
+        response = client.create_tweet(text=tweet_text)
+        tweet_id = response.data["id"]
+        return f"https://twitter.com/i/web/status/{tweet_id}"
+    except Exception as e:
+        logger.error(f"Twitter error: {e}")
+        return None
+
+
 # ── Limpieza de texto scrapeado ────────────────────────────────────────────────
 
 # Frases de ruido que trafilatura no siempre filtra
@@ -600,6 +650,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error: no hay nota pendiente.")
         return
 
+    if query.data == "tweet":
+        # Twittear la nota ya publicada
+        stored = context.user_data.get("published")
+        if not stored:
+            await query.edit_message_text("No encontre la nota publicada.")
+            return
+        await query.edit_message_text("Publicando en Twitter/X...")
+        tweet_url = await asyncio.to_thread(post_tweet, stored["data"], stored["url"])
+        if tweet_url:
+            await query.edit_message_text(
+                f"Publicado en WordPress y en Twitter/X!\n\n"
+                f"WP: {stored['url']}\n"
+                f"Tweet: {tweet_url}"
+            )
+        else:
+            await query.edit_message_text(
+                f"Publicado en WordPress pero fallo Twitter.\n\n{stored['url']}"
+            )
+        return
+
+    if query.data == "no_tweet":
+        stored = context.user_data.get("published")
+        url = stored["url"] if stored else ""
+        await query.edit_message_text(f"Publicado!\n\n{url}")
+        return
+
     destacado = query.data == "pub_dest"
     label = "destacada " if destacado else ""
     await query.edit_message_text(f"Publicando nota {label}...")
@@ -613,8 +689,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post_url = await asyncio.to_thread(publish_post, data, image_id, destacado)
 
     if post_url:
+        # Guardar para el paso de Twitter
+        context.user_data["published"] = {"url": post_url, "data": data}
         suffix = " (Destacados)" if destacado else ""
-        await query.edit_message_text(f"Publicado{suffix}!\n\n{post_url}")
+        tweet_preview = build_tweet(data, post_url)
+        kb_tweet = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Twittear", callback_data="tweet"),
+            InlineKeyboardButton("No twittear", callback_data="no_tweet"),
+        ]])
+        await query.edit_message_text(
+            f"Publicado en WordPress{suffix}!\n\n"
+            f"{post_url}\n\n"
+            f"— Vista previa del tweet —\n"
+            f"`{tweet_preview}`",
+            parse_mode="Markdown",
+            reply_markup=kb_tweet,
+        )
     else:
         await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
 
