@@ -600,25 +600,33 @@ def build_preview(data: dict) -> str:
 
 
 async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Diagnostica las credenciales de Twitter probando GET /2/users/me y POST /2/tweets."""
-    await update.message.reply_text("Probando credenciales de Twitter...")
+    """Diagnostica credenciales de Twitter: muestra valores cargados y prueba la API."""
+
+    def mask(s: str) -> str:
+        if not s:
+            return "(VACIO)"
+        s = s.strip()
+        return f"{s[:4]}...{s[-4:]} (len={len(s)})"
+
+    creds = (
+        f"API\\_KEY:        `{mask(TWITTER_API_KEY)}`\n"
+        f"API\\_SECRET:    `{mask(TWITTER_API_SECRET)}`\n"
+        f"ACCESS\\_TOKEN: `{mask(TWITTER_TOKEN)}`\n"
+        f"ACCESS\\_SECRET:`{mask(TWITTER_SECRET)}`"
+    )
+    await update.message.reply_text(
+        f"Credenciales en Railway:\n{creds}", parse_mode="Markdown"
+    )
 
     def run_test():
-        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
-        lines = []
-
-        # Test 1: verificar identidad (solo lectura)
-        r1 = requests.get("https://api.twitter.com/2/users/me", auth=auth)
-        lines.append(f"GET /users/me → {r1.status_code}: {r1.text[:150]}")
-
-        # Test 2: intentar tweet de prueba
-        r2 = requests.post(
-            "https://api.twitter.com/2/tweets",
-            json={"text": "Test de conexion desde MundoEmpresarial bot"},
-            auth=auth,
+        auth = OAuth1(
+            TWITTER_API_KEY.strip(),
+            TWITTER_API_SECRET.strip(),
+            TWITTER_TOKEN.strip(),
+            TWITTER_SECRET.strip(),
         )
-        lines.append(f"POST /tweets → {r2.status_code}: {r2.text[:200]}")
-        return "\n\n".join(lines)
+        r = requests.get("https://api.twitter.com/2/users/me", auth=auth)
+        return f"GET /users/me → {r.status_code}: {r.text[:200]}"
 
     result = await asyncio.to_thread(run_test)
     await update.message.reply_text(result)
