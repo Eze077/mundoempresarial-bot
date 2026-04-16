@@ -28,10 +28,10 @@ WP_URL  = os.environ.get("WP_URL", "https://mundoempresarial.ar").rstrip("/")
 WP_USER = os.environ["WP_USER"]
 WP_PASS = os.environ["WP_PASS"]
 
-TWITTER_API_KEY    = os.environ.get("TWITTER_API_KEY", "")
-TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET", "")
-TWITTER_TOKEN      = os.environ.get("TWITTER_ACCESS_TOKEN", "")
-TWITTER_SECRET     = os.environ.get("TWITTER_ACCESS_SECRET", "")
+TWITTER_API_KEY    = os.environ.get("TW_KEY", "") or os.environ.get("TWITTER_API_KEY", "")
+TWITTER_API_SECRET = os.environ.get("TW_SECRET", "") or os.environ.get("TWITTER_API_SECRET", "")
+TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_ACCESS_TOKEN", "")
+TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER_ACCESS_SECRET", "")
 
 HEADERS_BROWSER = {
     "User-Agent": (
@@ -608,11 +608,17 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = s.strip()
         return f"{s[:4]}...{s[-4:]} (len={len(s)})"
 
+    # Variables Twitter presentes en el entorno
+    import os as _os
+    tw_vars = [k for k in _os.environ if "TWITTER" in k or k.startswith("TW_")]
+    all_vars_str = ", ".join(tw_vars) if tw_vars else "(ninguna con TWITTER ni TW_)"
+
     creds = (
-        f"API\\_KEY:        `{mask(TWITTER_API_KEY)}`\n"
-        f"API\\_SECRET:    `{mask(TWITTER_API_SECRET)}`\n"
-        f"ACCESS\\_TOKEN: `{mask(TWITTER_TOKEN)}`\n"
-        f"ACCESS\\_SECRET:`{mask(TWITTER_SECRET)}`"
+        f"Vars detectadas: {all_vars_str}\n\n"
+        f"TW\\_KEY (API\\_KEY):       `{mask(TWITTER_API_KEY)}`\n"
+        f"TW\\_SECRET (API\\_SECRET): `{mask(TWITTER_API_SECRET)}`\n"
+        f"TW\\_TOKEN (ACCESS):       `{mask(TWITTER_TOKEN)}`\n"
+        f"TW\\_TSECRET (A.SECRET):   `{mask(TWITTER_SECRET)}`"
     )
     await update.message.reply_text(
         f"Credenciales en Railway:\n{creds}", parse_mode="Markdown"
