@@ -121,12 +121,12 @@ def detect_categories(title: str, text: str, excerpt: str) -> list:
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
 
 def seo_title(title: str) -> str:
-    """Título entre 50-60 caracteres, corta en límite de palabra."""
+    """Título de hasta 60 caracteres, corta en límite de palabra. Sin puntos suspensivos."""
     if len(title) <= 60:
         return title
-    cut = title[:57]
+    cut = title[:60]
     boundary = cut.rfind(" ")
-    return (cut[:boundary] if boundary > 40 else cut) + "..."
+    return cut[:boundary] if boundary > 40 else cut
 
 
 def meta_description(excerpt: str, text: str, kw: str = "") -> str:
