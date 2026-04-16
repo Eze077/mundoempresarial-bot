@@ -129,9 +129,14 @@ def seo_title(title: str) -> str:
     return (cut[:boundary] if boundary > 40 else cut) + "..."
 
 
-def meta_description(excerpt: str, text: str) -> str:
-    """Meta descripción entre 120-155 caracteres."""
+def meta_description(excerpt: str, text: str, kw: str = "") -> str:
+    """
+    Meta descripción 120-155 chars.
+    Si el keyword no aparece, lo antepone para que Rank Math lo detecte.
+    """
     raw = (excerpt or text or "").strip()
+    if kw and kw.lower() not in raw.lower():
+        raw = f"{kw}: {raw}"
     if len(raw) <= 155:
         return raw
     cut = raw[:152]
@@ -140,23 +145,26 @@ def meta_description(excerpt: str, text: str) -> str:
 
 
 def focus_keyword(title: str) -> str:
-    """Extrae 2-3 palabras clave principales del título."""
-    words = [
-        w.strip('.,;:!?()[]"\'«»—')
-        for w in title.split()
-        if w.lower().strip('.,;:!?()[]"\'«»—') not in STOP_WORDS and len(w) > 3
-    ]
-    return " ".join(words[:3]) if words else title.split()[0]
+    """
+    Devuelve UNA sola palabra clave — la más significativa del título.
+    Una palabra corta aparece naturalmente en el contenido y obtiene
+    mayor densidad, lo que sube el score de Rank Math.
+    """
+    for w in title.split():
+        clean = w.strip('.,;:!?()[]"\'«»—:')
+        if clean.lower() not in STOP_WORDS and len(clean) > 3:
+            return clean
+    return title.split()[0]
 
 
 def url_slug(title: str) -> str:
-    """Slug URL limpio, sin tildes, máximo 60 caracteres."""
+    """Slug URL limpio, sin tildes, máximo 50 caracteres (recomendación Rank Math)."""
     slug = title.lower()
     slug = unicodedata.normalize("NFKD", slug)
     slug = "".join(c for c in slug if not unicodedata.combining(c))
     slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-    if len(slug) > 60:
-        slug = slug[:60].rsplit("-", 1)[0]
+    if len(slug) > 50:
+        slug = slug[:50].rsplit("-", 1)[0]
     return slug
 
 
@@ -212,19 +220,25 @@ def pyme_box(text: str, excerpt: str) -> str:
     )
 
 
-def format_content(data: dict) -> str:
+def format_content(data: dict, kw: str = "") -> str:
     """
     Estructura SEO del contenido:
     - Párrafo de apertura en negrita (lead)
-    - Cuerpo en párrafos limpios
+    - Primer H2 incluye el keyword de enfoque (requerido por Rank Math)
     - H2 cada 5 párrafos para facilitar la lectura
     - Recuadro RESUMEN PARA PYMES
     - Fuente al pie con rel=noopener
     """
     paragraphs = [p.strip() for p in data["text"].split("\n") if p.strip()]
 
+    # H2 labels: el primero incluye el keyword para satisfacer Rank Math
+    first_h2 = f"{kw}: lo que necesitás saber" if kw else "Lo que necesitás saber"
+    h2_labels = [first_h2, "En profundidad", "Más detalles",
+                 "Contexto", "Análisis", "Datos clave"]
+
     if not paragraphs:
         return (
+            f"<h2>{first_h2}</h2>\n"
             f'<p>{data["excerpt"]}</p>\n'
             + pyme_box(data["text"], data["excerpt"])
             + f'<p><em>Fuente: <a href="{data["source_url"]}" '
@@ -232,22 +246,21 @@ def format_content(data: dict) -> str:
         )
 
     parts = []
-    h2_labels = ["Más detalles", "En profundidad", "Lo que hay que saber",
-                 "Contexto", "Análisis", "Datos clave"]
     h2_index = 0
 
     for i, para in enumerate(paragraphs):
         if i == 0:
+            # Lead en negrita + primer H2 inmediatamente después
             parts.append(f"<p><strong>{para}</strong></p>")
+            parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
+            h2_index += 1
         else:
             if i % 5 == 0 and h2_index < len(h2_labels):
                 parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
                 h2_index += 1
             parts.append(f"<p>{para}</p>")
 
-    # Recuadro RESUMEN PARA PYMES antes de la fuente
     parts.append(pyme_box(data["text"], data["excerpt"]))
-
     parts.append(
         f'<p><em>Fuente: <a href="{data["source_url"]}" '
         f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
@@ -318,10 +331,10 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     SEO completo y Rank Math. Si destacado=True agrega cat. Destacados.
     """
     s_title  = seo_title(data["title"])
-    s_desc   = meta_description(data["excerpt"], data["text"])
     s_kw     = focus_keyword(data["title"])
+    s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug   = url_slug(data["title"])
-    content  = format_content(data)
+    content  = format_content(data, kw=s_kw)
 
     # Categorías auto-detectadas + opcional Destacados
     cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
@@ -484,7 +497,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     image_id = None
     if data["image_url"]:
-        alt = seo_title(data["title"])
+        kw  = focus_keyword(data["title"])
+        alt = f"{kw} - {seo_title(data['title'])}"
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
     post_url = await asyncio.to_thread(publish_post, data, image_id, destacado)
