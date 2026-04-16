@@ -597,18 +597,19 @@ CAT_NAMES = {
     102: "Provincias", 92: "Servicios", 93: "Sindicatos",
 }
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True) -> InlineKeyboardMarkup:
-    """Teclado de previsualización con toggles ON/OFF para Twitter y Canal Telegram."""
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, dest_on: bool = False) -> InlineKeyboardMarkup:
+    """Teclado de previsualización con toggles ON/OFF para Twitter, Canal TG y Destacado."""
     tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
+    dest_label = "⭐ Destacado" if dest_on else "☆ Destacado"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
             InlineKeyboardButton(tg_label, callback_data="toggle_tg"),
+            InlineKeyboardButton(dest_label, callback_data="toggle_dest"),
         ],
         [
             InlineKeyboardButton("Publicar", callback_data="pub"),
-            InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
         ],
         [
             InlineKeyboardButton("Cambiar titulo", callback_data="change_title"),
@@ -717,7 +718,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["title_edited"] = True       # no recortar título manual
         context.user_data["article"] = data
         preview = build_preview(data)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True))
+        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data.get("dest_on", False))
         await update.message.reply_text(
             preview, parse_mode="Markdown", reply_markup=kb
         )
@@ -740,7 +741,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["article"] = data
     context.user_data.setdefault("tw_on", True)
     context.user_data.setdefault("tg_on", True)
-    kb = build_preview_kb(context.user_data["tw_on"], context.user_data["tg_on"])
+    context.user_data.setdefault("dest_on", False)
+    kb = build_preview_kb(context.user_data["tw_on"], context.user_data["tg_on"], context.user_data["dest_on"])
     await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
 
 
@@ -764,13 +766,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Toggles Twitter / Canal TG ──
     if query.data == "toggle_tw":
         context.user_data["tw_on"] = not context.user_data.get("tw_on", True)
-        kb = build_preview_kb(context.user_data["tw_on"], context.user_data.get("tg_on", True))
+        kb = build_preview_kb(context.user_data["tw_on"], context.user_data.get("tg_on", True), context.user_data.get("dest_on", False))
         await query.edit_message_reply_markup(reply_markup=kb)
         return
 
     if query.data == "toggle_tg":
         context.user_data["tg_on"] = not context.user_data.get("tg_on", True)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data["tg_on"])
+        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data["tg_on"], context.user_data.get("dest_on", False))
+        await query.edit_message_reply_markup(reply_markup=kb)
+        return
+
+    if query.data == "toggle_dest":
+        context.user_data["dest_on"] = not context.user_data.get("dest_on", False)
+        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data["dest_on"])
         await query.edit_message_reply_markup(reply_markup=kb)
         return
 
@@ -819,7 +827,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Publicado!\n\n{url}")
         return
 
-    destacado = query.data == "pub_dest"
+    destacado = context.user_data.get("dest_on", False)
     label = "destacada " if destacado else ""
     await query.edit_message_text(f"Publicando nota {label}...")
 
