@@ -379,14 +379,93 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     return None
 
 
+# ── Limpieza de texto scrapeado ────────────────────────────────────────────────
+
+# Frases de ruido que trafilatura no siempre filtra
+NOISE_FRAGMENTS = [
+    "your browser doesn",
+    "html5 audio",
+    "html5 video",
+    "compartir esta noticia",
+    "compartir en",
+    "dejanos tu comentario",
+    "dejar un comentario",
+    "leé más notas",
+    "lee mas notas",
+    "leer más",
+    "más notas de",
+    "notas relacionadas",
+    "seguinos en",
+    "seguinos",
+    "suscribite",
+    "suscríbete",
+    "newsletter",
+    "publicidad",
+    "advertisement",
+    "también te puede interesar",
+    "te puede interesar",
+    "artículos relacionados",
+    "tags:",
+    "etiquetas:",
+    "compartir:",
+    "volver arriba",
+    "cargar más",
+    "ver más",
+    "todos los derechos reservados",
+    "términos y condiciones",
+    "política de privacidad",
+    "cookies",
+    "javascript",
+]
+
+
+def clean_text(raw: str) -> str:
+    """
+    Elimina del texto scrapeado:
+    - Líneas con fragmentos de ruido conocidos (UI, share buttons, etc.)
+    - Mensajes de error de browser/HTML5
+    - Líneas muy cortas que no son oraciones
+    - Líneas con encoding roto (Ã, Â, etc.)
+    """
+    if not raw:
+        return ""
+
+    clean = []
+    for line in raw.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+
+        # Saltar líneas con fragmentos de ruido
+        if any(frag in low for frag in NOISE_FRAGMENTS):
+            continue
+
+        # Saltar líneas con encoding roto (caracteres típicos de doble-encoding)
+        if any(c in s for c in ("Ã", "Â", "â€", "Ã©", "Ã¡", "Ã³", "Ã±")):
+            continue
+
+        # Saltar líneas muy cortas que no terminan como oración
+        if len(s) < 25 and not s[-1] in ".?!:":
+            continue
+
+        clean.append(s)
+
+    return "\n".join(clean)
+
+
 # ── Scraper ────────────────────────────────────────────────────────────────────
 
 def scrape(url: str) -> dict:
     resp = requests.get(url, headers=HEADERS_BROWSER, timeout=15)
     resp.raise_for_status()
+
+    # Corregir encoding: muchos sitios declaran latin-1 pero sirven UTF-8
+    if resp.encoding and resp.encoding.lower() in ("iso-8859-1", "latin-1", "windows-1252"):
+        resp.encoding = resp.apparent_encoding or "utf-8"
     html = resp.text
 
-    text = trafilatura.extract(html) or ""
+    text = clean_text(trafilatura.extract(html) or "")
     soup = BeautifulSoup(html, "html.parser")
 
     def meta(prop):
