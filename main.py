@@ -517,16 +517,52 @@ def clean_text(raw: str) -> str:
 
 # ── Scraper ────────────────────────────────────────────────────────────────────
 
+def _fix_encoding(resp: requests.Response) -> str:
+    """
+    Corrige el encoding de la respuesta HTTP.
+    Muchos sitios argentinos declaran un encoding pero sirven otro.
+    Estrategia: probar UTF-8 strict, si falla usar latin-1 (siempre funciona).
+    No usar apparent_encoding: suele detectar codepages incorrectos (ej. cp1258).
+    """
+    raw = resp.content
+
+    # Intentar UTF-8 estricto primero (el encoding más común en la web moderna)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    # Fallback: latin-1 siempre funciona (mapeo 1:1 de bytes a chars)
+    # Cubre sitios argentinos que sirven ISO-8859-1/Windows-1252
+    return raw.decode("latin-1")
+
+
+def _extract_jsonld(soup: BeautifulSoup) -> dict | None:
+    """Extrae datos del artículo desde JSON-LD (schema.org), si existe."""
+    import json
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, list):
+                data = next((d for d in data if d.get("@type") in ("NewsArticle", "Article")), None)
+            if data and data.get("@type") in ("NewsArticle", "Article") and data.get("articleBody"):
+                body = data["articleBody"].replace("\xa0", " ").strip()
+                return {
+                    "title": data.get("headline", ""),
+                    "text": body,
+                    "author": data.get("author", {}).get("name", "") if isinstance(data.get("author"), dict) else "",
+                    "image_url": data.get("image", ""),
+                }
+        except (json.JSONDecodeError, StopIteration):
+            continue
+    return None
+
+
 def scrape(url: str) -> dict:
     resp = requests.get(url, headers=HEADERS_BROWSER, timeout=15)
     resp.raise_for_status()
 
-    # Corregir encoding: muchos sitios declaran latin-1 pero sirven UTF-8
-    if resp.encoding and resp.encoding.lower() in ("iso-8859-1", "latin-1", "windows-1252"):
-        resp.encoding = resp.apparent_encoding or "utf-8"
-    html = resp.text
-
-    text = clean_text(trafilatura.extract(html) or "")
+    html = _fix_encoding(resp)
     soup = BeautifulSoup(html, "html.parser")
 
     def meta(prop):
@@ -540,7 +576,19 @@ def scrape(url: str) -> dict:
         or "Sin título"
     )
     image_url = meta("og:image")
-    excerpt   = meta("og:description") or (text[:200] + "..." if text else "")
+    excerpt   = meta("og:description")
+
+    # 1) Intentar JSON-LD primero (más confiable, sin problemas de encoding)
+    ld = _extract_jsonld(soup)
+    if ld and len(ld["text"]) > 100:
+        text = clean_text(ld["text"])
+        title = ld["title"] or title
+        image_url = ld["image_url"] or image_url
+    else:
+        # 2) Fallback a trafilatura
+        text = clean_text(trafilatura.extract(html) or "")
+
+    excerpt = excerpt or (text[:200] + "..." if text else "")
 
     return {
         "title":      title.strip(),
@@ -737,9 +785,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         data = await asyncio.to_thread(scrape, text_in)
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "?"
+        logger.error(f"scrape HTTP {code}: {e}")
+        await msg.edit_text(f"El sitio devolvió error {code}. Puede estar bloqueando bots.")
+        return
+    except requests.exceptions.Timeout:
+        logger.error(f"scrape timeout: {text_in}")
+        await msg.edit_text("Timeout: el sitio tardó demasiado en responder.")
+        return
     except Exception as e:
-        logger.error(f"scrape: {e}")
-        await msg.edit_text("No pude leer la nota. El link funciona?")
+        logger.error(f"scrape: {type(e).__name__}: {e}")
+        await msg.edit_text(f"No pude leer la nota: {type(e).__name__}")
         return
 
     context.user_data["article"] = data
