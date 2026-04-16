@@ -33,6 +33,8 @@ TWITTER_API_SECRET = os.environ.get("TW_SECRET", "") or os.environ.get("TWITTER_
 TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_ACCESS_TOKEN", "")
 TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER_ACCESS_SECRET", "")
 
+TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@EmpresarialARG")
+
 HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -549,6 +551,33 @@ def scrape(url: str) -> dict:
     }
 
 
+# ── Canal de Telegram ─────────────────────────────────────────────────────────
+
+async def publish_to_channel(bot, data: dict, wp_url: str):
+    """Publica la nota en el canal de Telegram con imagen, título y link."""
+    s_title = seo_title(data["title"])
+    text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({wp_url})"
+    try:
+        if data.get("image_url"):
+            await bot.send_photo(
+                chat_id=TELEGRAM_CHANNEL,
+                photo=data["image_url"],
+                caption=text,
+                parse_mode="Markdown",
+            )
+        else:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHANNEL,
+                text=text,
+                parse_mode="Markdown",
+                disable_web_page_preview=False,
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Canal TG: {e}")
+        return False
+
+
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -568,16 +597,24 @@ CAT_NAMES = {
     102: "Provincias", 92: "Servicios", 93: "Sindicatos",
 }
 
-PREVIEW_KB = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("Publicar", callback_data="pub"),
-        InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
-    ],
-    [
-        InlineKeyboardButton("Cambiar titulo", callback_data="change_title"),
-        InlineKeyboardButton("Cancelar", callback_data="cancel"),
-    ],
-])
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True) -> InlineKeyboardMarkup:
+    """Teclado de previsualización con toggles ON/OFF para Twitter y Canal Telegram."""
+    tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
+    tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
+            InlineKeyboardButton(tg_label, callback_data="toggle_tg"),
+        ],
+        [
+            InlineKeyboardButton("Publicar", callback_data="pub"),
+            InlineKeyboardButton("Publicar destacado", callback_data="pub_dest"),
+        ],
+        [
+            InlineKeyboardButton("Cambiar titulo", callback_data="change_title"),
+            InlineKeyboardButton("Cancelar", callback_data="cancel"),
+        ],
+    ])
 
 
 def build_preview(data: dict) -> str:
@@ -679,8 +716,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["title"] = text_in          # actualizar título
         context.user_data["article"] = data
         preview = build_preview(data)
+        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True))
         await update.message.reply_text(
-            preview, parse_mode="Markdown", reply_markup=PREVIEW_KB
+            preview, parse_mode="Markdown", reply_markup=kb
         )
         return
 
@@ -699,7 +737,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["article"] = data
-    await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=PREVIEW_KB)
+    context.user_data.setdefault("tw_on", True)
+    context.user_data.setdefault("tg_on", True)
+    kb = build_preview_kb(context.user_data["tw_on"], context.user_data["tg_on"])
+    await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -717,6 +758,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Escribi el nuevo titulo para la nota\n"
             "(solo escribilo como mensaje normal):"
         )
+        return
+
+    # ── Toggles Twitter / Canal TG ──
+    if query.data == "toggle_tw":
+        context.user_data["tw_on"] = not context.user_data.get("tw_on", True)
+        kb = build_preview_kb(context.user_data["tw_on"], context.user_data.get("tg_on", True))
+        await query.edit_message_reply_markup(reply_markup=kb)
+        return
+
+    if query.data == "toggle_tg":
+        context.user_data["tg_on"] = not context.user_data.get("tg_on", True)
+        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data["tg_on"])
+        await query.edit_message_reply_markup(reply_markup=kb)
         return
 
     data = context.user_data.get("article")
@@ -781,22 +835,37 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["published"] = {"url": post_url, "data": data}
         context.user_data.pop("custom_hashtags", None)  # limpiar HT previos
         suffix = " (Destacados)" if destacado else ""
-        tweet_preview = build_tweet(data, post_url)
-        kb_tweet = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Twittear", callback_data="tweet"),
-                InlineKeyboardButton("No twittear", callback_data="no_tweet"),
-            ],
-            [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
-        ])
-        await query.edit_message_text(
-            f"Publicado en WordPress{suffix}!\n\n"
-            f"{post_url}\n\n"
-            f"— Vista previa del tweet —\n"
-            f"`{tweet_preview}`",
-            parse_mode="Markdown",
-            reply_markup=kb_tweet,
-        )
+
+        tw_on = context.user_data.get("tw_on", True)
+        tg_on = context.user_data.get("tg_on", True)
+
+        results = [f"✅ Publicado en WordPress{suffix}!\n{post_url}"]
+
+        # Canal de Telegram
+        if tg_on:
+            tg_ok = await publish_to_channel(context.bot, data, post_url)
+            results.append("✅ Publicado en canal @EmpresarialARG" if tg_ok
+                           else "❌ Error al publicar en canal TG")
+
+        # Twitter
+        if tw_on:
+            tweet_preview = build_tweet(data, post_url)
+            kb_tweet = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Twittear", callback_data="tweet"),
+                    InlineKeyboardButton("No twittear", callback_data="no_tweet"),
+                ],
+                [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
+            ])
+            await query.edit_message_text(
+                "\n".join(results) + "\n\n"
+                f"— Vista previa del tweet —\n"
+                f"`{tweet_preview}`",
+                parse_mode="Markdown",
+                reply_markup=kb_tweet,
+            )
+        else:
+            await query.edit_message_text("\n".join(results), parse_mode="Markdown")
     else:
         await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
 
