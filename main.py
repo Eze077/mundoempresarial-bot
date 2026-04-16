@@ -387,18 +387,20 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
 
 # ── Twitter / X ───────────────────────────────────────────────────────────────
 
-def build_tweet(data: dict, wp_url: str) -> str:
+def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
     """
     Arma el texto del tweet:
     - Título (hasta 200 chars para dejar espacio al URL y hashtags)
     - URL del post en WordPress (Twitter lo acorta a ~23 chars)
-    - Hasta 4 hashtags derivados del título + #Pymes fijo
+    - Hasta 4 hashtags derivados del título + #Pymes fijo (o hashtags_override)
     """
     title = seo_title(data["title"])
 
-    # Hashtags: tags del título + siempre #Pymes
-    raw_tags = extract_tags(data["title"])[:3]
-    hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+    if hashtags_override is not None:
+        hashtags = hashtags_override
+    else:
+        raw_tags = extract_tags(data["title"])[:3]
+        hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
 
     tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
 
@@ -411,10 +413,10 @@ def build_tweet(data: dict, wp_url: str) -> str:
     return tweet
 
 
-def post_tweet(data: dict, wp_url: str) -> str | None:
+def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | None:
     """Publica en Twitter/X via API v2 con OAuth 1.0a. Devuelve URL del tweet o None."""
     try:
-        tweet_text = build_tweet(data, wp_url)
+        tweet_text = build_tweet(data, wp_url, hashtags_override=hashtags_override)
         auth = OAuth1(
             TWITTER_API_KEY,
             TWITTER_API_SECRET,
@@ -641,6 +643,32 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_in = update.message.text.strip()
 
+    # ── Si el bot espera hashtags nuevos ──
+    if context.user_data.get("waiting_for_hashtags"):
+        context.user_data["waiting_for_hashtags"] = False
+        stored = context.user_data.get("published")
+        if not stored:
+            await update.message.reply_text("No hay nota activa.")
+            return
+        # Normalizar: agregar # si no tienen
+        words = text_in.split()
+        hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        context.user_data["custom_hashtags"] = hashtags
+        tweet_preview = build_tweet(stored["data"], stored["url"], hashtags_override=hashtags)
+        kb_tweet = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Twittear", callback_data="tweet"),
+                InlineKeyboardButton("No twittear", callback_data="no_tweet"),
+            ],
+            [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
+        ])
+        await update.message.reply_text(
+            f"Vista previa actualizada:\n\n`{tweet_preview}`",
+            parse_mode="Markdown",
+            reply_markup=kb_tweet,
+        )
+        return
+
     # ── Si el bot espera un nuevo título, procesar como título ──
     if context.user_data.get("waiting_for_title"):
         context.user_data["waiting_for_title"] = False
@@ -696,6 +724,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error: no hay nota pendiente.")
         return
 
+    if query.data == "change_ht":
+        stored = context.user_data.get("published")
+        current_ht = context.user_data.get("custom_hashtags")
+        if not current_ht and stored:
+            raw_tags = extract_tags(stored["data"]["title"])[:3]
+            current_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        context.user_data["waiting_for_hashtags"] = True
+        await query.edit_message_text(
+            f"Hashtags actuales: {current_ht}\n\n"
+            "Escribí los nuevos hashtags (con o sin #, separados por espacios):"
+        )
+        return
+
     if query.data == "tweet":
         # Twittear la nota ya publicada
         stored = context.user_data.get("published")
@@ -703,7 +744,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No encontre la nota publicada.")
             return
         await query.edit_message_text("Publicando en Twitter/X...")
-        tweet_url = await asyncio.to_thread(post_tweet, stored["data"], stored["url"])
+        custom_ht = context.user_data.get("custom_hashtags")
+        tweet_url = await asyncio.to_thread(post_tweet, stored["data"], stored["url"], custom_ht)
         if tweet_url:
             await query.edit_message_text(
                 f"Publicado en WordPress y en Twitter/X!\n\n"
@@ -737,12 +779,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if post_url:
         # Guardar para el paso de Twitter
         context.user_data["published"] = {"url": post_url, "data": data}
+        context.user_data.pop("custom_hashtags", None)  # limpiar HT previos
         suffix = " (Destacados)" if destacado else ""
         tweet_preview = build_tweet(data, post_url)
-        kb_tweet = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Twittear", callback_data="tweet"),
-            InlineKeyboardButton("No twittear", callback_data="no_tweet"),
-        ]])
+        kb_tweet = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Twittear", callback_data="tweet"),
+                InlineKeyboardButton("No twittear", callback_data="no_tweet"),
+            ],
+            [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
+        ])
         await query.edit_message_text(
             f"Publicado en WordPress{suffix}!\n\n"
             f"{post_url}\n\n"
