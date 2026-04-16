@@ -402,7 +402,9 @@ def scrape(url: str) -> dict:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hola! Mandame el link de una nota y la publico en mundoempresarial.ar"
+        "Hola! Comandos disponibles:\n\n"
+        "Pega un link → analiza y publica la nota\n"
+        "/borrar <URL o ID> → manda una nota a la papelera"
     )
 
 
@@ -494,12 +496,104 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
 
 
+# ── Borrar nota ───────────────────────────────────────────────────────────────
+
+def find_post(query: str) -> dict | None:
+    """
+    Busca un post en WordPress por ID numérico o por URL/slug.
+    Devuelve dict con 'id' y 'title', o None si no lo encuentra.
+    """
+    h = wp_auth()
+
+    # Si es un número, buscar por ID directamente
+    if query.strip().isdigit():
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}", headers=h, timeout=10)
+        if r.status_code == 200:
+            p = r.json()
+            return {"id": p["id"], "title": p["title"]["rendered"], "link": p["link"]}
+        return None
+
+    # Si es una URL, extraer el slug (último segmento no vacío)
+    clean = query.strip().rstrip("/")
+    slug = clean.split("/")[-1]
+
+    r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1", headers=h, timeout=10)
+    if r.status_code == 200 and r.json():
+        p = r.json()[0]
+        return {"id": p["id"], "title": p["title"]["rendered"], "link": p["link"]}
+    return None
+
+
+def trash_post(post_id: int) -> bool:
+    """Mueve el post a la papelera de WordPress. Devuelve True si ok."""
+    h = {**wp_auth(), "Content-Type": "application/json"}
+    r = requests.delete(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}", headers=h, timeout=15)
+    return r.status_code in (200, 201)
+
+
+async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Uso: /borrar <URL o ID de la nota>"""
+    args = " ".join(context.args).strip()
+    if not args:
+        await update.message.reply_text(
+            "Uso: /borrar <URL o ID>\n"
+            "Ejemplo: /borrar https://mundoempresarial.ar/mi-nota/\n"
+            "O: /borrar 123"
+        )
+        return
+
+    msg = await update.message.reply_text("Buscando nota...")
+
+    post = await asyncio.to_thread(find_post, args)
+    if not post:
+        await msg.edit_text("No encontre la nota. Verifica la URL o el ID.")
+        return
+
+    context.user_data["delete_post"] = post
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Confirmar borrado", callback_data="del_confirm"),
+        InlineKeyboardButton("Cancelar", callback_data="del_cancel"),
+    ]])
+    await msg.edit_text(
+        f"Estas por mandar a la papelera:\n\n*{post['title']}*\n\nID: {post['id']}",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+
+
+async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "del_cancel":
+        await query.edit_message_text("Cancelado, la nota sigue publicada.")
+        return
+
+    post = context.user_data.get("delete_post")
+    if not post:
+        await query.edit_message_text("Error: no hay nota pendiente de borrar.")
+        return
+
+    ok = await asyncio.to_thread(trash_post, post["id"])
+    if ok:
+        await query.edit_message_text(
+            f"Nota enviada a la papelera.\n\n_{post['title']}_\n\n"
+            f"Podes recuperarla desde el panel de WordPress si fue un error.",
+            parse_mode="Markdown",
+        )
+    else:
+        await query.edit_message_text("Error al borrar. Revisa los logs en Railway.")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_"))
     app.add_handler(CallbackQueryHandler(handle_button))
     logger.info("Bot iniciado y esperando links...")
     app.run_polling(drop_pending_updates=True)
