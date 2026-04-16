@@ -5,7 +5,7 @@ import asyncio
 import base64
 import unicodedata
 import requests
-from requests_oauthlib import OAuth1Session
+from requests_oauthlib import OAuth1
 from bs4 import BeautifulSoup
 import trafilatura
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -415,20 +415,21 @@ def post_tweet(data: dict, wp_url: str) -> str | None:
     """Publica en Twitter/X via API v2 con OAuth 1.0a. Devuelve URL del tweet o None."""
     try:
         tweet_text = build_tweet(data, wp_url)
-        oauth = OAuth1Session(
+        auth = OAuth1(
             TWITTER_API_KEY,
-            client_secret=TWITTER_API_SECRET,
-            resource_owner_key=TWITTER_TOKEN,
-            resource_owner_secret=TWITTER_SECRET,
+            TWITTER_API_SECRET,
+            TWITTER_TOKEN,
+            TWITTER_SECRET,
         )
-        r = oauth.post(
+        r = requests.post(
             "https://api.twitter.com/2/tweets",
             json={"text": tweet_text},
+            auth=auth,
         )
         if r.status_code == 201:
             tweet_id = r.json()["data"]["id"]
             return f"https://twitter.com/i/web/status/{tweet_id}"
-        logger.error(f"Twitter {r.status_code}: {r.text[:300]}")
+        logger.error(f"Twitter {r.status_code}: {r.text[:400]}")
         return None
     except Exception as e:
         logger.error(f"Twitter error: {e}")
