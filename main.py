@@ -5,7 +5,7 @@ import asyncio
 import base64
 import unicodedata
 import requests
-import tweepy
+from requests_oauthlib import OAuth1Session
 from bs4 import BeautifulSoup
 import trafilatura
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -412,18 +412,24 @@ def build_tweet(data: dict, wp_url: str) -> str:
 
 
 def post_tweet(data: dict, wp_url: str) -> str | None:
-    """Publica en Twitter/X. Devuelve la URL del tweet o None si falla."""
+    """Publica en Twitter/X via API v2 con OAuth 1.0a. Devuelve URL del tweet o None."""
     try:
-        client = tweepy.Client(
-            consumer_key=TWITTER_API_KEY,
-            consumer_secret=TWITTER_API_SECRET,
-            access_token=TWITTER_TOKEN,
-            access_token_secret=TWITTER_SECRET,
-        )
         tweet_text = build_tweet(data, wp_url)
-        response = client.create_tweet(text=tweet_text)
-        tweet_id = response.data["id"]
-        return f"https://twitter.com/i/web/status/{tweet_id}"
+        oauth = OAuth1Session(
+            TWITTER_API_KEY,
+            client_secret=TWITTER_API_SECRET,
+            resource_owner_key=TWITTER_TOKEN,
+            resource_owner_secret=TWITTER_SECRET,
+        )
+        r = oauth.post(
+            "https://api.twitter.com/2/tweets",
+            json={"text": tweet_text},
+        )
+        if r.status_code == 201:
+            tweet_id = r.json()["data"]["id"]
+            return f"https://twitter.com/i/web/status/{tweet_id}"
+        logger.error(f"Twitter {r.status_code}: {r.text[:300]}")
+        return None
     except Exception as e:
         logger.error(f"Twitter error: {e}")
         return None
