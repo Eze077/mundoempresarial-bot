@@ -47,7 +47,7 @@ HEADERS_BROWSER = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.google.com/",
     "DNT": "1",
     "Connection": "keep-alive",
@@ -1018,7 +1018,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Si no se extrajo texto
-    if not data.get("text") or len(data["text"]) < 50:
+    if not data.get("text") or len(data["text"]) < 200:
         stat_error()
         await msg.edit_text(
             "No pude extraer el texto de la nota. "
