@@ -1,9 +1,11 @@
 import os
 import re
+import json
 import logging
 import asyncio
 import base64
 import unicodedata
+from datetime import datetime, time as dtime
 import requests
 from requests_oauthlib import OAuth1
 from bs4 import BeautifulSoup
@@ -34,6 +36,8 @@ TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_A
 TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER_ACCESS_SECRET", "")
 
 TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@EmpresarialARG")
+# Chat ID del operador para reportes diarios (se detecta del primer mensaje)
+ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
 HEADERS_BROWSER = {
     "User-Agent": (
@@ -66,6 +70,8 @@ STOP_WORDS = {
     "han", "hay", "no", "si", "ya", "le", "lo", "les", "me", "mi", "sus",
     "nos", "ante", "bajo", "hasta", "sobre", "tras", "entre", "sin", "sus",
     "también", "cuando", "donde", "quien", "cuyo", "aunque", "porque",
+    "puede", "desde", "cada", "todo", "toda", "todos", "todas", "muy",
+    "cómo", "qué", "será", "sido", "están", "están",
 }
 
 # ID de la categoría Destacados
@@ -122,29 +128,78 @@ CATEGORY_KEYWORDS = {
 }
 
 def detect_categories(title: str, text: str, excerpt: str) -> list:
-    """
-    Detecta hasta 3 categorías relevantes comparando keywords del contenido
-    con el mapa CATEGORY_KEYWORDS. El título tiene triple peso.
-    Devuelve lista de IDs ordenada por relevancia.
-    """
     corpus = (title + " " + title + " " + title + " " + excerpt + " " + (text[:600] or "")).lower()
     scores = {}
     for cat_id, kws in CATEGORY_KEYWORDS.items():
         score = sum(corpus.count(kw) for kw in kws)
         if score > 0:
             scores[cat_id] = score
-
     if not scores:
-        return [98]  # fallback: Nacional
-
+        return [98]
     ranked = sorted(scores, key=scores.get, reverse=True)
     return ranked[:3]
+
+
+# ── Estadísticas diarias ─────────────────────────────────────────────────────
+
+_daily_stats = {
+    "published": 0,
+    "cancelled": 0,
+    "errors": 0,
+    "sites": {},       # dominio → cantidad
+    "titles": [],      # títulos publicados
+    "date": datetime.now().strftime("%Y-%m-%d"),
+}
+
+
+def _reset_stats_if_new_day():
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _daily_stats["date"] != today:
+        _daily_stats["published"] = 0
+        _daily_stats["cancelled"] = 0
+        _daily_stats["errors"] = 0
+        _daily_stats["sites"] = {}
+        _daily_stats["titles"] = []
+        _daily_stats["date"] = today
+
+
+def stat_publish(title: str, source_url: str):
+    _reset_stats_if_new_day()
+    _daily_stats["published"] += 1
+    _daily_stats["titles"].append(title[:60])
+    from urllib.parse import urlparse
+    domain = urlparse(source_url).netloc.replace("www.", "")
+    _daily_stats["sites"][domain] = _daily_stats["sites"].get(domain, 0) + 1
+
+
+def stat_cancel():
+    _reset_stats_if_new_day()
+    _daily_stats["cancelled"] += 1
+
+
+def stat_error():
+    _reset_stats_if_new_day()
+    _daily_stats["errors"] += 1
+
+
+def build_daily_report() -> str:
+    _reset_stats_if_new_day()
+    s = _daily_stats
+    sites_str = "\n".join(f"  • {d}: {c}" for d, c in sorted(s["sites"].items(), key=lambda x: -x[1])) or "  (ninguno)"
+    titles_str = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(s["titles"])) or "  (ninguna)"
+    return (
+        f"📊 *Reporte diario — {s['date']}*\n\n"
+        f"✅ Publicadas: *{s['published']}*\n"
+        f"❌ Canceladas: *{s['cancelled']}*\n"
+        f"⚠️ Errores scraping: *{s['errors']}*\n\n"
+        f"*Fuentes:*\n{sites_str}\n\n"
+        f"*Notas publicadas:*\n{titles_str}"
+    )
 
 
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
 
 def seo_title(title: str) -> str:
-    """Título de hasta 60 caracteres, corta en límite de palabra. Sin puntos suspensivos."""
     if len(title) <= 60:
         return title
     cut = title[:60]
@@ -153,10 +208,6 @@ def seo_title(title: str) -> str:
 
 
 def meta_description(excerpt: str, text: str, kw: str = "") -> str:
-    """
-    Meta descripción 120-155 chars.
-    Si el keyword no aparece, lo antepone para que Rank Math lo detecte.
-    """
     raw = (excerpt or text or "").strip()
     if kw and kw.lower() not in raw.lower():
         raw = f"{kw}: {raw}"
@@ -168,11 +219,6 @@ def meta_description(excerpt: str, text: str, kw: str = "") -> str:
 
 
 def focus_keyword(title: str) -> str:
-    """
-    Devuelve UNA sola palabra clave — la más significativa del título.
-    Una palabra corta aparece naturalmente en el contenido y obtiene
-    mayor densidad, lo que sube el score de Rank Math.
-    """
     for w in title.split():
         clean = w.strip('.,;:!?()[]"\'«»—:')
         if clean.lower() not in STOP_WORDS and len(clean) > 3:
@@ -181,7 +227,6 @@ def focus_keyword(title: str) -> str:
 
 
 def url_slug(title: str) -> str:
-    """Slug URL limpio, sin tildes, máximo 50 caracteres (recomendación Rank Math)."""
     slug = title.lower()
     slug = unicodedata.normalize("NFKD", slug)
     slug = "".join(c for c in slug if not unicodedata.combining(c))
@@ -192,7 +237,6 @@ def url_slug(title: str) -> str:
 
 
 def extract_tags(title: str) -> list:
-    """Genera hasta 6 etiquetas desde el título."""
     words = [
         w.strip('.,;:!?()[]"\'«»—').capitalize()
         for w in title.split()
@@ -202,18 +246,11 @@ def extract_tags(title: str) -> list:
 
 
 def pyme_summary(text: str, excerpt: str) -> str:
-    """
-    Genera un resumen de hasta 240 caracteres en lenguaje simple
-    para empresarios pyme, monotributistas y profesionales.
-    Usa el excerpt (og:description) como base por ser ya un resumen.
-    """
     raw = (excerpt or text or "").strip()
-    # Quedarse con la primera oración completa si cabe en 240 chars
     for sep in (".", "?", "!"):
         idx = raw.find(sep)
         if 60 < idx <= 237:
             return raw[: idx + 1]
-    # Si no, cortar en límite de palabra
     if len(raw) <= 240:
         return raw
     cut = raw[:237]
@@ -222,7 +259,6 @@ def pyme_summary(text: str, excerpt: str) -> str:
 
 
 def pyme_box(text: str, excerpt: str) -> str:
-    """Recuadro 'RESUMEN PARA PYMES' con estilo visual inline."""
     summary = pyme_summary(text, excerpt)
     return (
         '\n<div style="'
@@ -243,23 +279,131 @@ def pyme_box(text: str, excerpt: str) -> str:
     )
 
 
+def _generate_h2(paragraphs: list, kw: str) -> list:
+    """
+    Genera H2 descriptivos basados en el contenido real de los párrafos.
+    Analiza cada grupo de párrafos y extrae la idea principal para el H2.
+    El primer H2 siempre incluye el keyword.
+    """
+    labels = []
+
+    # Primer H2 con keyword (Rank Math: keyword en subheadings)
+    labels.append(f"{kw}: lo que hay que saber" if kw else "Lo que hay que saber")
+
+    # Para los siguientes H2, extraer la idea principal del párrafo siguiente
+    # Buscar declaraciones con comillas, datos numéricos, o temas clave
+    quote_re = re.compile(r'[""«](.{10,60}?)[""»]')
+    number_re = re.compile(r'\d+[.,]?\d*\s*%|\$\s*[\d.,]+')
+
+    for i, para in enumerate(paragraphs):
+        if i < 3:
+            continue  # los primeros párrafos ya están cubiertos por el primer H2
+        if i % 3 != 0:
+            continue  # solo generar H2 cada ~3 párrafos
+
+        # Intentar extraer una frase descriptiva
+        # 1) Si tiene una cita, usar la atribución
+        qm = quote_re.search(para)
+        if qm:
+            labels.append("Qué dicen los protagonistas")
+            continue
+
+        # 2) Si tiene datos numéricos
+        nm = number_re.search(para)
+        if nm:
+            labels.append("Los números clave")
+            continue
+
+        # 3) Buscar palabras temáticas en el párrafo
+        low = para.lower()
+        if any(w in low for w in ("futuro", "próximo", "vendrá", "proyección", "perspectiva")):
+            labels.append("Qué se espera")
+        elif any(w in low for w in ("impacto", "consecuencia", "efecto", "afecta", "repercus")):
+            labels.append("El impacto en la economía real")
+        elif any(w in low for w in ("pyme", "empresa", "negocio", "comercio", "industria")):
+            labels.append("Cómo afecta a las pymes")
+        elif any(w in low for w in ("gobierno", "oficial", "ministerio", "estado")):
+            labels.append("La posición oficial")
+        elif any(w in low for w in ("mercado", "bolsa", "dólar", "inversión", "bonos")):
+            labels.append("El panorama del mercado")
+        elif any(w in low for w in ("contexto", "historia", "antecedente", "origen")):
+            labels.append("Contexto y antecedentes")
+        else:
+            # Genérico temático: usar las primeras palabras significativas del párrafo
+            words = [w for w in para.split()[:8]
+                     if w.lower().strip('.,;:!?"\'') not in STOP_WORDS and len(w) > 3]
+            if words:
+                phrase = " ".join(words[:4])
+                if len(phrase) > 5:
+                    labels.append(phrase.capitalize().rstrip('.,;:'))
+
+    # Eliminar duplicados consecutivos
+    deduped = [labels[0]]
+    for lb in labels[1:]:
+        if lb != deduped[-1]:
+            deduped.append(lb)
+
+    return deduped
+
+
 def format_content(data: dict, kw: str = "") -> str:
     """
-    Estructura SEO del contenido:
-    - Párrafo de apertura en negrita (lead)
-    - Primer H2 incluye el keyword de enfoque (requerido por Rank Math)
-    - H2 cada 5 párrafos para facilitar la lectura
+    Estructura SEO del contenido según el Manual de Estilo:
+    - Lead en negrita (primer párrafo, con keyword)
+    - H2 descriptivos cada 3 párrafos (no genéricos)
+    - Primer H2 incluye keyword (Rank Math)
+    - Párrafos cortos (<= 120 palabras)
+    - Citas en párrafo propio
+    - Datos en negrita
     - Recuadro RESUMEN PARA PYMES
-    - Fuente al pie con rel=noopener
+    - Link externo dofollow a la fuente (Rank Math: external link)
     """
-    paragraphs = [p.strip() for p in data["text"].split("\n") if p.strip()]
+    raw_text = data["text"]
 
-    # H2 labels: el primero incluye el keyword para satisfacer Rank Math
-    first_h2 = f"{kw}: lo que necesitás saber" if kw else "Lo que necesitás saber"
-    h2_labels = [first_h2, "En profundidad", "Más detalles",
-                 "Contexto", "Análisis", "Datos clave"]
+    # Dividir texto largo en párrafos reales (max ~100 palabras cada uno)
+    raw_paragraphs = [p.strip() for p in raw_text.split("\n") if p.strip()]
+
+    # Si el texto viene como un bloque sin saltos, dividir por oraciones
+    if len(raw_paragraphs) <= 2 and len(raw_text) > 500:
+        sentences = re.split(r'(?<=[.!?])\s+', raw_text.strip())
+        raw_paragraphs = []
+        current = []
+        word_count = 0
+        for sent in sentences:
+            wc = len(sent.split())
+            if word_count + wc > 100 and current:
+                raw_paragraphs.append(" ".join(current))
+                current = [sent]
+                word_count = wc
+            else:
+                current.append(sent)
+                word_count += wc
+        if current:
+            raw_paragraphs.append(" ".join(current))
+
+    # Asegurar que ningún párrafo exceda 120 palabras (Rank Math: short paragraphs)
+    paragraphs = []
+    for p in raw_paragraphs:
+        words = p.split()
+        if len(words) > 120:
+            chunks = []
+            for i in range(0, len(words), 100):
+                chunk = " ".join(words[i:i+100])
+                # Buscar punto para cortar limpio
+                last_dot = chunk.rfind(". ")
+                if last_dot > len(chunk) * 0.5:
+                    chunks.append(chunk[:last_dot + 1])
+                    remaining = chunk[last_dot + 2:].strip()
+                    if remaining:
+                        chunks.append(remaining)
+                else:
+                    chunks.append(chunk)
+            paragraphs.extend(chunks)
+        else:
+            paragraphs.append(p)
 
     if not paragraphs:
+        first_h2 = f"{kw}: lo que hay que saber" if kw else "Lo que hay que saber"
         return (
             f"<h2>{first_h2}</h2>\n"
             f'<p>{data["excerpt"]}</p>\n'
@@ -268,22 +412,41 @@ def format_content(data: dict, kw: str = "") -> str:
             f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
         )
 
+    # Generar H2 descriptivos basados en el contenido
+    h2_labels = _generate_h2(paragraphs, kw)
+
+    # Resaltar cifras y datos numéricos en negrita
+    number_pattern = re.compile(
+        r'(\$\s*[\d.,]+(?:\s*(?:millones|billones|mil))?'
+        r'|\d+[.,]\d+\s*%'
+        r'|\d+\s*%'
+        r'|\d+[.,]\d+\s*(?:puntos|pb))'
+    )
+
     parts = []
     h2_index = 0
 
     for i, para in enumerate(paragraphs):
+        # Resaltar números/datos
+        para_html = number_pattern.sub(r'<strong>\1</strong>', para)
+
         if i == 0:
-            # Lead en negrita + primer H2 inmediatamente después
-            parts.append(f"<p><strong>{para}</strong></p>")
-            parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
-            h2_index += 1
-        else:
-            if i % 5 == 0 and h2_index < len(h2_labels):
+            # Lead en negrita
+            parts.append(f"<p><strong>{para_html}</strong></p>")
+            if h2_index < len(h2_labels):
                 parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
                 h2_index += 1
-            parts.append(f"<p>{para}</p>")
+        else:
+            # H2 cada 3 párrafos
+            if i % 3 == 0 and h2_index < len(h2_labels):
+                parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
+                h2_index += 1
+            parts.append(f"<p>{para_html}</p>")
 
+    # Recuadro Pymes
     parts.append(pyme_box(data["text"], data["excerpt"]))
+
+    # Fuente (link externo dofollow — Rank Math: 4+2 pts)
     parts.append(
         f'<p><em>Fuente: <a href="{data["source_url"]}" '
         f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
@@ -299,7 +462,6 @@ def wp_auth():
 
 
 def get_or_create_tags(names: list) -> list:
-    """Crea etiquetas en WordPress si no existen. Devuelve lista de IDs."""
     ids = []
     h = {**wp_auth(), "Content-Type": "application/json"}
     for name in names:
@@ -320,7 +482,6 @@ def get_or_create_tags(names: list) -> list:
 
 
 def upload_image(image_url: str, alt: str = "") -> int | None:
-    """Sube imagen a la galería de WordPress con alt text SEO. Devuelve ID o None."""
     try:
         img = requests.get(image_url, headers=HEADERS_BROWSER, timeout=15)
         img.raise_for_status()
@@ -349,22 +510,16 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
 
 
 def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> str | None:
-    """
-    Publica en WordPress con categorías auto-detectadas, etiquetas,
-    SEO completo y Rank Math. Si destacado=True agrega cat. Destacados.
-    """
     s_title  = data["title"] if data.get("title_edited") else seo_title(data["title"])
     s_kw     = focus_keyword(data["title"])
     s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug   = url_slug(data["title"])
     content  = format_content(data, kw=s_kw)
 
-    # Categorías auto-detectadas + opcional Destacados
     cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
     if destacado and CAT_DESTACADOS not in cat_ids:
         cat_ids = [CAT_DESTACADOS] + cat_ids
 
-    # Etiquetas: del título + primeras palabras clave del texto
     tag_names = extract_tags(data["title"])
     first_para = (data["text"].split("\n")[0] if data["text"] else "")
     tag_names += [
@@ -372,7 +527,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
         for w in first_para.split()
         if w.lower().strip('.,;:!?()[]"\'«»—') not in STOP_WORDS and len(w) > 4
     ]
-    tag_names = list(dict.fromkeys(tag_names))[:8]  # sin duplicados, máx 8
+    tag_names = list(dict.fromkeys(tag_names))[:8]
     tag_ids = get_or_create_tags(tag_names)
 
     payload = {
@@ -405,14 +560,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
 # ── Twitter / X ───────────────────────────────────────────────────────────────
 
 def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
-    """
-    Arma el texto del tweet:
-    - Título (hasta 200 chars para dejar espacio al URL y hashtags)
-    - URL del post en WordPress (Twitter lo acorta a ~23 chars)
-    - Hasta 4 hashtags derivados del título + #Pymes fijo (o hashtags_override)
-    """
     title = data["title"] if data.get("title_edited") else seo_title(data["title"])
-
     if hashtags_override is not None:
         hashtags = hashtags_override
     else:
@@ -420,31 +568,18 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
         hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
 
     tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
-
-    # Twitter tiene límite de 280 chars; si excede, acortar el título
     if len(tweet) > 280:
-        max_title = 280 - len(wp_url) - len(hashtags) - 6  # 6 = saltos de línea
+        max_title = 280 - len(wp_url) - len(hashtags) - 6
         title = title[:max_title].rsplit(" ", 1)[0]
         tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
-
     return tweet
 
 
 def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | None:
-    """Publica en Twitter/X via API v2 con OAuth 1.0a. Devuelve URL del tweet o None."""
     try:
         tweet_text = build_tweet(data, wp_url, hashtags_override=hashtags_override)
-        auth = OAuth1(
-            TWITTER_API_KEY,
-            TWITTER_API_SECRET,
-            TWITTER_TOKEN,
-            TWITTER_SECRET,
-        )
-        r = requests.post(
-            "https://api.twitter.com/2/tweets",
-            json={"text": tweet_text},
-            auth=auth,
-        )
+        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+        r = requests.post("https://api.twitter.com/2/tweets", json={"text": tweet_text}, auth=auth)
         if r.status_code == 201:
             tweet_id = r.json()["data"]["id"]
             return f"https://twitter.com/i/web/status/{tweet_id}"
@@ -457,52 +592,26 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
 
 # ── Limpieza de texto scrapeado ────────────────────────────────────────────────
 
-# Frases de ruido que trafilatura no siempre filtra
 NOISE_FRAGMENTS = [
-    "your browser doesn",
-    "html5 audio",
-    "html5 video",
-    "compartir esta noticia",
-    "compartir en",
-    "dejanos tu comentario",
-    "dejar un comentario",
-    "leé más notas",
-    "lee mas notas",
-    "leer más",
-    "más notas de",
-    "notas relacionadas",
-    "seguinos en",
-    "seguinos",
-    "suscribite",
-    "suscríbete",
-    "newsletter",
-    "publicidad",
-    "advertisement",
-    "también te puede interesar",
-    "te puede interesar",
-    "artículos relacionados",
-    "tags:",
-    "etiquetas:",
-    "compartir:",
-    "volver arriba",
-    "cargar más",
-    "ver más",
-    "todos los derechos reservados",
-    "términos y condiciones",
-    "política de privacidad",
-    "cookies",
-    "javascript",
+    "your browser doesn", "html5 audio", "html5 video",
+    "compartir esta noticia", "compartir en",
+    "dejanos tu comentario", "dejar un comentario",
+    "leé más notas", "lee mas notas", "leer más",
+    "más notas de", "notas relacionadas",
+    "seguinos en", "seguinos", "suscribite", "suscríbete",
+    "newsletter", "publicidad", "advertisement",
+    "también te puede interesar", "te puede interesar",
+    "artículos relacionados", "tags:", "etiquetas:", "compartir:",
+    "volver arriba", "cargar más", "ver más",
+    "todos los derechos reservados", "términos y condiciones",
+    "política de privacidad", "cookies", "javascript",
+    "whatsapp", "facebook", "twitter", "telegram",
+    "copiar enlace", "imprimir", "guardar",
+    "minutos de lectura", "min read",
 ]
 
 
 def clean_text(raw: str) -> str:
-    """
-    Elimina del texto scrapeado:
-    - Líneas con fragmentos de ruido conocidos (UI, share buttons, etc.)
-    - Mensajes de error de browser/HTML5
-    - Líneas muy cortas que no son oraciones
-    - Líneas con encoding roto (Ã, Â, etc.)
-    """
     if not raw:
         return ""
 
@@ -513,16 +622,13 @@ def clean_text(raw: str) -> str:
             continue
         low = s.lower()
 
-        # Saltar líneas con fragmentos de ruido
         if any(frag in low for frag in NOISE_FRAGMENTS):
             continue
 
-        # Saltar líneas con encoding roto (caracteres típicos de doble-encoding)
         if any(c in s for c in ("Ã", "Â", "â€", "Ã©", "Ã¡", "Ã³", "Ã±")):
             continue
 
-        # Saltar líneas muy cortas que no terminan como oración
-        if len(s) < 25 and not s[-1] in ".?!:":
+        if len(s) < 25 and s[-1] not in ".?!:":
             continue
 
         clean.append(s)
@@ -533,54 +639,113 @@ def clean_text(raw: str) -> str:
 # ── Scraper ────────────────────────────────────────────────────────────────────
 
 def _fix_encoding(resp: requests.Response) -> str:
-    """
-    Corrige el encoding de la respuesta HTTP.
-    Muchos sitios argentinos declaran un encoding pero sirven otro.
-    Estrategia: probar UTF-8 strict, si falla usar latin-1 (siempre funciona).
-    No usar apparent_encoding: suele detectar codepages incorrectos (ej. cp1258).
-    """
     raw = resp.content
-
-    # Intentar UTF-8 estricto primero (el encoding más común en la web moderna)
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
-
-    # Fallback: latin-1 siempre funciona (mapeo 1:1 de bytes a chars)
-    # Cubre sitios argentinos que sirven ISO-8859-1/Windows-1252
     return raw.decode("latin-1")
 
 
 def _extract_jsonld(soup: BeautifulSoup) -> dict | None:
     """Extrae datos del artículo desde JSON-LD (schema.org), si existe."""
-    import json
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "")
+            # Manejar @graph (usado por muchos sitios)
+            if isinstance(data, dict) and "@graph" in data:
+                data = data["@graph"]
             if isinstance(data, list):
-                data = next((d for d in data if d.get("@type") in ("NewsArticle", "Article")), None)
-            if data and data.get("@type") in ("NewsArticle", "Article") and data.get("articleBody"):
-                body = data["articleBody"].replace("\xa0", " ").strip()
+                data = next(
+                    (d for d in data if d.get("@type") in
+                     ("NewsArticle", "Article", "WebPage", "ReportageNewsArticle")),
+                    None
+                )
+            if not data:
+                continue
+            if data.get("@type") in ("NewsArticle", "Article", "WebPage", "ReportageNewsArticle"):
+                body = (data.get("articleBody") or "").replace("\xa0", " ").strip()
+                if not body:
+                    continue
+                # Imagen: puede ser string, dict, o lista
+                img = data.get("image", "")
+                if isinstance(img, dict):
+                    img = img.get("url", "")
+                elif isinstance(img, list):
+                    img = img[0] if img else ""
+                    if isinstance(img, dict):
+                        img = img.get("url", "")
+                # Author
+                author = data.get("author", "")
+                if isinstance(author, dict):
+                    author = author.get("name", "")
+                elif isinstance(author, list) and author:
+                    author = author[0].get("name", "") if isinstance(author[0], dict) else str(author[0])
+
                 return {
                     "title": data.get("headline", ""),
                     "text": body,
-                    "author": data.get("author", {}).get("name", "") if isinstance(data.get("author"), dict) else "",
-                    "image_url": data.get("image", ""),
+                    "author": author,
+                    "image_url": img,
                 }
         except (json.JSONDecodeError, StopIteration):
             continue
     return None
 
 
+def _detect_media(soup: BeautifulSoup, url: str) -> dict:
+    """Detecta si la nota tiene video o foto destacada embebida."""
+    media = {"has_video": False, "has_photo": False, "video_url": "", "photo_url": ""}
+
+    # Detectar videos embebidos
+    for tag in soup.find_all(["iframe", "video"]):
+        src = tag.get("src", "") or tag.get("data-src", "")
+        if any(v in src for v in ("youtube", "youtu.be", "vimeo", "dailymotion", "twitter.com/i/videos")):
+            media["has_video"] = True
+            media["video_url"] = src
+            break
+
+    # Detectar videos por meta tags
+    og_video = soup.find("meta", property="og:video")
+    if og_video and og_video.get("content"):
+        media["has_video"] = True
+        media["video_url"] = og_video["content"]
+
+    # og:type = video indica video
+    og_type = soup.find("meta", property="og:type")
+    if og_type and "video" in (og_type.get("content") or "").lower():
+        media["has_video"] = True
+
+    # La foto de portada siempre se captura via og:image
+    og_image = soup.find("meta", property="og:image")
+    if og_image and og_image.get("content"):
+        media["has_photo"] = True
+        media["photo_url"] = og_image["content"]
+
+    return media
+
+
 def scrape(url: str) -> dict:
-    # Usar Session para manejar cookies como un navegador real
     session = requests.Session()
     session.headers.update(HEADERS_BROWSER)
-    resp = session.get(url, timeout=15)
+    resp = session.get(url, timeout=20)
     resp.raise_for_status()
 
     html = _fix_encoding(resp)
+
+    # Detectar SPA (React/Vue/Angular) — contenido cargado por JS
+    if len(html) < 5000 and ('id="root"' in html or 'id="app"' in html or 'id="__next"' in html):
+        # Intentar con Google Cache como fallback para SPAs
+        from urllib.parse import quote
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url)}"
+        try:
+            cache_resp = session.get(cache_url, timeout=15)
+            if cache_resp.status_code == 200 and len(cache_resp.text) > 5000:
+                html = _fix_encoding(cache_resp)
+                logger.info(f"SPA detectado, usando Google Cache para {url}")
+        except Exception:
+            pass
+
     soup = BeautifulSoup(html, "html.parser")
 
     def meta(prop):
@@ -596,7 +761,10 @@ def scrape(url: str) -> dict:
     image_url = meta("og:image")
     excerpt   = meta("og:description")
 
-    # 1) Intentar JSON-LD primero (más confiable, sin problemas de encoding)
+    # Detectar media (video/foto)
+    media_info = _detect_media(soup, url)
+
+    # 1) Intentar JSON-LD primero
     ld = _extract_jsonld(soup)
     if ld and len(ld["text"]) > 100:
         text = clean_text(ld["text"])
@@ -606,6 +774,21 @@ def scrape(url: str) -> dict:
         # 2) Fallback a trafilatura
         text = clean_text(trafilatura.extract(html) or "")
 
+    # 3) Si trafilatura también falla, intentar selectores de noticias comunes
+    if not text or len(text) < 100:
+        article_selectors = [
+            "article", ".article-body", ".article-content", ".entry-content",
+            ".post-content", ".story-body", ".nota-body", '[itemprop="articleBody"]',
+            ".body-nota", ".article__body", "#article-body", ".cuerpo-nota",
+        ]
+        for sel in article_selectors:
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) > 200:
+                paras = [p.get_text(strip=True) for p in el.find_all("p") if len(p.get_text(strip=True)) > 20]
+                if paras:
+                    text = clean_text("\n".join(paras))
+                    break
+
     excerpt = excerpt or (text[:200] + "..." if text else "")
 
     return {
@@ -614,13 +797,13 @@ def scrape(url: str) -> dict:
         "excerpt":    excerpt,
         "image_url":  image_url,
         "source_url": url,
+        "media":      media_info,
     }
 
 
 # ── Canal de Telegram ─────────────────────────────────────────────────────────
 
 async def publish_to_channel(bot, data: dict, wp_url: str):
-    """Publica la nota en el canal de Telegram con imagen, título y link."""
     s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
     text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({wp_url})"
     try:
@@ -650,8 +833,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hola! Comandos disponibles:\n\n"
         "Pega un link → analiza y publica la nota\n"
-        "/borrar <URL o ID> → manda una nota a la papelera"
+        "/borrar <URL o ID> → manda una nota a la papelera\n"
+        "/stats → ver estadísticas del día"
     )
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra las estadísticas del día."""
+    await update.message.reply_text(build_daily_report(), parse_mode="Markdown")
 
 
 CAT_NAMES = {
@@ -664,7 +853,6 @@ CAT_NAMES = {
 }
 
 def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False) -> InlineKeyboardMarkup:
-    """Teclado de previsualización con toggles ON/OFF para Twitter, Canal TG, WhatsApp y Destacado."""
     tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
     wa_label = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
@@ -689,7 +877,6 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
 
 
 def build_preview(data: dict) -> str:
-    """Genera el texto de preview con los datos SEO calculados."""
     s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
     s_kw    = focus_keyword(data["title"])
     s_desc  = meta_description(data["excerpt"], data["text"], kw=s_kw)
@@ -698,6 +885,17 @@ def build_preview(data: dict) -> str:
     cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
     cats_str    = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
     tag_preview = " · ".join(extract_tags(data["title"])[:5])
+
+    # Indicar media detectada
+    media = data.get("media", {})
+    media_str = "No"
+    if media.get("has_video") and media.get("has_photo"):
+        media_str = "📸 Foto + 🎬 Video"
+    elif media.get("has_video"):
+        media_str = "🎬 Video"
+    elif media.get("has_photo"):
+        media_str = "📸 Foto"
+
     return (
         f"*{s_title}*\n\n"
         f"*Keyword:* {s_kw}\n"
@@ -705,20 +903,17 @@ def build_preview(data: dict) -> str:
         f"*Categorias:* {cats_str}\n"
         f"*Etiquetas:* {tag_preview}\n\n"
         f"_{s_desc}_\n\n"
-        f"Imagen: {'Si' if data['image_url'] else 'No'}  |  Palabras: ~{words}"
+        f"Imagen: {media_str}  |  Palabras: ~{words}"
     )
 
 
 async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Diagnostica credenciales de Twitter: muestra valores cargados y prueba la API."""
-
     def mask(s: str) -> str:
         if not s:
             return "(VACIO)"
         s = s.strip()
         return f"{s[:4]}...{s[-4:]} (len={len(s)})"
 
-    # Variables Twitter presentes en el entorno
     import os as _os
     tw_vars = [k for k in _os.environ if "TWITTER" in k or k.startswith("TW_")]
     all_vars_str = ", ".join(tw_vars) if tw_vars else "(ninguna con TWITTER ni TW_)"
@@ -736,10 +931,8 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def run_test():
         auth = OAuth1(
-            TWITTER_API_KEY.strip(),
-            TWITTER_API_SECRET.strip(),
-            TWITTER_TOKEN.strip(),
-            TWITTER_SECRET.strip(),
+            TWITTER_API_KEY.strip(), TWITTER_API_SECRET.strip(),
+            TWITTER_TOKEN.strip(), TWITTER_SECRET.strip(),
         )
         r = requests.get("https://api.twitter.com/2/users/me", auth=auth)
         return f"GET /users/me → {r.status_code}: {r.text[:200]}"
@@ -749,7 +942,12 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ADMIN_CHAT_ID
     text_in = update.message.text.strip()
+
+    # Guardar chat_id del operador para reportes
+    if not ADMIN_CHAT_ID:
+        ADMIN_CHAT_ID = str(update.message.chat_id)
 
     # ── Si el bot espera hashtags nuevos ──
     if context.user_data.get("waiting_for_hashtags"):
@@ -758,7 +956,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not stored:
             await update.message.reply_text("No hay nota activa.")
             return
-        # Normalizar: agregar # si no tienen
         words = text_in.split()
         hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
         context.user_data["custom_hashtags"] = hashtags
@@ -777,15 +974,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Si el bot espera un nuevo título, procesar como título ──
+    # ── Si el bot espera un nuevo título ──
     if context.user_data.get("waiting_for_title"):
         context.user_data["waiting_for_title"] = False
         data = context.user_data.get("article")
         if not data:
             await update.message.reply_text("No hay nota activa. Manda un link primero.")
             return
-        data["title"] = text_in          # actualizar título
-        data["title_edited"] = True       # no recortar título manual
+        data["title"] = text_in
+        data["title_edited"] = True
         context.user_data["article"] = data
         preview = build_preview(data)
         kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data.get("wa_on", False), context.user_data.get("dest_on", False))
@@ -806,15 +1003,27 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response is not None else "?"
         logger.error(f"scrape HTTP {code}: {e}")
+        stat_error()
         await msg.edit_text(f"El sitio devolvió error {code}. Puede estar bloqueando bots.")
         return
     except requests.exceptions.Timeout:
         logger.error(f"scrape timeout: {text_in}")
+        stat_error()
         await msg.edit_text("Timeout: el sitio tardó demasiado en responder.")
         return
     except Exception as e:
         logger.error(f"scrape: {type(e).__name__}: {e}")
+        stat_error()
         await msg.edit_text(f"No pude leer la nota: {type(e).__name__}")
+        return
+
+    # Si no se extrajo texto
+    if not data.get("text") or len(data["text"]) < 50:
+        stat_error()
+        await msg.edit_text(
+            "No pude extraer el texto de la nota. "
+            "Puede ser un sitio que carga contenido con JavaScript (SPA)."
+        )
         return
 
     context.user_data["article"] = data
@@ -822,16 +1031,50 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("tg_on", True)
     context.user_data.setdefault("wa_on", False)
     context.user_data.setdefault("dest_on", False)
+
+    # Mostrar preview
     kb = build_preview_kb(context.user_data["tw_on"], context.user_data["tg_on"], context.user_data["wa_on"], context.user_data["dest_on"])
     await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
+
+    # Si hay video o foto, preguntar si incorporarla
+    media = data.get("media", {})
+    if media.get("has_video"):
+        vid_url = media.get("video_url", "video detectado")
+        await update.message.reply_text(
+            f"🎬 La nota tiene un *video* embebido.\n`{vid_url[:100]}`\n\n"
+            "¿Querés incorporarlo a la publicación?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Sí, incluir video", callback_data="media_include_video"),
+                    InlineKeyboardButton("No", callback_data="media_skip"),
+                ]
+            ]),
+        )
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # ── Media buttons ──
+    if query.data == "media_include_video":
+        data = context.user_data.get("article")
+        if data and data.get("media", {}).get("video_url"):
+            vid_url = data["media"]["video_url"]
+            # Agregar video al texto como embed
+            data["text"] += f"\n\n[Video relacionado: {vid_url}]"
+            context.user_data["article"] = data
+        await query.edit_message_text("✅ Video incluido en la nota.")
+        return
+
+    if query.data == "media_skip":
+        await query.edit_message_text("OK, sin video.")
+        return
+
     if query.data == "cancel":
         context.user_data.pop("waiting_for_title", None)
+        stat_cancel()
         await query.edit_message_text("Cancelado.")
         return
 
@@ -843,7 +1086,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Toggles Twitter / Canal TG ──
+    # ── Toggles ──
     if query.data == "toggle_tw":
         context.user_data["tw_on"] = not context.user_data.get("tw_on", True)
         kb = build_preview_kb(context.user_data["tw_on"], context.user_data.get("tg_on", True), context.user_data.get("wa_on", False), context.user_data.get("dest_on", False))
@@ -887,7 +1130,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "tweet":
-        # Twittear la nota ya publicada
         stored = context.user_data.get("published")
         if not stored:
             await query.edit_message_text("No encontre la nota publicada.")
@@ -898,8 +1140,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tweet_url:
             await query.edit_message_text(
                 f"Publicado en WordPress y en Twitter/X!\n\n"
-                f"WP: {stored['url']}\n"
-                f"Tweet: {tweet_url}"
+                f"WP: {stored['url']}\nTweet: {tweet_url}"
             )
         else:
             await query.edit_message_text(
@@ -913,6 +1154,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Publicado!\n\n{url}")
         return
 
+    # ── Publicar ──
     destacado = context.user_data.get("dest_on", False)
     label = "destacada " if destacado else ""
     await query.edit_message_text(f"Publicando nota {label}...")
@@ -926,9 +1168,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post_url = await asyncio.to_thread(publish_post, data, image_id, destacado)
 
     if post_url:
-        # Guardar para el paso de Twitter
+        # Estadísticas
+        stat_publish(data["title"], data.get("source_url", ""))
+
         context.user_data["published"] = {"url": post_url, "data": data}
-        context.user_data.pop("custom_hashtags", None)  # limpiar HT previos
+        context.user_data.pop("custom_hashtags", None)
         suffix = " (Destacados)" if destacado else ""
 
         tw_on = context.user_data.get("tw_on", True)
@@ -937,13 +1181,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         results = [f"✅ Publicado en WordPress{suffix}!\n{post_url}"]
 
-        # Canal de Telegram
         if tg_on:
             tg_ok = await publish_to_channel(context.bot, data, post_url)
             results.append("✅ Publicado en canal @EmpresarialARG" if tg_ok
                            else "❌ Error al publicar en canal TG")
 
-        # Twitter
         if tw_on:
             tweet_preview = build_tweet(data, post_url)
             kb_tweet = InlineKeyboardMarkup([
@@ -963,7 +1205,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("\n".join(results), parse_mode="Markdown")
 
-        # WhatsApp: mensaje para copiar y pegar
         if wa_on:
             s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
             wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {post_url}"
@@ -977,13 +1218,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Borrar nota ───────────────────────────────────────────────────────────────
 
 def find_post(query: str) -> dict | None:
-    """
-    Busca un post en WordPress por ID numérico o por URL/slug.
-    Devuelve dict con 'id' y 'title', o None si no lo encuentra.
-    """
     h = wp_auth()
-
-    # Si es un número, buscar por ID directamente
     if query.strip().isdigit():
         r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}", headers=h, timeout=10)
         if r.status_code == 200:
@@ -991,10 +1226,8 @@ def find_post(query: str) -> dict | None:
             return {"id": p["id"], "title": p["title"]["rendered"], "link": p["link"]}
         return None
 
-    # Si es una URL, extraer el slug (último segmento no vacío)
     clean = query.strip().rstrip("/")
     slug = clean.split("/")[-1]
-
     r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1", headers=h, timeout=10)
     if r.status_code == 200 and r.json():
         p = r.json()[0]
@@ -1003,32 +1236,27 @@ def find_post(query: str) -> dict | None:
 
 
 def trash_post(post_id: int) -> bool:
-    """Mueve el post a la papelera de WordPress. Devuelve True si ok."""
     h = {**wp_auth(), "Content-Type": "application/json"}
     r = requests.delete(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}", headers=h, timeout=15)
     return r.status_code in (200, 201)
 
 
 async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Uso: /borrar <URL o ID de la nota>"""
     args = " ".join(context.args).strip()
     if not args:
         await update.message.reply_text(
             "Uso: /borrar <URL o ID>\n"
-            "Ejemplo: /borrar https://mundoempresarial.ar/mi-nota/\n"
-            "O: /borrar 123"
+            "Ejemplo: /borrar https://mundoempresarial.ar/mi-nota/\nO: /borrar 123"
         )
         return
 
     msg = await update.message.reply_text("Buscando nota...")
-
     post = await asyncio.to_thread(find_post, args)
     if not post:
         await msg.edit_text("No encontre la nota. Verifica la URL o el ID.")
         return
 
     context.user_data["delete_post"] = post
-
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Confirmar borrado", callback_data="del_confirm"),
         InlineKeyboardButton("Cancelar", callback_data="del_cancel"),
@@ -1064,6 +1292,26 @@ async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Error al borrar. Revisa los logs en Railway.")
 
 
+# ── Reporte diario programado ────────────────────────────────────────────────
+
+async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
+    """Envía el reporte diario a las 23:00 ARG."""
+    chat_id = ADMIN_CHAT_ID
+    if not chat_id:
+        logger.warning("No hay ADMIN_CHAT_ID para enviar reporte diario")
+        return
+    try:
+        report = build_daily_report()
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text=report,
+            parse_mode="Markdown",
+        )
+        logger.info("Reporte diario enviado")
+    except Exception as e:
+        logger.error(f"Error enviando reporte diario: {e}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1071,9 +1319,22 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_"))
     app.add_handler(CallbackQueryHandler(handle_button))
+
+    # Programar reporte diario a las 23:00 Argentina (UTC-3)
+    from datetime import timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    job_queue = app.job_queue
+    job_queue.run_daily(
+        send_daily_report,
+        time=dtime(hour=23, minute=0, tzinfo=tz_arg),
+        name="daily_report",
+    )
+    logger.info("Reporte diario programado para las 23:00 ARG")
+
     logger.info("Bot iniciado y esperando links...")
     app.run_polling(drop_pending_updates=True)
 
