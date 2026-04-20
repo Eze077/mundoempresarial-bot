@@ -876,6 +876,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hola! Comandos disponibles:\n\n"
         "Pega un link → analiza y publica la nota\n"
+        "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
         "/stats → ver estadísticas del día"
     )
@@ -1033,6 +1034,51 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             preview, parse_mode="Markdown", reply_markup=kb
         )
         return
+
+    # ── Si el bot espera nuevo título para edición de nota existente ──
+    if context.user_data.get("waiting_for_edit_title"):
+        context.user_data["waiting_for_edit_title"] = False
+        post = context.user_data.get("edit_post")
+        if not post:
+            await update.message.reply_text("No hay nota en edición.")
+            return
+        new_title = text_in
+        ok = await asyncio.to_thread(
+            update_post, post["id"],
+            {"title": new_title, "slug": url_slug(new_title)}
+        )
+        if ok:
+            post["title"] = new_title
+            context.user_data["edit_post"] = post
+            await update.message.reply_text(
+                f"✅ Título actualizado.\n\n*{new_title}*\n\n{post['link']}",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("❌ Error al actualizar el título.")
+        return
+
+    # ── Si el bot espera URL de foto para edición ──
+    if context.user_data.get("waiting_for_edit_photo"):
+        # Si es URL (http/https), usarla; si no, pedir imagen
+        if text_in.startswith(("http://", "https://")):
+            context.user_data["waiting_for_edit_photo"] = False
+            post = context.user_data.get("edit_post")
+            if not post:
+                await update.message.reply_text("No hay nota en edición.")
+                return
+            msg = await update.message.reply_text("Descargando y subiendo foto...")
+            ok = await _handle_edit_photo_url(text_in, post)
+            if ok:
+                await msg.edit_text(f"✅ Foto actualizada.\n\n{post['link']}")
+            else:
+                await msg.edit_text("❌ Error al actualizar la foto.")
+            return
+        else:
+            await update.message.reply_text(
+                "Mandame la foto como imagen en Telegram, o una URL que empiece con http."
+            )
+            return
 
     # ── Flujo normal: procesar URL ──
     if not text_in.startswith(("http://", "https://")):
@@ -1266,7 +1312,13 @@ def find_post(query: str) -> dict | None:
         r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}", headers=h, timeout=10)
         if r.status_code == 200:
             p = r.json()
-            return {"id": p["id"], "title": p["title"]["rendered"], "link": p["link"]}
+            return {
+                "id": p["id"],
+                "title": p["title"]["rendered"],
+                "link": p["link"],
+                "categories": p.get("categories", []),
+                "featured_media": p.get("featured_media", 0),
+            }
         return None
 
     clean = query.strip().rstrip("/")
@@ -1274,7 +1326,13 @@ def find_post(query: str) -> dict | None:
     r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1", headers=h, timeout=10)
     if r.status_code == 200 and r.json():
         p = r.json()[0]
-        return {"id": p["id"], "title": p["title"]["rendered"], "link": p["link"]}
+        return {
+            "id": p["id"],
+            "title": p["title"]["rendered"],
+            "link": p["link"],
+            "categories": p.get("categories", []),
+            "featured_media": p.get("featured_media", 0),
+        }
     return None
 
 
@@ -1282,6 +1340,19 @@ def trash_post(post_id: int) -> bool:
     h = {**wp_auth(), "Content-Type": "application/json"}
     r = requests.delete(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}", headers=h, timeout=15)
     return r.status_code in (200, 201)
+
+
+def update_post(post_id: int, payload: dict) -> bool:
+    """Actualiza un post existente en WordPress. Devuelve True si ok."""
+    h = {**wp_auth(), "Content-Type": "application/json"}
+    r = requests.post(
+        f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+        headers=h, json=payload, timeout=30
+    )
+    if r.status_code in (200, 201):
+        return True
+    logger.error(f"update_post {post_id}: {r.status_code} {r.text[:300]}")
+    return False
 
 
 async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1335,6 +1406,197 @@ async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Error al borrar. Revisa los logs en Railway.")
 
 
+# ── Editar nota ───────────────────────────────────────────────────────────────
+
+def _build_edit_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ Cambiar título", callback_data="edit_title"),
+            InlineKeyboardButton("📂 Cambiar categoría", callback_data="edit_cat"),
+        ],
+        [
+            InlineKeyboardButton("🖼️ Cambiar foto", callback_data="edit_photo"),
+            InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
+        ],
+    ])
+
+
+def _build_category_kb() -> InlineKeyboardMarkup:
+    """Genera teclado con las categorías disponibles (2 columnas)."""
+    buttons = []
+    row = []
+    sorted_cats = sorted(CAT_NAMES.items(), key=lambda x: x[1])
+    for cat_id, name in sorted_cats:
+        row.append(InlineKeyboardButton(name, callback_data=f"setcat_{cat_id}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("Cancelar", callback_data="edit_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def cmd_editar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Uso: /editar <URL o ID de la nota>"""
+    args = " ".join(context.args).strip()
+    if not args:
+        await update.message.reply_text(
+            "Uso: /editar <URL o ID>\n"
+            "Ejemplo: /editar https://mundoempresarial.ar/mi-nota/\nO: /editar 123"
+        )
+        return
+
+    msg = await update.message.reply_text("Buscando nota...")
+    post = await asyncio.to_thread(find_post, args)
+    if not post:
+        await msg.edit_text("No encontre la nota. Verifica la URL o el ID.")
+        return
+
+    context.user_data["edit_post"] = post
+    # Limpiar estados previos
+    context.user_data.pop("waiting_for_edit_title", None)
+    context.user_data.pop("waiting_for_edit_photo", None)
+
+    cats_str = ", ".join(CAT_NAMES.get(c, str(c)) for c in post.get("categories", [])) or "Ninguna"
+    await msg.edit_text(
+        f"✏️ Editando nota:\n\n*{post['title']}*\n\n"
+        f"ID: `{post['id']}`\n"
+        f"Categorías: {cats_str}\n"
+        f"Imagen destacada: {'Sí' if post.get('featured_media') else 'No'}\n\n"
+        f"¿Qué querés cambiar?",
+        parse_mode="Markdown",
+        reply_markup=_build_edit_kb(),
+    )
+
+
+async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    post = context.user_data.get("edit_post")
+
+    if query.data == "edit_cancel":
+        context.user_data.pop("edit_post", None)
+        context.user_data.pop("waiting_for_edit_title", None)
+        context.user_data.pop("waiting_for_edit_photo", None)
+        await query.edit_message_text("Edición cancelada.")
+        return
+
+    if not post:
+        await query.edit_message_text("No hay nota en edición. Usá /editar <URL o ID>")
+        return
+
+    if query.data == "edit_title":
+        context.user_data["waiting_for_edit_title"] = True
+        await query.edit_message_text(
+            f"Título actual:\n_{post['title']}_\n\n"
+            "Escribí el nuevo título (mandalo como mensaje normal):",
+            parse_mode="Markdown",
+        )
+        return
+
+    if query.data == "edit_cat":
+        await query.edit_message_text(
+            "Seleccioná la nueva categoría principal:",
+            reply_markup=_build_category_kb(),
+        )
+        return
+
+    if query.data == "edit_photo":
+        context.user_data["waiting_for_edit_photo"] = True
+        await query.edit_message_text(
+            "Mandame la nueva foto (como imagen en Telegram) "
+            "o pegá la URL de la imagen:",
+        )
+        return
+
+    # Cambio de categoría: callback setcat_<id>
+    if query.data.startswith("setcat_"):
+        cat_id = int(query.data.split("_", 1)[1])
+        ok = await asyncio.to_thread(
+            update_post, post["id"], {"categories": [cat_id]}
+        )
+        if ok:
+            post["categories"] = [cat_id]
+            context.user_data["edit_post"] = post
+            await query.edit_message_text(
+                f"✅ Categoría actualizada a: *{CAT_NAMES.get(cat_id, cat_id)}*\n\n"
+                f"{post['link']}",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text("❌ Error al actualizar la categoría.")
+        return
+
+
+async def _handle_edit_photo_url(url: str, post: dict) -> bool:
+    """Descarga imagen desde URL y la setea como destacada del post."""
+    kw = focus_keyword(post["title"])
+    alt = f"{kw} - {post['title']}"
+    media_id = upload_image(url, alt)
+    if not media_id:
+        return False
+    return update_post(post["id"], {"featured_media": media_id})
+
+
+async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> bool:
+    """Sube bytes de imagen a WordPress y la setea como destacada."""
+    try:
+        ext = ctype.split("/")[-1] if "/" in ctype else "jpg"
+        h = {**wp_auth(), "Content-Disposition": f"attachment; filename=editada.{ext}",
+             "Content-Type": ctype}
+        r = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes, timeout=30
+        )
+        if r.status_code != 201:
+            logger.error(f"Upload photo: {r.status_code} {r.text[:200]}")
+            return False
+        media_id = r.json()["id"]
+
+        kw = focus_keyword(post["title"])
+        alt = f"{kw} - {post['title']}"
+        requests.post(
+            f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
+            headers={**wp_auth(), "Content-Type": "application/json"},
+            json={"alt_text": alt, "caption": alt},
+            timeout=10,
+        )
+        return update_post(post["id"], {"featured_media": media_id})
+    except Exception as e:
+        logger.error(f"edit_photo_bytes: {e}")
+        return False
+
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja foto enviada por Telegram durante edición."""
+    if not context.user_data.get("waiting_for_edit_photo"):
+        return
+    post = context.user_data.get("edit_post")
+    if not post:
+        await update.message.reply_text("No hay nota en edición.")
+        return
+
+    context.user_data["waiting_for_edit_photo"] = False
+    msg = await update.message.reply_text("Subiendo foto...")
+
+    try:
+        # Obtener la foto más grande
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        img_bytearr = await file.download_as_bytearray()
+        img_bytes = bytes(img_bytearr)
+
+        ok = await _handle_edit_photo_bytes(img_bytes, "image/jpeg", post)
+        if ok:
+            await msg.edit_text(f"✅ Foto actualizada.\n\n{post['link']}")
+        else:
+            await msg.edit_text("❌ Error al actualizar la foto.")
+    except Exception as e:
+        logger.error(f"handle_photo: {e}")
+        await msg.edit_text(f"❌ Error: {e}")
+
+
 # ── Reporte diario programado ────────────────────────────────────────────────
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -1361,10 +1623,13 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
+    app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_"))
+    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar reporte diario a las 23:00 Argentina (UTC-3)
