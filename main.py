@@ -1867,7 +1867,45 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def _wait_for_lock_release(max_wait: int = 20):
+    """
+    Al iniciar, espera a que la otra instancia (contenedor viejo de Railway)
+    libere el getUpdates lock. Si pasa más del tiempo, forzamos webhook delete.
+    """
+    import time
+    for attempt in range(max_wait):
+        try:
+            # deleteWebhook con drop_pending_updates libera el polling lock
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                # Probar getUpdates con timeout corto
+                r2 = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                    json={"timeout": 1, "limit": 1},
+                    timeout=15,
+                )
+                if r2.status_code == 200:
+                    logger.info(f"Telegram lock liberado (intento {attempt+1})")
+                    return True
+                if r2.status_code == 409:
+                    logger.warning(f"Lock ocupado, reintentando en 3s (intento {attempt+1})")
+                    time.sleep(3)
+                    continue
+        except Exception as e:
+            logger.warning(f"Error en wait_for_lock: {e}")
+            time.sleep(2)
+    logger.warning("No se pudo confirmar que el lock esté libre, siguiendo igual")
+    return False
+
+
 def main():
+    # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
+    _wait_for_lock_release()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
