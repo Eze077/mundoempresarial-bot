@@ -575,11 +575,54 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
     return tweet
 
 
+def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
+    """
+    Sube una imagen a Twitter via API v1.1 media/upload y devuelve el media_id.
+    Necesario para que los tweets muestren preview de imagen.
+    """
+    try:
+        # Descargar imagen
+        img_resp = requests.get(image_url, headers=HEADERS_BROWSER, timeout=15)
+        img_resp.raise_for_status()
+        img_bytes = img_resp.content
+
+        # Twitter acepta hasta 5MB por imagen. Si es más grande, intentar bajarla.
+        if len(img_bytes) > 5 * 1024 * 1024:
+            logger.warning(f"Imagen muy grande para Twitter ({len(img_bytes)} bytes), salteando")
+            return None
+
+        # Subir a Twitter v1.1 media/upload
+        r = requests.post(
+            "https://upload.twitter.com/1.1/media/upload.json",
+            files={"media": img_bytes},
+            auth=auth,
+            timeout=30,
+        )
+        if r.status_code == 200:
+            media_id = r.json().get("media_id_string")
+            logger.info(f"Twitter media uploaded: {media_id}")
+            return media_id
+        logger.error(f"Twitter media upload {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        logger.error(f"Twitter media upload error: {e}")
+    return None
+
+
 def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | None:
     try:
         tweet_text = build_tweet(data, wp_url, hashtags_override=hashtags_override)
         auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
-        r = requests.post("https://api.twitter.com/2/tweets", json={"text": tweet_text}, auth=auth)
+
+        payload = {"text": tweet_text}
+
+        # Subir imagen si está disponible (para que Twitter muestre preview)
+        image_url = data.get("image_url", "")
+        if image_url:
+            media_id = upload_twitter_media(image_url, auth)
+            if media_id:
+                payload["media"] = {"media_ids": [media_id]}
+
+        r = requests.post("https://api.twitter.com/2/tweets", json=payload, auth=auth)
         if r.status_code == 201:
             tweet_id = r.json()["data"]["id"]
             return f"https://twitter.com/i/web/status/{tweet_id}"
