@@ -552,9 +552,47 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     h = {**wp_auth(), "Content-Type": "application/json"}
     r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
     if r.status_code == 201:
-        return r.json().get("link")
+        body = r.json()
+        return {"link": body.get("link"), "id": body.get("id"), "content": content}
     logger.error(f"WP {r.status_code}: {r.text[:400]}")
     return None
+
+
+def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id: int = 0) -> bool:
+    """
+    Agrega un HTML comment al final del post con los IDs de Twitter y Telegram
+    para poder borrarlos después desde /editar.
+    Format: <!-- mebot:tweet_id=X;tg_msg=Y -->
+    """
+    try:
+        # Remover comentarios previos si existen
+        clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
+        meta_parts = []
+        if tweet_id:
+            meta_parts.append(f"tweet_id={tweet_id}")
+        if tg_msg_id:
+            meta_parts.append(f"tg_msg={tg_msg_id}")
+        if not meta_parts:
+            return True
+        meta_comment = f"\n<!-- mebot:{';'.join(meta_parts)} -->"
+        new_content = clean_content + meta_comment
+        return update_post(post_id, {"content": new_content})
+    except Exception as e:
+        logger.error(f"append_social_meta: {e}")
+        return False
+
+
+def parse_social_meta(content: str) -> dict:
+    """Extrae tweet_id y tg_msg del comentario HTML en el contenido."""
+    m = re.search(r'<!--\s*mebot:([^>]+)-->', content)
+    if not m:
+        return {}
+    result = {}
+    for part in m.group(1).split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            result[k.strip()] = v.strip()
+    return result
 
 
 # ── Twitter / X ───────────────────────────────────────────────────────────────
@@ -631,6 +669,31 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
     except Exception as e:
         logger.error(f"Twitter error: {e}")
         return None
+
+
+def delete_tweet(tweet_id: str) -> bool:
+    """Elimina un tweet via API v2. Necesita tweet_id (no URL)."""
+    try:
+        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+        r = requests.delete(
+            f"https://api.twitter.com/2/tweets/{tweet_id}",
+            auth=auth, timeout=15,
+        )
+        if r.status_code == 200:
+            return r.json().get("data", {}).get("deleted", False)
+        logger.error(f"delete_tweet {tweet_id}: {r.status_code} {r.text[:200]}")
+        return False
+    except Exception as e:
+        logger.error(f"delete_tweet error: {e}")
+        return False
+
+
+def tweet_id_from_url(url: str) -> str | None:
+    """Extrae el tweet_id de una URL tipo https://twitter.com/i/web/status/12345"""
+    if not url:
+        return None
+    m = re.search(r'/status/(\d+)', url)
+    return m.group(1) if m else None
 
 
 # ── Limpieza de texto scrapeado ────────────────────────────────────────────────
@@ -847,26 +910,37 @@ def scrape(url: str) -> dict:
 # ── Canal de Telegram ─────────────────────────────────────────────────────────
 
 async def publish_to_channel(bot, data: dict, wp_url: str):
+    """Publica en el canal. Devuelve message_id (int) o None si falló."""
     s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
     text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({wp_url})"
     try:
         if data.get("image_url"):
-            await bot.send_photo(
+            msg = await bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL,
                 photo=data["image_url"],
                 caption=text,
                 parse_mode="Markdown",
             )
         else:
-            await bot.send_message(
+            msg = await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL,
                 text=text,
                 parse_mode="Markdown",
                 disable_web_page_preview=False,
             )
-        return True
+        return msg.message_id
     except Exception as e:
         logger.error(f"Canal TG: {e}")
+        return None
+
+
+async def delete_from_channel(bot, message_id: int) -> bool:
+    """Borra un mensaje del canal de Telegram."""
+    try:
+        await bot.delete_message(chat_id=TELEGRAM_CHANNEL, message_id=message_id)
+        return True
+    except Exception as e:
+        logger.error(f"delete_from_channel {message_id}: {e}")
         return False
 
 
@@ -1227,6 +1301,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         custom_ht = context.user_data.get("custom_hashtags")
         tweet_url = await asyncio.to_thread(post_tweet, stored["data"], stored["url"], custom_ht)
         if tweet_url:
+            # Guardar tweet_id en el post para poder borrarlo luego via /editar
+            tw_id = tweet_id_from_url(tweet_url)
+            if tw_id and stored.get("id"):
+                tg_msg_id = stored.get("tg_msg_id", 0)
+                await asyncio.to_thread(
+                    append_social_meta, stored["id"], stored["content"],
+                    tw_id, tg_msg_id
+                )
             await query.edit_message_text(
                 f"Publicado en WordPress y en Twitter/X!\n\n"
                 f"WP: {stored['url']}\nTweet: {tweet_url}"
@@ -1254,13 +1336,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alt = f"{kw} - {seo_title(data['title'])}"
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
-    post_url = await asyncio.to_thread(publish_post, data, image_id, destacado)
+    published = await asyncio.to_thread(publish_post, data, image_id, destacado)
 
-    if post_url:
+    if published:
+        post_url = published["link"]
+        post_id = published["id"]
+        post_content = published["content"]
+
         # Estadísticas
         stat_publish(data["title"], data.get("source_url", ""))
 
-        context.user_data["published"] = {"url": post_url, "data": data}
+        context.user_data["published"] = {
+            "url": post_url, "data": data, "id": post_id, "content": post_content
+        }
         context.user_data.pop("custom_hashtags", None)
         suffix = " (Destacados)" if destacado else ""
 
@@ -1270,10 +1358,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         results = [f"✅ Publicado en WordPress{suffix}!\n{post_url}"]
 
+        # Publicar en canal TG y guardar message_id
+        tg_msg_id = 0
         if tg_on:
-            tg_ok = await publish_to_channel(context.bot, data, post_url)
-            results.append("✅ Publicado en canal @EmpresarialARG" if tg_ok
-                           else "❌ Error al publicar en canal TG")
+            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
+            if tg_msg_id:
+                results.append("✅ Publicado en canal @EmpresarialARG")
+                context.user_data["published"]["tg_msg_id"] = tg_msg_id
+            else:
+                results.append("❌ Error al publicar en canal TG")
+
+        # Guardar tg_msg_id inmediatamente en el post
+        if tg_msg_id:
+            await asyncio.to_thread(
+                append_social_meta, post_id, post_content,
+                "", tg_msg_id
+            )
 
         if tw_on:
             tweet_preview = build_tweet(data, post_url)
@@ -1307,31 +1407,40 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Borrar nota ───────────────────────────────────────────────────────────────
 
 def find_post(query: str) -> dict | None:
+    """Busca un post en WP. Usa context=edit para obtener raw content (con comments)."""
     h = wp_auth()
     if query.strip().isdigit():
-        r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}", headers=h, timeout=10)
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}?context=edit",
+            headers=h, timeout=10
+        )
         if r.status_code == 200:
             p = r.json()
             return {
                 "id": p["id"],
-                "title": p["title"]["rendered"],
+                "title": p["title"].get("rendered", ""),
                 "link": p["link"],
                 "categories": p.get("categories", []),
                 "featured_media": p.get("featured_media", 0),
+                "content": p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", ""),
             }
         return None
 
     clean = query.strip().rstrip("/")
     slug = clean.split("/")[-1]
-    r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1", headers=h, timeout=10)
+    r = requests.get(
+        f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1&context=edit",
+        headers=h, timeout=10
+    )
     if r.status_code == 200 and r.json():
         p = r.json()[0]
         return {
             "id": p["id"],
-            "title": p["title"]["rendered"],
+            "title": p["title"].get("rendered", ""),
             "link": p["link"],
             "categories": p.get("categories", []),
             "featured_media": p.get("featured_media", 0),
+            "content": p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", ""),
         }
     return None
 
@@ -1416,6 +1525,25 @@ def _build_edit_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🖼️ Cambiar foto", callback_data="edit_photo"),
+            InlineKeyboardButton("🗑️ Borrar", callback_data="edit_delete"),
+        ],
+        [
+            InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
+        ],
+    ])
+
+
+def _build_delete_kb(del_tw: bool, del_wp: bool, del_tg: bool, has_tw: bool, has_tg: bool) -> InlineKeyboardMarkup:
+    """Teclado con toggles on/off para elegir qué borrar."""
+    tw_label = ("✅" if del_tw else "❌") + " Borrar de Twitter" + ("" if has_tw else " (N/A)")
+    wp_label = ("✅" if del_wp else "❌") + " Borrar de WordPress"
+    tg_label = ("✅" if del_tg else "❌") + " Borrar del canal TG" + ("" if has_tg else " (N/A)")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(wp_label, callback_data="deltoggle_wp")],
+        [InlineKeyboardButton(tw_label, callback_data="deltoggle_tw")],
+        [InlineKeyboardButton(tg_label, callback_data="deltoggle_tg")],
+        [
+            InlineKeyboardButton("🗑️ Ejecutar borrado", callback_data="del_execute"),
             InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
         ],
     ])
@@ -1529,6 +1657,126 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("❌ Error al actualizar la categoría.")
         return
 
+    # ── Borrar: mostrar toggles ──
+    if query.data == "edit_delete":
+        meta = parse_social_meta(post.get("content", ""))
+        has_tw = bool(meta.get("tweet_id"))
+        has_tg = bool(meta.get("tg_msg"))
+
+        # Estado inicial: WP encendido, TW y TG encendidos si tienen ID
+        context.user_data["del_wp"] = True
+        context.user_data["del_tw"] = has_tw
+        context.user_data["del_tg"] = has_tg
+        context.user_data["del_has_tw"] = has_tw
+        context.user_data["del_has_tg"] = has_tg
+
+        tw_info = f"Tweet ID: `{meta.get('tweet_id','-')}`" if has_tw else "Tweet: no registrado"
+        tg_info = f"TG msg: `{meta.get('tg_msg','-')}`" if has_tg else "TG canal: no registrado"
+
+        await query.edit_message_text(
+            f"🗑️ *Borrar nota*\n\n*{post['title']}*\n\n"
+            f"{tw_info}\n{tg_info}\n\n"
+            "Elegí qué borrar:",
+            parse_mode="Markdown",
+            reply_markup=_build_delete_kb(
+                context.user_data["del_tw"],
+                context.user_data["del_wp"],
+                context.user_data["del_tg"],
+                has_tw, has_tg,
+            ),
+        )
+        return
+
+    # Toggles de delete
+    if query.data == "deltoggle_wp":
+        context.user_data["del_wp"] = not context.user_data.get("del_wp", True)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_delete_kb(
+                context.user_data.get("del_tw", False),
+                context.user_data["del_wp"],
+                context.user_data.get("del_tg", False),
+                context.user_data.get("del_has_tw", False),
+                context.user_data.get("del_has_tg", False),
+            )
+        )
+        return
+
+    if query.data == "deltoggle_tw":
+        if not context.user_data.get("del_has_tw"):
+            return  # no toggleable si no hay tweet
+        context.user_data["del_tw"] = not context.user_data.get("del_tw", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_delete_kb(
+                context.user_data["del_tw"],
+                context.user_data.get("del_wp", True),
+                context.user_data.get("del_tg", False),
+                context.user_data.get("del_has_tw", False),
+                context.user_data.get("del_has_tg", False),
+            )
+        )
+        return
+
+    if query.data == "deltoggle_tg":
+        if not context.user_data.get("del_has_tg"):
+            return
+        context.user_data["del_tg"] = not context.user_data.get("del_tg", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_delete_kb(
+                context.user_data.get("del_tw", False),
+                context.user_data.get("del_wp", True),
+                context.user_data["del_tg"],
+                context.user_data.get("del_has_tw", False),
+                context.user_data.get("del_has_tg", False),
+            )
+        )
+        return
+
+    if query.data == "del_execute":
+        del_wp = context.user_data.get("del_wp", False)
+        del_tw = context.user_data.get("del_tw", False)
+        del_tg = context.user_data.get("del_tg", False)
+
+        if not any([del_wp, del_tw, del_tg]):
+            await query.edit_message_text("Nada seleccionado. Edición cancelada.")
+            return
+
+        await query.edit_message_text("Borrando...")
+
+        meta = parse_social_meta(post.get("content", ""))
+        results = []
+
+        # Borrar de Twitter
+        if del_tw and meta.get("tweet_id"):
+            ok = await asyncio.to_thread(delete_tweet, meta["tweet_id"])
+            results.append("✅ Tweet borrado" if ok else "❌ Error borrando tweet")
+
+        # Borrar del canal TG
+        if del_tg and meta.get("tg_msg"):
+            try:
+                msg_id = int(meta["tg_msg"])
+                ok = await delete_from_channel(context.bot, msg_id)
+                results.append("✅ Mensaje del canal borrado" if ok
+                               else "❌ Error borrando del canal (puede ser muy viejo)")
+            except ValueError:
+                results.append("❌ tg_msg inválido en el post")
+
+        # Borrar de WordPress (último, porque cambia la URL)
+        if del_wp:
+            ok = await asyncio.to_thread(trash_post, post["id"])
+            results.append("✅ Nota enviada a la papelera de WordPress" if ok
+                           else "❌ Error borrando de WordPress")
+
+        # Limpiar estado
+        context.user_data.pop("edit_post", None)
+        context.user_data.pop("del_wp", None)
+        context.user_data.pop("del_tw", None)
+        context.user_data.pop("del_tg", None)
+        context.user_data.pop("del_has_tw", None)
+        context.user_data.pop("del_has_tg", None)
+
+        await query.edit_message_text("\n".join(results) or "Nada que borrar.")
+        return
+
 
 async def _handle_edit_photo_url(url: str, post: dict) -> bool:
     """Descarga imagen desde URL y la setea como destacada del post."""
@@ -1628,8 +1876,9 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_)"))
+    # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
+    app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
+    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar reporte diario a las 23:00 Argentina (UTC-3)
