@@ -595,6 +595,24 @@ def parse_social_meta(content: str) -> dict:
     return result
 
 
+# ── UTM tracking ──────────────────────────────────────────────────────────────
+
+UTM_CONFIG = {
+    "telegram":  ("social", "canal_empresarialarg"),
+    "twitter":   ("social", "organico"),
+    "whatsapp":  ("social", "compartir"),
+    "newsletter": ("email", "semanal"),
+}
+
+
+def utm_url(url: str, source: str) -> str:
+    """Agrega parámetros UTM al URL para tracking en GA4."""
+    medium, campaign = UTM_CONFIG.get(source, ("social", "bot"))
+    params = f"utm_source={source}&utm_medium={medium}&utm_campaign={campaign}"
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{params}"
+
+
 # ── Twitter / X ───────────────────────────────────────────────────────────────
 
 def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
@@ -605,11 +623,12 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
         raw_tags = extract_tags(data["title"])[:3]
         hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
 
-    tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
+    tracked_url = utm_url(wp_url, "twitter")
+    tweet = f"{title}\n\n{tracked_url}\n\n{hashtags}"
     if len(tweet) > 280:
-        max_title = 280 - len(wp_url) - len(hashtags) - 6
+        max_title = 280 - len(tracked_url) - len(hashtags) - 6
         title = title[:max_title].rsplit(" ", 1)[0]
-        tweet = f"{title}\n\n{wp_url}\n\n{hashtags}"
+        tweet = f"{title}\n\n{tracked_url}\n\n{hashtags}"
     return tweet
 
 
@@ -912,7 +931,8 @@ def scrape(url: str) -> dict:
 async def publish_to_channel(bot, data: dict, wp_url: str):
     """Publica en el canal. Devuelve message_id (int) o None si falló."""
     s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
-    text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({wp_url})"
+    tracked_url = utm_url(wp_url, "telegram")
+    text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({tracked_url})"
     try:
         if data.get("image_url"):
             msg = await bot.send_photo(
@@ -1396,7 +1416,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if wa_on:
             s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
-            wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {post_url}"
+            wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(
                 f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
             )
