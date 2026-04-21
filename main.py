@@ -35,7 +35,7 @@ TWITTER_API_SECRET = os.environ.get("TW_SECRET", "") or os.environ.get("TWITTER_
 TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_ACCESS_TOKEN", "")
 TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER_ACCESS_SECRET", "")
 
-TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@EmpresarialARG")
+TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
@@ -1472,7 +1472,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tg_on:
             tg_msg_id = await publish_to_channel(context.bot, data, post_url)
             if tg_msg_id:
-                results.append("✅ Publicado en canal @EmpresarialARG")
+                results.append("✅ Publicado en canal @MundoEmpresarial_AR")
                 context.user_data["published"]["tg_msg_id"] = tg_msg_id
             else:
                 results.append("❌ Error al publicar en canal TG")
@@ -2026,7 +2026,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if pub_tg:
             tg_msg_id = await publish_to_channel(context.bot, data, post_url)
             if tg_msg_id:
-                results.append("✅ Publicado en canal @EmpresarialARG")
+                results.append("✅ Publicado en canal @MundoEmpresarial_AR")
                 new_tg_msg = tg_msg_id
             else:
                 results.append("❌ Error al publicar en canal TG")

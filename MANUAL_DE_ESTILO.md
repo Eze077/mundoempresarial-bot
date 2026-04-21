@@ -291,7 +291,7 @@ Estructura:
 #{Tag1} #{Tag2} #{Tag3} #Pymes
 ```
 
-### 6.2 Canal de Telegram (@EmpresarialARG)
+### 6.2 Canal de Telegram (@MundoEmpresarial_AR)
 
 Estructura:
 ```
