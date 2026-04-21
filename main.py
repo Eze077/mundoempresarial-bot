@@ -200,11 +200,69 @@ def build_daily_report() -> str:
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
 
 def seo_title(title: str) -> str:
-    if len(title) <= 60:
-        return title
-    cut = title[:60]
+    """Acorta el titulo a <=60 chars sin truncarlo a lo bruto.
+    Saca parentesis/citas, corta en : o coma, busca mantener el keyword y sentido.
+    """
+    t = " ".join(title.strip().split())
+    if len(t) <= 60:
+        return t
+
+    # 1. Sacar parentesis (aclaraciones)
+    t = re.sub(r"\s*\([^)]*\)\s*", " ", t).strip()
+    t = " ".join(t.split())
+    if len(t) <= 60:
+        return t
+
+    # 2. Si tiene ":", preferir la parte mas corta que contenga contenido util
+    if ":" in t:
+        before, after = t.split(":", 1)
+        before = before.strip()
+        after  = after.strip().strip('"\'«»')
+        # Preferir la parte principal (mas corta pero >=25 chars)
+        for part in (before, after):
+            if 25 <= len(part) <= 60:
+                return part
+
+    # 3. Sacar citas entrecomilladas si las hay
+    t2 = re.sub(r'["«»][^"«»]*["«»]', '', t).strip()
+    t2 = " ".join(t2.split()).strip(" ,.:;—-")
+    if 25 <= len(t2) <= 60:
+        return t2
+    if len(t2) <= 60 and t2:
+        t = t2
+
+    # 4. Si sigue largo y tiene coma (no decimal), quedarse con la primera clausula
+    if len(t) > 60 and re.search(r",(?!\d)", t):
+        first = re.split(r",(?!\d)", t)[0].strip()
+        if 25 <= len(first) <= 60:
+            return first
+
+    # 5. Fallback: cortar en limite de palabra y limpiar conectores colgantes
+    if len(t) <= 60:
+        return t
+    cut = t[:60]
     boundary = cut.rfind(" ")
-    return cut[:boundary] if boundary > 40 else cut
+    out = cut[:boundary] if boundary > 40 else cut
+    DANGLERS = {"de", "del", "la", "el", "los", "las", "en", "con", "por", "para",
+                "a", "al", "y", "o", "u", "e", "que", "un", "una", "su", "sus",
+                "lo", "se", "entre", "sobre", "sin", "tras", "mas", "más"}
+    words = out.split()
+    while words and words[-1].lower().strip(".,;:") in DANGLERS:
+        words.pop()
+    return " ".join(words).rstrip(" ,.:;—-") or out
+
+
+def get_title(data: dict) -> str:
+    """Devuelve el titulo a mostrar/publicar segun los flags del preview.
+
+    Prioridad: editado manual > toggle 'titulo original' > seo_title(original).
+    """
+    if data.get("title_edited"):
+        return data["title"]
+    original = data.get("original_title") or data.get("title", "")
+    if data.get("orig_title_on"):
+        return original
+    return seo_title(original)
 
 
 def meta_description(excerpt: str, text: str, kw: str = "") -> str:
@@ -510,7 +568,7 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
 
 
 def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> str | None:
-    s_title  = data["title"] if data.get("title_edited") else seo_title(data["title"])
+    s_title  = get_title(data)
     s_kw     = focus_keyword(data["title"])
     s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug   = url_slug(data["title"])
@@ -616,7 +674,7 @@ def utm_url(url: str, source: str) -> str:
 # ── Twitter / X ───────────────────────────────────────────────────────────────
 
 def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
-    title = data["title"] if data.get("title_edited") else seo_title(data["title"])
+    title = get_title(data)
     if hashtags_override is not None:
         hashtags = hashtags_override
     else:
@@ -916,13 +974,15 @@ def scrape(url: str) -> dict:
 
     excerpt = excerpt or (text[:200] + "..." if text else "")
 
+    clean_title = title.strip()
     return {
-        "title":      title.strip(),
-        "text":       text,
-        "excerpt":    excerpt,
-        "image_url":  image_url,
-        "source_url": url,
-        "media":      media_info,
+        "title":          clean_title,
+        "original_title": clean_title,
+        "text":           text,
+        "excerpt":        excerpt,
+        "image_url":      image_url,
+        "source_url":     url,
+        "media":          media_info,
     }
 
 
@@ -930,7 +990,7 @@ def scrape(url: str) -> dict:
 
 async def publish_to_channel(bot, data: dict, wp_url: str):
     """Publica en el canal. Devuelve message_id (int) o None si falló."""
-    s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
+    s_title = get_title(data)
     tracked_url = utm_url(wp_url, "telegram")
     text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({tracked_url})"
     try:
@@ -990,11 +1050,23 @@ CAT_NAMES = {
     102: "Provincias", 92: "Servicios", 93: "Sindicatos",
 }
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False) -> InlineKeyboardMarkup:
+def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
+    ud = context.user_data
+    return build_preview_kb(
+        tw_on   = ud.get("tw_on", True),
+        tg_on   = ud.get("tg_on", True),
+        wa_on   = ud.get("wa_on", False),
+        dest_on = ud.get("dest_on", False),
+        orig_on = ud.get("orig_title_on", False),
+    )
+
+
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False) -> InlineKeyboardMarkup:
     tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
     wa_label = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
     dest_label = "⭐ Destacado" if dest_on else "☆ Destacado"
+    orig_label = "✅ Titulo original" if orig_on else "❌ Titulo original"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
@@ -1003,6 +1075,9 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
         [
             InlineKeyboardButton(wa_label, callback_data="toggle_wa"),
             InlineKeyboardButton(dest_label, callback_data="toggle_dest"),
+        ],
+        [
+            InlineKeyboardButton(orig_label, callback_data="toggle_orig_title"),
         ],
         [
             InlineKeyboardButton("Publicar", callback_data="pub"),
@@ -1015,7 +1090,7 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
 
 
 def build_preview(data: dict) -> str:
-    s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
+    s_title = get_title(data)
     s_kw    = focus_keyword(data["title"])
     s_desc  = meta_description(data["excerpt"], data["text"], kw=s_kw)
     s_slug  = url_slug(data["title"])
@@ -1123,7 +1198,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["title_edited"] = True
         context.user_data["article"] = data
         preview = build_preview(data)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data.get("wa_on", False), context.user_data.get("dest_on", False))
+        kb = _preview_kb_from_ctx(context)
         await update.message.reply_text(
             preview, parse_mode="Markdown", reply_markup=kb
         )
@@ -1214,9 +1289,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("tg_on", True)
     context.user_data.setdefault("wa_on", False)
     context.user_data.setdefault("dest_on", False)
+    context.user_data.setdefault("orig_title_on", False)
+    data["orig_title_on"] = context.user_data["orig_title_on"]
 
     # Mostrar preview
-    kb = build_preview_kb(context.user_data["tw_on"], context.user_data["tg_on"], context.user_data["wa_on"], context.user_data["dest_on"])
+    kb = _preview_kb_from_ctx(context)
     await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
 
     # Si hay video o foto, preguntar si incorporarla
@@ -1272,26 +1349,38 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Toggles ──
     if query.data == "toggle_tw":
         context.user_data["tw_on"] = not context.user_data.get("tw_on", True)
-        kb = build_preview_kb(context.user_data["tw_on"], context.user_data.get("tg_on", True), context.user_data.get("wa_on", False), context.user_data.get("dest_on", False))
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     if query.data == "toggle_tg":
         context.user_data["tg_on"] = not context.user_data.get("tg_on", True)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data["tg_on"], context.user_data.get("wa_on", False), context.user_data.get("dest_on", False))
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     if query.data == "toggle_wa":
         context.user_data["wa_on"] = not context.user_data.get("wa_on", False)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data["wa_on"], context.user_data.get("dest_on", False))
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     if query.data == "toggle_dest":
         context.user_data["dest_on"] = not context.user_data.get("dest_on", False)
-        kb = build_preview_kb(context.user_data.get("tw_on", True), context.user_data.get("tg_on", True), context.user_data.get("wa_on", False), context.user_data["dest_on"])
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
+        return
+
+    if query.data == "toggle_orig_title":
+        new_val = not context.user_data.get("orig_title_on", False)
+        context.user_data["orig_title_on"] = new_val
+        data = context.user_data.get("article")
+        if data:
+            data["orig_title_on"] = new_val
+            context.user_data["article"] = data
+            await query.edit_message_text(
+                build_preview(data),
+                parse_mode="Markdown",
+                reply_markup=_preview_kb_from_ctx(context),
+            )
+        else:
+            await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     data = context.user_data.get("article")
@@ -1353,7 +1442,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_id = None
     if data["image_url"]:
         kw  = focus_keyword(data["title"])
-        alt = f"{kw} - {seo_title(data['title'])}"
+        alt = f"{kw} - {get_title(data)}"
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
     published = await asyncio.to_thread(publish_post, data, image_id, destacado)
@@ -1415,7 +1504,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("\n".join(results), parse_mode="Markdown")
 
         if wa_on:
-            s_title = data["title"] if data.get("title_edited") else seo_title(data["title"])
+            s_title = get_title(data)
             wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(
                 f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
