@@ -671,6 +671,19 @@ def utm_url(url: str, source: str) -> str:
     return f"{url}{sep}{params}"
 
 
+def md_escape(s: str) -> str:
+    """Escapa caracteres especiales de Markdown v1 de Telegram (_ * [ `).
+    Usar en valores dinamicos (URLs con UTMs, nombres con underscore, etc)
+    antes de meterlos en un mensaje con parse_mode='Markdown'."""
+    if not s:
+        return s
+    return (s.replace("\\", "\\\\")
+             .replace("_", "\\_")
+             .replace("*", "\\*")
+             .replace("[", "\\[")
+             .replace("`", "\\`"))
+
+
 # ── Twitter / X ───────────────────────────────────────────────────────────────
 
 def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
@@ -1181,7 +1194,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
         ])
         await update.message.reply_text(
-            f"Vista previa actualizada:\n\n`{tweet_preview}`",
+            f"Vista previa actualizada:\n\n`{md_escape(tweet_preview)}`",
             parse_mode="Markdown",
             reply_markup=kb_tweet,
         )
@@ -1465,14 +1478,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_on = context.user_data.get("tg_on", True)
         wa_on = context.user_data.get("wa_on", False)
 
-        results = [f"✅ Publicado en WordPress{suffix}!\n{post_url}"]
+        results = [f"✅ Publicado en WordPress{suffix}!\n{md_escape(post_url)}"]
 
         # Publicar en canal TG y guardar message_id
         tg_msg_id = 0
         if tg_on:
             tg_msg_id = await publish_to_channel(context.bot, data, post_url)
             if tg_msg_id:
-                results.append("✅ Publicado en canal @MundoEmpresarial_AR")
+                results.append("✅ Publicado en canal @MundoEmpresarial\\_AR")
                 context.user_data["published"]["tg_msg_id"] = tg_msg_id
             else:
                 results.append("❌ Error al publicar en canal TG")
@@ -1496,7 +1509,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "\n".join(results) + "\n\n"
                 f"— Vista previa del tweet —\n"
-                f"`{tweet_preview}`",
+                f"`{md_escape(tweet_preview)}`",
                 parse_mode="Markdown",
                 reply_markup=kb_tweet,
             )
