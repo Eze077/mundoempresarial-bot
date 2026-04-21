@@ -1634,12 +1634,64 @@ def _build_edit_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🖼️ Cambiar foto", callback_data="edit_photo"),
-            InlineKeyboardButton("🗑️ Borrar", callback_data="edit_delete"),
+            InlineKeyboardButton("📡 Publicar en redes", callback_data="edit_publish"),
         ],
         [
+            InlineKeyboardButton("🗑️ Borrar", callback_data="edit_delete"),
             InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
         ],
     ])
+
+
+def _build_publish_social_kb(tw_on: bool, tg_on: bool, wa_on: bool) -> InlineKeyboardMarkup:
+    """Teclado para republicar una nota existente en redes."""
+    tw_label = ("✅" if tw_on else "❌") + " Twitter"
+    tg_label = ("✅" if tg_on else "❌") + " Canal TG"
+    wa_label = ("✅" if wa_on else "❌") + " WhatsApp"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tw_label, callback_data="pubtoggle_tw")],
+        [InlineKeyboardButton(tg_label, callback_data="pubtoggle_tg")],
+        [InlineKeyboardButton(wa_label, callback_data="pubtoggle_wa")],
+        [
+            InlineKeyboardButton("📡 Publicar", callback_data="pub_execute"),
+            InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
+        ],
+    ])
+
+
+def _post_to_data(post: dict) -> dict:
+    """Convierte un post de WP (devuelto por find_post) en un data dict
+    compatible con publish_to_channel() y post_tweet()."""
+    content = post.get("content", "")
+    # Sacar comentarios HTML mebot y tags para derivar excerpt
+    clean = re.sub(r'<!--[^>]*-->', '', content)
+    text_only = re.sub(r'<[^>]+>', ' ', clean)
+    text_only = re.sub(r'\s+', ' ', text_only).strip()
+    excerpt = text_only[:200] + ("..." if len(text_only) > 200 else "")
+
+    image_url = ""
+    fm = post.get("featured_media") or 0
+    if fm:
+        try:
+            r = requests.get(
+                f"{WP_URL}/wp-json/wp/v2/media/{fm}",
+                headers=wp_auth(), timeout=10,
+            )
+            if r.status_code == 200:
+                image_url = r.json().get("source_url", "")
+        except Exception as e:
+            logger.warning(f"No pude obtener featured media {fm}: {e}")
+
+    title = post.get("title", "")
+    return {
+        "title":          title,
+        "original_title": title,
+        "title_edited":   True,
+        "excerpt":        excerpt,
+        "text":           text_only,
+        "image_url":      image_url,
+        "source_url":     post.get("link", ""),
+    }
 
 
 def _build_delete_kb(del_tw: bool, del_wp: bool, del_tg: bool, has_tw: bool, has_tg: bool) -> InlineKeyboardMarkup:
@@ -1886,6 +1938,130 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("\n".join(results) or "Nada que borrar.")
         return
 
+    # ── Publicar en redes: mostrar toggles ──
+    if query.data == "edit_publish":
+        meta = parse_social_meta(post.get("content", ""))
+        has_tw = bool(meta.get("tweet_id"))
+        has_tg = bool(meta.get("tg_msg"))
+        # Default: ON los destinos que todavía no se publicaron
+        context.user_data["pub_tw"] = not has_tw
+        context.user_data["pub_tg"] = not has_tg
+        context.user_data["pub_wa"] = False
+
+        status_lines = []
+        if has_tw:
+            status_lines.append(f"⚠️ Ya tuiteado (id `{meta.get('tweet_id')}`) — se creará uno nuevo si lo marcás")
+        if has_tg:
+            status_lines.append(f"⚠️ Ya en canal TG (msg `{meta.get('tg_msg')}`) — se publicará un segundo mensaje")
+        status_str = "\n".join(status_lines) if status_lines else "Sin publicaciones previas."
+
+        await query.edit_message_text(
+            f"📡 *Publicar en redes*\n\n*{post['title']}*\n\n"
+            f"{status_str}\n\n"
+            "Elegí destinos:",
+            parse_mode="Markdown",
+            reply_markup=_build_publish_social_kb(
+                context.user_data["pub_tw"],
+                context.user_data["pub_tg"],
+                context.user_data["pub_wa"],
+            ),
+        )
+        return
+
+    # Toggles de publicar en redes
+    if query.data == "pubtoggle_tw":
+        context.user_data["pub_tw"] = not context.user_data.get("pub_tw", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_publish_social_kb(
+                context.user_data["pub_tw"],
+                context.user_data.get("pub_tg", False),
+                context.user_data.get("pub_wa", False),
+            )
+        )
+        return
+
+    if query.data == "pubtoggle_tg":
+        context.user_data["pub_tg"] = not context.user_data.get("pub_tg", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_publish_social_kb(
+                context.user_data.get("pub_tw", False),
+                context.user_data["pub_tg"],
+                context.user_data.get("pub_wa", False),
+            )
+        )
+        return
+
+    if query.data == "pubtoggle_wa":
+        context.user_data["pub_wa"] = not context.user_data.get("pub_wa", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_publish_social_kb(
+                context.user_data.get("pub_tw", False),
+                context.user_data.get("pub_tg", False),
+                context.user_data["pub_wa"],
+            )
+        )
+        return
+
+    if query.data == "pub_execute":
+        pub_tw = context.user_data.get("pub_tw", False)
+        pub_tg = context.user_data.get("pub_tg", False)
+        pub_wa = context.user_data.get("pub_wa", False)
+
+        if not any([pub_tw, pub_tg, pub_wa]):
+            await query.edit_message_text("Nada seleccionado. Cancelado.")
+            return
+
+        await query.edit_message_text("Publicando en redes...")
+        data = await asyncio.to_thread(_post_to_data, post)
+        post_url = post["link"]
+
+        results = []
+        current_meta = parse_social_meta(post.get("content", ""))
+        new_tweet_id = current_meta.get("tweet_id", "")
+        try:
+            new_tg_msg = int(current_meta.get("tg_msg", 0) or 0)
+        except (ValueError, TypeError):
+            new_tg_msg = 0
+
+        if pub_tg:
+            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
+            if tg_msg_id:
+                results.append("✅ Publicado en canal @EmpresarialARG")
+                new_tg_msg = tg_msg_id
+            else:
+                results.append("❌ Error al publicar en canal TG")
+
+        if pub_tw:
+            tweet_url = await asyncio.to_thread(post_tweet, data, post_url)
+            if tweet_url:
+                new_tweet_id = tweet_url.rsplit("/", 1)[-1]
+                results.append(f"✅ Tuit publicado: {tweet_url}")
+            else:
+                results.append("❌ Error al publicar en Twitter")
+
+        if pub_wa:
+            s_title = get_title(data)
+            wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
+            await query.message.reply_text(f"— Copiá y pegá en WhatsApp —\n\n{wa_text}")
+            results.append("✅ Texto para WhatsApp preparado")
+
+        # Persistir ids nuevos en el post
+        if (pub_tg and new_tg_msg) or (pub_tw and new_tweet_id):
+            await asyncio.to_thread(
+                append_social_meta,
+                post["id"], post.get("content", ""),
+                new_tweet_id, new_tg_msg,
+            )
+
+        # Limpiar estado
+        context.user_data.pop("edit_post", None)
+        context.user_data.pop("pub_tw", None)
+        context.user_data.pop("pub_tg", None)
+        context.user_data.pop("pub_wa", None)
+
+        await query.edit_message_text("\n".join(results) or "Nada ejecutado.")
+        return
+
 
 async def _handle_edit_photo_url(url: str, post: dict) -> bool:
     """Descarga imagen desde URL y la setea como destacada del post."""
@@ -2025,7 +2201,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
-    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute)"))
+    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar reporte diario a las 23:00 Argentina (UTC-3)
