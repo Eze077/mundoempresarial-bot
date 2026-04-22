@@ -1912,6 +1912,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
         "/curador → briefing de noticias relevantes de últimas 24h (auto a las 8:00)\n"
+        "/feedback_ver → ver qué aprendió el curador de tus decisiones\n"
         "/fuentes [dominio] → ver repositorio de fuentes\n"
         "/stats → ver estadísticas del día"
     )
@@ -1920,6 +1921,60 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra las estadísticas del día."""
     await update.message.reply_text(build_daily_report(), parse_mode="Markdown")
+
+
+async def cmd_feedback_ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra los pesos aprendidos por el curador."""
+    fb = await asyncio.to_thread(_load_feedback)
+
+    dw = fb.get("domain_weights", {})
+    kw = fb.get("keyword_weights", {})
+    hh = fb.get("hilo_hints", {})
+    inter = fb.get("interactions", [])
+
+    lines = ["🧠 *Feedback store del curador*", ""]
+
+    # Dominios — top 5 positivos y negativos
+    if dw:
+        pos_dw = sorted(dw.items(), key=lambda x: -x[1])[:5]
+        neg_dw = sorted(dw.items(), key=lambda x: x[1])[:5]
+        lines.append("*Dominios favorecidos:*")
+        for d, w in pos_dw:
+            if w > 0:
+                lines.append(f"  • {md_escape(d)} `{w:+d}`")
+        lines.append("")
+        lines.append("*Dominios penalizados:*")
+        for d, w in neg_dw:
+            if w < 0:
+                lines.append(f"  • {md_escape(d)} `{w:+d}`")
+        lines.append("")
+
+    # Keywords — top 10 favoritas, top 5 penalizadas
+    if kw:
+        pos_kw = sorted(kw.items(), key=lambda x: -x[1])[:10]
+        neg_kw = sorted(kw.items(), key=lambda x: x[1])[:5]
+        lines.append("*Keywords favoritas:*")
+        for k, w in pos_kw:
+            if w > 0:
+                lines.append(f"  • {md_escape(k)} `{w:+d}`")
+        lines.append("")
+        lines.append("*Keywords penalizadas:*")
+        for k, w in neg_kw:
+            if w < 0:
+                lines.append(f"  • {md_escape(k)} `{w:+d}`")
+        lines.append("")
+
+    # Hilo hints
+    if hh:
+        lines.append(f"*Hilos sugeridos por keyword* ({len(hh)} aprendidos):")
+        for k, h in list(hh.items())[:15]:
+            lines.append(f"  • {md_escape(k)} → hilo {h}")
+        lines.append("")
+
+    lines.append(f"_Interacciones registradas:_ {len(inter)}")
+    lines.append(f"_Última actualización:_ {fb.get('updated_at', '-')}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ── Fuentes (sources.json) ───────────────────────────────────────────────────
@@ -3384,6 +3439,212 @@ KW_PYME = [
 ]
 
 
+# ── Sistema de feedback / aprendizaje del curador ─────────────────────────────
+# Persiste en WordPress como post privado (sobrevive redeploys de Railway).
+
+_FEEDBACK_CACHE: dict | None = None
+_FEEDBACK_POST_ID: int | None = None
+_FEEDBACK_POST_SLUG = "mebot-feedback-store"
+
+
+def _find_or_create_feedback_post() -> int | None:
+    """Busca el post privado donde vive el feedback store. Si no existe, lo crea."""
+    global _FEEDBACK_POST_ID
+    if _FEEDBACK_POST_ID:
+        return _FEEDBACK_POST_ID
+
+    h = wp_auth()
+    # Buscar por slug
+    try:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts?slug={_FEEDBACK_POST_SLUG}&status=private,draft",
+            headers=h, timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            _FEEDBACK_POST_ID = r.json()[0]["id"]
+            logger.info(f"Feedback post encontrado: ID {_FEEDBACK_POST_ID}")
+            return _FEEDBACK_POST_ID
+    except Exception as e:
+        logger.warning(f"Buscando feedback post: {e}")
+
+    # Crear
+    try:
+        payload = {
+            "title": "MEBot Feedback Store",
+            "slug": _FEEDBACK_POST_SLUG,
+            "status": "private",
+            "content": "{}",
+            "excerpt": "Storage interno del bot. No tocar manualmente.",
+        }
+        r = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts",
+            headers={**h, "Content-Type": "application/json"},
+            json=payload, timeout=15,
+        )
+        if r.status_code == 201:
+            _FEEDBACK_POST_ID = r.json()["id"]
+            logger.info(f"Feedback post creado: ID {_FEEDBACK_POST_ID}")
+            return _FEEDBACK_POST_ID
+        logger.error(f"Crear feedback post {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"Crear feedback post: {e}")
+    return None
+
+
+def _default_feedback() -> dict:
+    return {
+        "version": 1,
+        "updated_at": "",
+        "domain_weights":  {},  # {domain: int}
+        "keyword_weights": {},  # {kw: int}
+        "hilo_hints":      {},  # {kw: 1|2|3} — keywords que sugieren un hilo específico
+        "interactions":    [],  # últimas 100 acciones para debug
+    }
+
+
+def _load_feedback() -> dict:
+    """Lee el feedback desde WP. Cacheado en memoria."""
+    global _FEEDBACK_CACHE
+    if _FEEDBACK_CACHE is not None:
+        return _FEEDBACK_CACHE
+
+    post_id = _find_or_create_feedback_post()
+    if not post_id:
+        _FEEDBACK_CACHE = _default_feedback()
+        return _FEEDBACK_CACHE
+
+    try:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit",
+            headers=wp_auth(), timeout=10,
+        )
+        if r.status_code == 200:
+            raw_content = r.json().get("content", {}).get("raw", "") or ""
+            # El content puede estar envuelto en <p>...</p> por WP
+            clean = re.sub(r'<[^>]+>', '', raw_content).strip()
+            if clean:
+                data = json.loads(clean)
+                _FEEDBACK_CACHE = {**_default_feedback(), **data}
+            else:
+                _FEEDBACK_CACHE = _default_feedback()
+        else:
+            _FEEDBACK_CACHE = _default_feedback()
+    except Exception as e:
+        logger.warning(f"Load feedback: {e}")
+        _FEEDBACK_CACHE = _default_feedback()
+    return _FEEDBACK_CACHE
+
+
+def _save_feedback(data: dict) -> bool:
+    """Guarda el feedback store en WP."""
+    global _FEEDBACK_CACHE
+    from datetime import datetime
+    data["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    # Truncar interactions a las últimas 200
+    if len(data.get("interactions", [])) > 200:
+        data["interactions"] = data["interactions"][-200:]
+    _FEEDBACK_CACHE = data
+
+    post_id = _find_or_create_feedback_post()
+    if not post_id:
+        return False
+    try:
+        payload = {"content": json.dumps(data, ensure_ascii=False)}
+        r = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+            headers={**wp_auth(), "Content-Type": "application/json"},
+            json=payload, timeout=15,
+        )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.error(f"Save feedback: {e}")
+        return False
+
+
+def _title_keywords(title: str) -> list[str]:
+    """Extrae keywords significativas del título (sin stop-words, >3 chars, lowercase)."""
+    clean = re.sub(r'[^\w\sáéíóúñ]', ' ', (title or "").lower())
+    return [
+        w for w in clean.split()
+        if len(w) > 3 and w not in STOP_WORDS
+    ]
+
+
+def feedback_record(action: str, article: dict, hilo_override: int | None = None):
+    """
+    Registra una acción del usuario sobre un artículo del curador.
+    action: 'up' | 'down' | 'hilo' | 'publish'
+    """
+    fb = _load_feedback()
+    domain = article.get("domain", "")
+    title = article.get("title", "")
+    kws = _title_keywords(title)
+
+    if action == "up" or action == "publish":
+        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) + 2
+        for kw in kws:
+            fb["keyword_weights"][kw] = fb["keyword_weights"].get(kw, 0) + 1
+        if action == "publish":
+            # Extra bonus por publicar (decisión fuerte)
+            fb["domain_weights"][domain] += 2
+    elif action == "down":
+        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) - 2
+        for kw in kws:
+            fb["keyword_weights"][kw] = fb["keyword_weights"].get(kw, 0) - 1
+    elif action == "hilo" and hilo_override in (1, 2, 3):
+        # Si cambió el hilo, registrar que esas keywords apuntan al nuevo hilo
+        for kw in kws:
+            fb["hilo_hints"][kw] = hilo_override
+        # Además considerar relevante (+1 domain)
+        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) + 1
+
+    from datetime import datetime
+    fb["interactions"].append({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "action": action + (f"->h{hilo_override}" if hilo_override else ""),
+        "domain": domain,
+        "title": title[:80],
+    })
+
+    _save_feedback(fb)
+
+
+def _apply_feedback_score(base: int, domain: str, title: str, summary: str) -> int:
+    """Aplica los pesos aprendidos sobre el score base del curador."""
+    fb = _load_feedback()
+    if not fb:
+        return base
+
+    adjustment = 0
+    # Dominio: bonus/malus completo
+    adjustment += fb["domain_weights"].get(domain, 0)
+
+    # Keywords: medio peso (el bonus acumulativo de título)
+    kws = _title_keywords(title) + _title_keywords(summary[:200])
+    for kw in set(kws):
+        w = fb["keyword_weights"].get(kw, 0)
+        adjustment += int(w * 0.5)
+
+    return max(0, base + adjustment)
+
+
+def _apply_feedback_hilo(title: str, summary: str, default_hilo: int) -> int:
+    """Si hay hilo_hints fuertes en las keywords del título, los respeta."""
+    fb = _load_feedback()
+    if not fb or not fb.get("hilo_hints"):
+        return default_hilo
+
+    kws = _title_keywords(title)
+    hilo_votes = {1: 0, 2: 0, 3: 0}
+    for kw in kws:
+        if kw in fb["hilo_hints"]:
+            hilo_votes[fb["hilo_hints"][kw]] += 1
+
+    if max(hilo_votes.values()) >= 2:  # requerir consenso mínimo
+        return max(hilo_votes, key=hilo_votes.get)
+    return default_hilo
+
+
 def _score_article(title: str, summary: str, source_meta: dict, published_dt) -> int:
     """Calcula score de relevancia para curador. Ver SKILL curador-mundo-empresarial."""
     title_low = (title or "").lower()
@@ -3538,7 +3799,11 @@ def curar_noticias(max_results: int = 15) -> list:
             if not title or not link:
                 continue
 
-            score = _score_article(title, summary, meta, pub_dt)
+            base_score = _score_article(title, summary, meta, pub_dt)
+            if base_score <= 0:
+                continue
+            # Aplicar aprendizaje acumulado del usuario
+            score = _apply_feedback_score(base_score, domain, title, summary)
             if score <= 0:
                 continue
 
@@ -3558,14 +3823,15 @@ def curar_noticias(max_results: int = 15) -> list:
     unique = _dedupe_articles(results)
     unique.sort(key=lambda x: -x["score"])
 
-    # Asignar hilo final usando detect_hilo
+    # Asignar hilo final: detect_hilo + override del feedback aprendido
     for art in unique[:max_results]:
         fake_data = {
             "title":   art["title"],
             "text":    art["summary"],
             "excerpt": art["summary"],
         }
-        art["hilo"] = detect_hilo(fake_data)
+        base_hilo = detect_hilo(fake_data)
+        art["hilo"] = _apply_feedback_hilo(art["title"], art["summary"], base_hilo)
 
     return unique[:max_results]
 
@@ -3670,6 +3936,85 @@ def _suggest_top3_with_gpt(articles: list) -> str:
     return ""
 
 
+def _build_feedback_kb(article_idx: int) -> InlineKeyboardMarkup:
+    """Botones por artículo del curador."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👍", callback_data=f"cf_up_{article_idx}"),
+            InlineKeyboardButton("👎", callback_data=f"cf_down_{article_idx}"),
+            InlineKeyboardButton("🧵1", callback_data=f"cf_h1_{article_idx}"),
+            InlineKeyboardButton("🧵2", callback_data=f"cf_h2_{article_idx}"),
+            InlineKeyboardButton("🧵3", callback_data=f"cf_h3_{article_idx}"),
+            InlineKeyboardButton("📰", callback_data=f"cf_pub_{article_idx}"),
+        ],
+    ])
+
+
+async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: str, context: ContextTypes.DEFAULT_TYPE):
+    """Envía el briefing con un mensaje por artículo para poder meter botones de feedback."""
+    from datetime import datetime
+    today = datetime.now().strftime("%d/%m/%Y")
+
+    # Guardar artículos en chat_data para que los callbacks puedan resolver el idx
+    if not hasattr(context, 'chat_data') or context.chat_data is None:
+        # Fallback cuando se invoca desde el scheduler (no hay chat_data por chat)
+        pass
+    context.chat_data["curador_articles"] = articles
+
+    # Header
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"📰 *Curador diario — {today}*\n_{len(articles)} notas relevantes de las últimas 24h_\n\n"
+             "Usá los botones para darme feedback: 👍 relevante · 👎 irrelevante · "
+             "🧵N reclasificar al hilo N · 📰 publicar",
+        parse_mode="Markdown",
+    )
+
+    hilo_labels = {
+        1: "📋 *Informarse es respetarse*",
+        2: "🗣️ *Voz de las pymes*",
+        3: "💭 *Opinión / Análisis*",
+    }
+    grouped = {1: [], 2: [], 3: []}
+    for i, art in enumerate(articles):
+        grouped.setdefault(art.get("hilo", 2), []).append((i, art))
+
+    for h in (1, 2, 3):
+        items = grouped.get(h) or []
+        if not items:
+            continue
+        await bot.send_message(
+            chat_id=chat_id, text=hilo_labels[h], parse_mode="Markdown",
+        )
+        for idx, art in items:
+            age_h = ""
+            if art.get("published"):
+                from datetime import datetime, timezone as tz
+                now = datetime.now(tz.utc)
+                hours = int((now - art["published"]).total_seconds() / 3600)
+                age_h = f"hace {hours}h" if hours > 0 else "reciente"
+            also = ""
+            if art.get("also_in"):
+                also = f" · también: {', '.join(art['also_in'][:2])}"
+            text = (
+                f"*{idx+1}.* {md_escape(art['title'][:120])}\n"
+                f"_{md_escape(art['source_name'])} · {age_h}{also} · score {art['score']}_\n"
+                f"{art['link']}"
+            )
+            await bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="Markdown",
+                disable_web_page_preview=True,
+                reply_markup=_build_feedback_kb(idx),
+            )
+
+    if suggestion:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"💡 *Mi sugerencia:* {suggestion}",
+            parse_mode="Markdown",
+        )
+
+
 async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Scanea las fuentes RSS de las últimas 24h y devuelve las más relevantes."""
     msg = await update.message.reply_text("🔍 Scaneando fuentes...")
@@ -3688,25 +4033,82 @@ async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"🔍 Scaneo OK ({len(articles)} notas). Generando sugerencia…")
         suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
 
-    report = _format_curador_report(articles, suggestion_line=suggestion)
+    await msg.delete()
+    await _send_curador_briefing(
+        context.bot, update.message.chat_id, articles, suggestion, context,
+    )
 
-    # Telegram limita mensajes a 4096 chars
-    if len(report) > 4000:
-        chunks = []
-        current = ""
-        for line in report.split("\n"):
-            if len(current) + len(line) + 1 > 3900:
-                chunks.append(current)
-                current = line
-            else:
-                current = (current + "\n" + line) if current else line
-        if current:
-            chunks.append(current)
-        await msg.edit_text(chunks[0], parse_mode="Markdown", disable_web_page_preview=True)
-        for ch in chunks[1:]:
-            await update.message.reply_text(ch, parse_mode="Markdown", disable_web_page_preview=True)
-    else:
-        await msg.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja los callbacks cf_up / cf_down / cf_h1 / cf_h2 / cf_h3 / cf_pub."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_", 2)
+    if len(parts) != 3:
+        return
+    _, action, idx_str = parts
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        return
+
+    articles = context.chat_data.get("curador_articles", [])
+    if idx >= len(articles):
+        await query.answer("⚠️ Artículo ya no está en el briefing.", show_alert=True)
+        return
+    article = articles[idx]
+
+    if action == "up":
+        await asyncio.to_thread(feedback_record, "up", article)
+        await query.answer("👍 Registrado: este estilo de nota sube en el ranking.", show_alert=False)
+        # Actualizar texto para indicar feedback recibido
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    elif action == "down":
+        await asyncio.to_thread(feedback_record, "down", article)
+        await query.answer("👎 Registrado: este estilo baja en el ranking.", show_alert=False)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    elif action in ("h1", "h2", "h3"):
+        new_hilo = int(action[1])
+        await asyncio.to_thread(feedback_record, "hilo", article, new_hilo)
+        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}[new_hilo]
+        await query.answer(
+            f"🧵 Reclasificada al hilo {new_hilo} ({hilo_name}).",
+            show_alert=False,
+        )
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    elif action == "pub":
+        # Disparar el flujo normal de publicación con el URL del artículo
+        await asyncio.to_thread(feedback_record, "publish", article)
+        link = article.get("link", "")
+        if not link:
+            await query.answer("❌ No tengo el URL del artículo.", show_alert=True)
+            return
+        await query.answer("📰 Disparando flujo de publicación…", show_alert=False)
+        # Simular que el usuario pegó el link — ejecutar handle_link
+        fake_message = type("FakeMsg", (), {
+            "text": link,
+            "chat_id": query.message.chat_id,
+            "reply_text": query.message.reply_text,
+        })()
+        fake_update = type("FakeUpdate", (), {
+            "message": fake_message,
+        })()
+        # Usar el contexto actual para disparar handle_link
+        try:
+            await handle_link(fake_update, context)
+        except Exception as e:
+            logger.error(f"Publish shortcut: {e}")
+            await query.message.reply_text(f"❌ Error disparando publicación: {e}")
 
 
 async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
@@ -3725,28 +4127,17 @@ async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
         if OPENAI_API_KEY:
             suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
 
-        report = _format_curador_report(articles, suggestion_line=suggestion)
-        if len(report) > 4000:
-            chunks = []
-            current = ""
-            for line in report.split("\n"):
-                if len(current) + len(line) + 1 > 3900:
-                    chunks.append(current)
-                    current = line
-                else:
-                    current = (current + "\n" + line) if current else line
-            if current:
-                chunks.append(current)
-            for ch in chunks:
-                await context.bot.send_message(
-                    chat_id=int(chat_id), text=ch,
-                    parse_mode="Markdown", disable_web_page_preview=True,
-                )
-        else:
-            await context.bot.send_message(
-                chat_id=int(chat_id), text=report,
-                parse_mode="Markdown", disable_web_page_preview=True,
-            )
+        # En el scheduler: persistir articles en application.chat_data para que
+        # los callbacks de feedback puedan resolverlos
+        chat_data = context.application.chat_data[int(chat_id)]
+        chat_data["curador_articles"] = articles
+
+        fake_ctx = type("SchedCtx", (), {
+            "chat_data": chat_data,
+            "bot":       context.bot,
+        })()
+
+        await _send_curador_briefing(context.bot, int(chat_id), articles, suggestion, fake_ctx)
         logger.info(f"Curador 8AM enviado: {len(articles)} artículos")
     except Exception as e:
         logger.error(f"Error enviando curador diario: {type(e).__name__}: {e}")
@@ -3820,6 +4211,7 @@ def main():
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("curador", cmd_curador))
+    app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
@@ -3827,6 +4219,7 @@ def main():
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
+    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^cf_"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
