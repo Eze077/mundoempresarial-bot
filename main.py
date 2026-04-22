@@ -1911,6 +1911,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
         "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
+        "/curador → briefing de noticias relevantes de últimas 24h (auto a las 8:00)\n"
         "/fuentes [dominio] → ver repositorio de fuentes\n"
         "/stats → ver estadísticas del día"
     )
@@ -3355,6 +3356,402 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.edit_text(f"❌ Error: {e}")
 
 
+# ── Curador diario (RSS + scoring + briefing) ────────────────────────────────
+
+KW_PYME = [
+    # Información útil (Hilo 1)
+    "afip", "arca", "monotributo", "monotributista", "iva", "ganancias",
+    "moratoria", "blanqueo", "régimen simplificado", "factura electrónica",
+    "paritaria", "convenio colectivo", "sueldo", "jubilación", "anses",
+    "vencimiento", "plazo", "declaración jurada", "tarifa",
+    # Macro económica
+    "dólar", "dolar", "inflación", "tasa de interés", "bcra", "cepo",
+    "tipo de cambio", "reservas", "fmi", "deuda", "bonos", "riesgo país",
+    # Pymes / empresariado
+    "pyme", "pymes", "emprendedor", "empresario", "empresa", "industria",
+    "industrial", "fábrica", "cámara empresaria", "came", "enac",
+    "parque industrial", "empleo", "despidos",
+    # Sectores
+    "agro", "campo", "exportación", "importación", "comercio", "retail",
+    "construcción", "automotriz", "textil", "minería", "energía",
+    "vaca muerta", "litio", "vitivinicultura",
+    # Digitalización pyme
+    "fintech", "ecommerce", "startup argentina", "transformación digital",
+    "ciberseguridad empresarial",
+    # Política económica
+    "milei", "caputo", "kicillof", "ministerio de economía", "producción",
+    "desregulación", "rigi", "ley bases", "reforma laboral", "reforma tributaria",
+]
+
+
+def _score_article(title: str, summary: str, source_meta: dict, published_dt) -> int:
+    """Calcula score de relevancia para curador. Ver SKILL curador-mundo-empresarial."""
+    title_low = (title or "").lower()
+    summary_low = (summary or "").lower()
+
+    # 1. Keyword match — título pesa triple
+    kw_score = 0
+    for kw in KW_PYME:
+        kw_score += title_low.count(kw) * 3
+        kw_score += summary_low.count(kw)
+
+    if kw_score == 0:
+        return 0  # descarta notas sin interés pyme
+
+    # 2. Afinidad de la fuente
+    dist = source_meta.get("distancia_editorial", 5)
+    if isinstance(dist, int):
+        if dist <= 3:
+            kw_score += 3
+        elif dist <= 6:
+            kw_score += 1
+
+    # 3. Recencia
+    if published_dt:
+        from datetime import datetime, timezone as tz
+        now = datetime.now(tz.utc)
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(tzinfo=tz.utc)
+        age_hours = (now - published_dt).total_seconds() / 3600
+        if age_hours < 3:
+            kw_score += 2
+        elif age_hours < 6:
+            kw_score += 1
+        elif age_hours > 12:
+            kw_score -= 0
+
+    # 4. Confiabilidad bonus
+    conf = source_meta.get("confiabilidad", 5)
+    if isinstance(conf, int):
+        kw_score += conf // 5
+
+    return kw_score
+
+
+def _dedupe_articles(articles: list) -> list:
+    """Elimina duplicados por similaridad de título."""
+    def _normalize(t: str) -> set:
+        t = re.sub(r'[^\w\sáéíóúñ]', ' ', (t or "").lower())
+        words = {w for w in t.split() if len(w) > 3 and w not in STOP_WORDS}
+        return words
+
+    unique = []
+    for art in articles:
+        art_words = _normalize(art["title"])
+        if not art_words:
+            continue
+        dupe_of = None
+        for u in unique:
+            u_words = _normalize(u["title"])
+            if not u_words:
+                continue
+            shared = art_words & u_words
+            ratio = len(shared) / max(len(art_words), len(u_words))
+            if ratio > 0.7 or art["title"].strip().lower() == u["title"].strip().lower():
+                dupe_of = u
+                break
+        if dupe_of:
+            dupe_of.setdefault("also_in", []).append(art["source_name"])
+            # Si el duplicado tiene mayor score, lo reemplaza
+            if art["score"] > dupe_of["score"]:
+                art["also_in"] = dupe_of.get("also_in", []) + [dupe_of["source_name"]]
+                unique[unique.index(dupe_of)] = art
+        else:
+            unique.append(art)
+    return unique
+
+
+def _google_news_rss(domain: str) -> str:
+    """Arma URL de Google News RSS filtrado por dominio (fallback universal)."""
+    from urllib.parse import quote
+    q = quote(f"site:{domain}")
+    return f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=AR&ceid=AR:es-419"
+
+
+def _fetch_feed(url: str):
+    """Baja y parsea un feed RSS. Devuelve (feed, 'ok'/'error msg')."""
+    try:
+        import feedparser
+        r = requests.get(url, headers=HEADERS_BROWSER, timeout=10)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        feed = feedparser.parse(r.content)
+        if not feed.entries:
+            return None, "no entries"
+        return feed, "ok"
+    except Exception as e:
+        return None, str(e)
+
+
+def curar_noticias(max_results: int = 15) -> list:
+    """Scanea los feeds RSS de sources.json y devuelve las más relevantes de las últimas 24h.
+    Si el feed directo falla, cae a Google News RSS filtrado por dominio."""
+    try:
+        import feedparser
+    except ImportError:
+        logger.error("feedparser no instalado")
+        return []
+
+    from datetime import datetime, timezone as tz, timedelta
+
+    sources = _load_sources()
+    results = []
+    now = datetime.now(tz.utc)
+    window = now - timedelta(hours=24)
+
+    for domain, meta in sources.items():
+        rss_url = meta.get("rss_url", "")
+        feed = None
+
+        # 1) Feed directo si existe
+        if rss_url:
+            feed, status = _fetch_feed(rss_url)
+            if not feed:
+                logger.warning(f"RSS directo {domain}: {status}, cayendo a Google News")
+
+        # 2) Fallback Google News si no hay feed directo o falló
+        if not feed:
+            feed, status = _fetch_feed(_google_news_rss(domain))
+            if not feed:
+                logger.warning(f"Google News RSS {domain}: {status}")
+                continue
+
+        for entry in feed.entries[:50]:
+            # Parsear fecha
+            pub_dt = None
+            for key in ("published_parsed", "updated_parsed"):
+                struct = entry.get(key)
+                if struct:
+                    pub_dt = datetime(*struct[:6], tzinfo=tz.utc)
+                    break
+
+            if pub_dt and pub_dt < window:
+                continue  # Fuera de la ventana 24h
+
+            title = (entry.get("title") or "").strip()
+            summary = re.sub(
+                r'<[^>]+>', '',
+                (entry.get("summary") or entry.get("description") or "")
+            ).strip()
+            link = (entry.get("link") or "").strip()
+
+            if not title or not link:
+                continue
+
+            score = _score_article(title, summary, meta, pub_dt)
+            if score <= 0:
+                continue
+
+            results.append({
+                "title":       title,
+                "summary":     summary[:300],
+                "link":        link,
+                "published":   pub_dt,
+                "score":       score,
+                "source_name": meta.get("name", domain),
+                "domain":      domain,
+                "distancia":   meta.get("distancia_editorial", 5),
+                "hilo_tipico": meta.get("hilo_tipico", 2),
+            })
+
+    # Dedupe y ordenar
+    unique = _dedupe_articles(results)
+    unique.sort(key=lambda x: -x["score"])
+
+    # Asignar hilo final usando detect_hilo
+    for art in unique[:max_results]:
+        fake_data = {
+            "title":   art["title"],
+            "text":    art["summary"],
+            "excerpt": art["summary"],
+        }
+        art["hilo"] = detect_hilo(fake_data)
+
+    return unique[:max_results]
+
+
+def _format_curador_report(articles: list, suggestion_line: str = "") -> str:
+    """Arma el briefing en formato Telegram Markdown."""
+    from datetime import datetime
+    if not articles:
+        return "📰 *Curador diario*\n\nNo encontré noticias relevantes de las últimas 24h."
+
+    today = datetime.now().strftime("%d/%m/%Y")
+    header = f"📰 *Curador diario — {today}*\n_{len(articles)} notas relevantes de las últimas 24h_"
+
+    groups = {1: [], 2: [], 3: []}
+    for art in articles:
+        groups.setdefault(art.get("hilo", 2), []).append(art)
+
+    hilo_labels = {
+        1: "📋 *Informarse es respetarse*",
+        2: "🗣️ *Voz de las pymes*",
+        3: "💭 *Opinión / Análisis*",
+    }
+
+    parts = [header]
+    idx = 1
+    for h in (1, 2, 3):
+        items = groups.get(h) or []
+        if not items:
+            continue
+        parts.append("")
+        parts.append(hilo_labels[h])
+        for art in items:
+            age_h = ""
+            if art.get("published"):
+                from datetime import datetime, timezone as tz
+                now = datetime.now(tz.utc)
+                delta = now - art["published"]
+                hours = int(delta.total_seconds() / 3600)
+                age_h = f"hace {hours}h" if hours > 0 else "reciente"
+            also = ""
+            if art.get("also_in"):
+                also = f" · también: {', '.join(art['also_in'][:2])}"
+            parts.append(
+                f"*{idx}.* {md_escape(art['title'][:120])}\n"
+                f"   _{md_escape(art['source_name'])} · {age_h}{also}_\n"
+                f"   {art['link']}"
+            )
+            idx += 1
+
+    if suggestion_line:
+        parts.append("")
+        parts.append(f"💡 *Mi sugerencia:* {suggestion_line}")
+
+    return "\n".join(parts)
+
+
+def _suggest_top3_with_gpt(articles: list) -> str:
+    """Usa GPT para pedir cuáles 3 notas son las más publicables hoy."""
+    if not OPENAI_API_KEY or not articles:
+        return ""
+
+    lines = []
+    for i, art in enumerate(articles, 1):
+        lines.append(
+            f"{i}. [{art['source_name']}, hilo {art.get('hilo', 2)}, dist "
+            f"{art.get('distancia', '?')}/10] {art['title']}"
+        )
+    block = "\n".join(lines)
+
+    prompt = (
+        "Sos el editor de MundoEmpresarial.ar (medio económico argentino para pymes, "
+        "alineado con ENAC: desarrollismo nacional, pyme, mercado interno, crítico del "
+        "ajuste neoliberal). Te paso el ranking de noticias de las últimas 24h que "
+        "procesó el curador.\n\n"
+        "Elegí las 3 más publicables hoy, IDEALMENTE una por hilo (1=info útil, 2=voz "
+        "de las pymes, 3=opinión política). Criterios: relevancia para el lector pyme, "
+        "novedad, afinidad editorial, impacto.\n\n"
+        "Ranking:\n"
+        f"{block}\n\n"
+        "Devolvé SOLO una línea en este formato, sin explicaciones ni saltos:\n"
+        "#N (hilo X — razón breve) · #M (hilo Y — razón breve) · #K (hilo Z — razón breve)"
+    )
+
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+            },
+            timeout=40,
+        )
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"GPT suggest: {e}")
+    return ""
+
+
+async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scanea las fuentes RSS de las últimas 24h y devuelve las más relevantes."""
+    msg = await update.message.reply_text("🔍 Scaneando fuentes...")
+    articles = await asyncio.to_thread(curar_noticias, 15)
+
+    if not articles:
+        await msg.edit_text(
+            "❌ No encontré noticias relevantes. Puede ser que los feeds RSS no "
+            "respondan o que no haya matches de pyme en las últimas 24h."
+        )
+        return
+
+    # Sugerencia con GPT (opcional)
+    suggestion = ""
+    if OPENAI_API_KEY:
+        await msg.edit_text(f"🔍 Scaneo OK ({len(articles)} notas). Generando sugerencia…")
+        suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
+
+    report = _format_curador_report(articles, suggestion_line=suggestion)
+
+    # Telegram limita mensajes a 4096 chars
+    if len(report) > 4000:
+        chunks = []
+        current = ""
+        for line in report.split("\n"):
+            if len(current) + len(line) + 1 > 3900:
+                chunks.append(current)
+                current = line
+            else:
+                current = (current + "\n" + line) if current else line
+        if current:
+            chunks.append(current)
+        await msg.edit_text(chunks[0], parse_mode="Markdown", disable_web_page_preview=True)
+        for ch in chunks[1:]:
+            await update.message.reply_text(ch, parse_mode="Markdown", disable_web_page_preview=True)
+    else:
+        await msg.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
+    """Envía el briefing del curador todos los días a las 8:00 AM ARG."""
+    chat_id = ADMIN_CHAT_ID
+    if not chat_id:
+        logger.warning("No hay ADMIN_CHAT_ID para enviar curador diario")
+        return
+    try:
+        articles = await asyncio.to_thread(curar_noticias, 15)
+        if not articles:
+            logger.info("Curador 8AM: 0 artículos relevantes, no envío briefing")
+            return
+
+        suggestion = ""
+        if OPENAI_API_KEY:
+            suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
+
+        report = _format_curador_report(articles, suggestion_line=suggestion)
+        if len(report) > 4000:
+            chunks = []
+            current = ""
+            for line in report.split("\n"):
+                if len(current) + len(line) + 1 > 3900:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = (current + "\n" + line) if current else line
+            if current:
+                chunks.append(current)
+            for ch in chunks:
+                await context.bot.send_message(
+                    chat_id=int(chat_id), text=ch,
+                    parse_mode="Markdown", disable_web_page_preview=True,
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=int(chat_id), text=report,
+                parse_mode="Markdown", disable_web_page_preview=True,
+            )
+        logger.info(f"Curador 8AM enviado: {len(articles)} artículos")
+    except Exception as e:
+        logger.error(f"Error enviando curador diario: {type(e).__name__}: {e}")
+
+
 # ── Reporte diario programado ────────────────────────────────────────────────
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -3422,6 +3819,7 @@ def main():
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
+    app.add_handler(CommandHandler("curador", cmd_curador))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
@@ -3432,10 +3830,20 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
-    # Programar reporte diario a las 23:00 Argentina (UTC-3)
+    # Programar tareas automáticas en Argentina (UTC-3)
     from datetime import timezone, timedelta
     tz_arg = timezone(timedelta(hours=-3))
     job_queue = app.job_queue
+
+    # Curador diario a las 8:00 AM ARG
+    job_queue.run_daily(
+        send_daily_curador,
+        time=dtime(hour=8, minute=0, tzinfo=tz_arg),
+        name="daily_curador",
+    )
+    logger.info("Curador diario programado para las 08:00 ARG")
+
+    # Reporte de stats a las 23:00 ARG
     job_queue.run_daily(
         send_daily_report,
         time=dtime(hour=23, minute=0, tzinfo=tz_arg),

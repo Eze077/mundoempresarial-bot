@@ -1,7 +1,7 @@
 {
   "_schema": {
-    "version": 1,
-    "description": "Repositorio de fuentes utilizadas por el bot de MundoEmpresarial.ar. Se consulta con /fuentes. Cada entrada usa el dominio raíz (sin www) como clave.",
+    "version": 2,
+    "description": "Repositorio de fuentes utilizadas por el bot de MundoEmpresarial.ar. Se consulta con /fuentes. Las que tienen rss_url son scaneadas por /curador cada día a las 8 AM ARG.",
     "campos": {
       "name": "Nombre visible del medio",
       "tipo": "Generalista / Economía / Política / Pyme / Agro / Internacional / Opinión / Sectorial / Oficial",
@@ -10,7 +10,8 @@
       "hilo_tipico": "1 = Informarse es respetarse (info útil). 2 = Voz de las pymes (sectorial). 3 = Opinión/posición política",
       "confiabilidad": "1-10. Calidad informativa (datos chequeados, pluralidad, rigor)",
       "notas": "Observaciones editoriales libres",
-      "quirks": "Problemas técnicos conocidos al scrapear (403, brotli, SPA, etc.)"
+      "quirks": "Problemas técnicos conocidos al scrapear (403, brotli, SPA, etc.)",
+      "rss_url": "URL del feed RSS/Atom. Si está presente, el curador diario lo scanea."
     }
   },
 
@@ -22,7 +23,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 7,
     "notas": "Buen stock de notas de coyuntura económica. Fuente frecuente pero hay que filtrar sesgo al reescribir.",
-    "quirks": "JSON-LD con articleBody completo. Funciona OK."
+    "quirks": "JSON-LD con articleBody completo. Funciona OK.",
+    "rss_url": "https://www.infobae.com/feeds/rss/"
   },
 
   "lapoliticaonline.com": {
@@ -33,7 +35,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 8,
     "notas": "Buen material para Hilo 3 (posición política). Notas con ángulo analítico.",
-    "quirks": "Bloquea IPs cloud con 403 sin headers completos. Requiere Sec-Fetch-* + Referer google.com (ya configurado en HEADERS_BROWSER)."
+    "quirks": "Bloquea IPs cloud con 403 sin headers completos. Requiere Sec-Fetch-* + Referer google.com (ya configurado en HEADERS_BROWSER).",
+    "rss_url": "https://www.lapoliticaonline.com/feed/"
   },
 
   "somospymes.com": {
@@ -44,7 +47,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 8,
     "notas": "Fuente natural para Hilo 2 (voz de las pymes). Se puede citar sin mucho reframe.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://somospymes.com/feed/"
   },
 
   "ambito.com": {
@@ -55,7 +59,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 8,
     "notas": "Excelente para datos (dólar, bonos, mercados). JSON-LD completo.",
-    "quirks": "Servía Brotli y rompía el scraper. Fixed quitando br del Accept-Encoding."
+    "quirks": "Servía Brotli y rompía el scraper. Fixed quitando br del Accept-Encoding.",
+    "rss_url": "https://www.ambito.com/rss/pages/home.xml"
   },
 
   "cronista.com": {
@@ -66,7 +71,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 7,
     "notas": "Buena cobertura de empresas grandes. Filtra por interés pyme antes de reescribir.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.cronista.com/files/rss/ultimas.xml"
   },
 
   "baenegocios.com": {
@@ -77,7 +83,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 7,
     "notas": "Tono alineado con la línea MundoEmpresarial. Citas de sindicatos y pymes frecuentes.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.baenegocios.com/rss/pages/home.xml"
   },
 
   "perfil.com": {
@@ -88,7 +95,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 7,
     "notas": "Mixto. Bueno para contexto político.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.perfil.com/feed"
   },
 
   "pagina12.com.ar": {
@@ -99,7 +107,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 7,
     "notas": "Fuente afín a la línea editorial. Buen material para Hilo 3 en posición política.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.pagina12.com.ar/rss/portada"
   },
 
   "eldestapeweb.com": {
@@ -110,7 +119,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 6,
     "notas": "Fuente afín. Tono militante, reescribir con filtro informativo.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.eldestapeweb.com/rss/home.xml"
   },
 
   "clarin.com": {
@@ -121,7 +131,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 8,
     "notas": "Referencia amplia pero requiere reframe al ángulo pyme.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://www.clarin.com/rss/lo-ultimo/"
   },
 
   "lanacion.com.ar": {
@@ -132,7 +143,8 @@
     "hilo_tipico": 2,
     "confiabilidad": 8,
     "notas": "Muy amplia en cobertura. Filtrar fuerte antes de reescribir desde la línea MundoEmpresarial.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": "https://servicios.lanacion.com.ar/herramientas/rss/origen=2"
   },
 
   "letrap.com.ar": {
@@ -143,7 +155,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 8,
     "notas": "Buena fuente para análisis de agenda política. Muy útil para Hilo 3.",
-    "quirks": ""
+    "quirks": "",
+    "rss_url": ""
   },
 
   "aciprensa.com": {
@@ -154,7 +167,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 7,
     "notas": "Útil cuando cruza temas sociales (pobreza, trabajo, doctrina social de la Iglesia) con posición editorial MundoEmpresarial.",
-    "quirks": "No trae articleBody en JSON-LD, cae a trafilatura."
+    "quirks": "No trae articleBody en JSON-LD, cae a trafilatura.",
+    "rss_url": ""
   },
 
   "legadofrancisco.org": {
@@ -165,7 +179,8 @@
     "hilo_tipico": 3,
     "confiabilidad": 8,
     "notas": "Material para Hilo 3 con lectura humanista. Muy alineado con la filosofía MundoEmpresarial.",
-    "quirks": "Sitio SPA (React). El scraper cae a Google Cache. A veces no hay texto recuperable."
+    "quirks": "Sitio SPA (React). El scraper cae a Google Cache. A veces no hay texto recuperable.",
+    "rss_url": ""
   },
 
   "youtube.com": {
@@ -176,6 +191,7 @@
     "hilo_tipico": 2,
     "confiabilidad": 5,
     "notas": "Procesa video + transcripción + resumen con GPT. El canal fuente queda en data.youtube_channel. Evaluar canal caso por caso.",
-    "quirks": "Transcripción con cascada: youtube-transcript-api → yt-dlp → Whisper API. PO Token bypass vía player_client mobile."
+    "quirks": "Transcripción con cascada: youtube-transcript-api → yt-dlp → Whisper API. PO Token bypass vía player_client mobile.",
+    "rss_url": ""
   }
 }
