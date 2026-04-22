@@ -39,6 +39,9 @@ TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
+# OpenAI API key (opcional, solo para fallback de transcripción Whisper)
+OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
+
 HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1038,10 +1041,175 @@ def youtube_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parse_vtt(content: str) -> str:
+    """Extrae texto plano de un VTT de YouTube, dedupeando líneas contiguas."""
+    lines = []
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line or line.startswith(("WEBVTT", "NOTE", "Kind:", "Language:", "STYLE")):
+            continue
+        if "-->" in line:
+            continue
+        if re.match(r"^\d+$", line):
+            continue
+        line = re.sub(r"<[^>]+>", "", line)
+        if line:
+            lines.append(line)
+    # Dedup contiguos (YouTube auto-subs repiten líneas en el scroll)
+    dedup = []
+    for l in lines:
+        if not dedup or l != dedup[-1]:
+            dedup.append(l)
+    return " ".join(dedup)
+
+
+def _transcript_via_whisper(video_id: str) -> str:
+    """
+    Fallback final: baja el audio con yt-dlp y lo transcribe con OpenAI Whisper API.
+    Requiere OPENAI_API_KEY en env vars. Costo: ~$0.006/min de audio.
+    """
+    if not OPENAI_API_KEY:
+        logger.info("Whisper: OPENAI_API_KEY no configurada, salteando")
+        return ""
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return ""
+
+    import tempfile
+    import glob
+
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_opts = {
+            "format": "bestaudio[abr<=64]/bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "64",
+            }],
+        }
+        try:
+            with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                ydl.download([video_url])
+        except Exception as e:
+            # Si ffmpeg no está disponible, intentar sin conversión
+            logger.warning(f"yt-dlp audio con ffmpeg falló: {e}, probando sin conversión")
+            audio_opts.pop("postprocessors", None)
+            try:
+                with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                    ydl.download([video_url])
+            except Exception as e2:
+                logger.error(f"yt-dlp audio falló: {e2}")
+                return ""
+
+        files = glob.glob(os.path.join(tmpdir, "audio.*"))
+        if not files:
+            logger.error("Whisper: no se descargó el audio")
+            return ""
+
+        audio_path = files[0]
+        size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        logger.info(f"Whisper: audio descargado {audio_path} ({size_mb:.1f} MB)")
+
+        # Whisper API tiene límite de 25 MB por archivo
+        if size_mb > 24.5:
+            logger.error(f"Whisper: audio {size_mb:.1f} MB excede 25 MB. No soportado por ahora.")
+            return ""
+
+        try:
+            with open(audio_path, "rb") as f:
+                files_upload = {"file": (os.path.basename(audio_path), f, "audio/mpeg")}
+                data = {
+                    "model": "whisper-1",
+                    "language": "es",
+                    "response_format": "text",
+                }
+                r = requests.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data=data,
+                    files=files_upload,
+                    timeout=120,
+                )
+            if r.status_code == 200:
+                text = r.text.strip()
+                logger.info(f"Whisper OK: {len(text)} chars")
+                return text
+            logger.error(f"Whisper API {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.error(f"Whisper request falló: {e}")
+    return ""
+
+
+def _transcript_via_ytdlp(video_id: str) -> str:
+    """
+    Fallback cuando youtube-transcript-api falla. yt-dlp accede a la API
+    interna de YouTube (innertube) y suele conseguir subs auto-generados
+    incluso cuando el endpoint público dice "TranscriptsDisabled".
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        logger.warning("yt-dlp no está instalado")
+        return ""
+
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    opts = {"skip_download": True, "quiet": True, "no_warnings": True}
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+    except Exception as e:
+        logger.error(f"yt-dlp extract_info falló: {e}")
+        return ""
+
+    # Preferencia: manual es > manual es-AR > auto es-orig > auto es > auto en
+    manual = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+
+    candidates = []
+    for lang in ("es", "es-AR", "es-419", "es-ES", "es-MX"):
+        if lang in manual:
+            candidates.append((manual[lang], lang, "manual"))
+    for lang in ("es-orig", "es", "es-AR", "es-419", "es-ES", "es-MX"):
+        if lang in auto:
+            candidates.append((auto[lang], lang, "auto"))
+    for lang in ("en", "en-US", "en-GB"):
+        if lang in manual:
+            candidates.append((manual[lang], lang, "manual-en"))
+        if lang in auto:
+            candidates.append((auto[lang], lang, "auto-en"))
+
+    for fmts, lang, source in candidates:
+        vtt_fmt = next((f for f in fmts if f.get("ext") == "vtt"), None)
+        if not vtt_fmt:
+            continue
+        try:
+            r = requests.get(vtt_fmt["url"], timeout=15)
+            if r.status_code != 200:
+                continue
+            text = _parse_vtt(r.text)
+            if text and len(text) > 200:
+                logger.info(f"yt-dlp transcript OK via {source} ({lang}): {len(text)} chars")
+                if source.endswith("-en"):
+                    text += "\n[Nota: transcripción en inglés, revisar traducción]"
+                return text
+        except Exception as e:
+            logger.warning(f"fetch VTT {lang}: {e}")
+            continue
+    return ""
+
+
 def scrape_youtube(url: str) -> dict:
     """
     Extrae un video de YouTube: metadata via oEmbed + transcripción via
-    youtube-transcript-api. Devuelve el dict listo para la fase 2.
+    youtube-transcript-api con fallback a yt-dlp. Devuelve el dict listo para la fase 2.
     """
     video_id = youtube_video_id(url)
     if not video_id:
@@ -1065,49 +1233,51 @@ def scrape_youtube(url: str) -> dict:
     except Exception as e:
         logger.warning(f"YouTube oEmbed falló: {e}")
 
-    # Transcripción
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api._errors import (
-            TranscriptsDisabled, NoTranscriptFound, VideoUnavailable,
-        )
-    except ImportError:
-        raise RuntimeError("youtube-transcript-api no está instalado. Revisá requirements.txt")
-
+    # Transcripción: 1) youtube-transcript-api  2) yt-dlp fallback  3) Whisper
     transcript_text = ""
     try:
-        # Intentar español primero, luego inglés
-        for langs in (["es", "es-AR", "es-419", "es-MX", "es-ES"], ["en", "en-US", "en-GB"]):
-            try:
-                segments = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-                transcript_text = " ".join(seg["text"] for seg in segments)
-                if "en" in langs[0]:
-                    transcript_text += "\n[Nota: transcripción en inglés, revisar traducción]"
-                break
-            except NoTranscriptFound:
-                continue
-        if not transcript_text:
-            # Último intento: cualquier idioma disponible
-            try:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                for t in transcript_list:
-                    try:
-                        segments = t.fetch()
-                        transcript_text = " ".join(seg["text"] for seg in segments)
-                        transcript_text += f"\n[Nota: transcripción en {t.language_code}]"
-                        break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-    except TranscriptsDisabled:
-        raise RuntimeError("El dueño del video desactivó las transcripciones.")
-    except VideoUnavailable:
-        raise RuntimeError("El video no está disponible.")
+        from youtube_transcript_api import YouTubeTranscriptApi
+        try:
+            for langs in (["es", "es-AR", "es-419", "es-MX", "es-ES"], ["en", "en-US", "en-GB"]):
+                try:
+                    segments = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+                    transcript_text = " ".join(seg["text"] for seg in segments)
+                    if "en" in langs[0]:
+                        transcript_text += "\n[Nota: transcripción en inglés, revisar traducción]"
+                    break
+                except Exception:
+                    continue
+            if not transcript_text:
+                try:
+                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    for t in transcript_list:
+                        try:
+                            segments = t.fetch()
+                            transcript_text = " ".join(seg["text"] for seg in segments)
+                            transcript_text += f"\n[Nota: transcripción en {t.language_code}]"
+                            break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.info(f"youtube-transcript-api no disponible ({type(e).__name__}: {e}), probando fallbacks")
+    except ImportError:
+        logger.warning("youtube-transcript-api no está instalado")
+
+    # Fallback 2: yt-dlp (subs oficiales / auto-generados via innertube)
+    if not transcript_text or len(transcript_text) < 200:
+        logger.info("Intentando fallback con yt-dlp...")
+        transcript_text = _transcript_via_ytdlp(video_id)
+
+    # Fallback 3: Whisper (baja audio y transcribe, $0.006/min)
+    if not transcript_text or len(transcript_text) < 200:
+        logger.info("Intentando fallback con Whisper API...")
+        transcript_text = _transcript_via_whisper(video_id)
 
     if not transcript_text or len(transcript_text) < 200:
         raise RuntimeError(
-            "Este video no tiene transcripción disponible. "
+            "No se pudo obtener la transcripción de este video. "
             "Probá con otro o pegá el link del artículo que lo cubrió."
         )
 
