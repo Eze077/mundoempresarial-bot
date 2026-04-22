@@ -404,6 +404,61 @@ def _generate_h2(paragraphs: list, kw: str) -> list:
     return deduped
 
 
+def normalize_text(text: str) -> str:
+    """
+    Normalización tipográfica básica antes de render (skill redactor 4.b/4.c):
+    - Un solo espacio después de punto seguido, coma, etc.
+    - Comillas rectas → tipográficas
+    - Guiones dobles → em-dash
+    - Porcentajes con espacio no-rompible entre número y %
+    """
+    if not text:
+        return ""
+
+    t = text
+
+    # Colapsar espacios múltiples (preservando saltos de línea)
+    t = re.sub(r'[ \t]{2,}', ' ', t)
+
+    # Quitar espacio antes de puntuación
+    t = re.sub(r'\s+([,.;:!?])', r'\1', t)
+
+    # Asegurar UN espacio después de punto seguido (no de decimales tipo "3.4" o "3,4")
+    # Solo agregamos espacio cuando la puntuación es seguida de MAYÚSCULA o letra (no dígito)
+    t = re.sub(r'([.;:!?])([A-Za-zÁÉÍÓÚÑáéíóúñ])', r'\1 \2', t)
+    # Coma: mismo tratamiento, pero sin romper decimales. Si la coma está entre dígitos, NO tocar
+    t = re.sub(r',([A-Za-zÁÉÍÓÚÑáéíóúñ])', r', \1', t)
+
+    # Guiones dobles -- → em-dash
+    t = re.sub(r'\s--\s', ' — ', t)
+    t = re.sub(r'(?<=\w)--(?=\w)', '—', t)
+
+    # Comillas rectas → tipográficas (pareadas)
+    # Simple heuristic: alternar apertura/cierre
+    def _curly_quotes(s: str) -> str:
+        out = []
+        open_q = True
+        for ch in s:
+            if ch == '"':
+                out.append('"' if open_q else '"')
+                open_q = not open_q
+            else:
+                out.append(ch)
+        return "".join(out)
+    t = _curly_quotes(t)
+
+    # Apóstrofes rectos → tipográficos
+    t = re.sub(r"(\w)'(\w)", r"\1’\2", t)
+
+    # Porcentaje: asegurar espacio no-rompible entre número y %
+    t = re.sub(r'(\d)\s*%', r'\1 %', t)
+
+    # Normalizar varios saltos de línea seguidos a máximo 2
+    t = re.sub(r'\n{3,}', '\n\n', t)
+
+    return t.strip()
+
+
 def format_content(data: dict, kw: str = "") -> str:
     """
     Estructura SEO del contenido según el Manual de Estilo:
@@ -415,8 +470,9 @@ def format_content(data: dict, kw: str = "") -> str:
     - Datos en negrita
     - Recuadro RESUMEN PARA PYMES
     - Link externo dofollow a la fuente (Rank Math: external link)
+    - Normalización tipográfica (espaciado, comillas, porcentajes)
     """
-    raw_text = data["text"]
+    raw_text = normalize_text(data["text"])
 
     # Dividir texto largo en párrafos reales (max ~100 palabras cada uno)
     raw_paragraphs = [p.strip() for p in raw_text.split("\n") if p.strip()]
@@ -483,6 +539,14 @@ def format_content(data: dict, kw: str = "") -> str:
 
     parts = []
     h2_index = 0
+    hilo = data.get("hilo", 2)
+
+    # Tag visual [OPINIÓN] / [ANÁLISIS] al inicio si es Hilo 3
+    if hilo == 3:
+        parts.append(
+            '<p style="color:#c0392b;font-weight:700;letter-spacing:1px;'
+            'font-size:12px;margin:0 0 8px;">[OPINIÓN / ANÁLISIS]</p>'
+        )
 
     for i, para in enumerate(paragraphs):
         # Resaltar números/datos
@@ -491,6 +555,15 @@ def format_content(data: dict, kw: str = "") -> str:
         if i == 0:
             # Lead en negrita
             parts.append(f"<p><strong>{para_html}</strong></p>")
+
+            # Si es YouTube, embebemos el video justo después del lead
+            if data.get("is_youtube") and data.get("source_url"):
+                parts.append(
+                    f'<figure class="wp-block-embed is-type-video is-provider-youtube">'
+                    f'<div class="wp-block-embed__wrapper">{data["source_url"]}</div>'
+                    f'</figure>'
+                )
+
             if h2_index < len(h2_labels):
                 parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
                 h2_index += 1
@@ -504,11 +577,20 @@ def format_content(data: dict, kw: str = "") -> str:
     # Recuadro Pymes
     parts.append(pyme_box(data["text"], data["excerpt"]))
 
-    # Fuente (link externo dofollow — Rank Math: 4+2 pts)
-    parts.append(
-        f'<p><em>Fuente: <a href="{data["source_url"]}" '
-        f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
-    )
+    # Fuente — formato especial para YouTube
+    if data.get("is_youtube"):
+        channel = data.get("youtube_channel", "")
+        channel_html = f"del canal *{channel}* " if channel else ""
+        parts.append(
+            f'<p><em>Fuente: Video {channel_html}— '
+            f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">'
+            f'Ver en YouTube</a></em></p>'
+        )
+    else:
+        parts.append(
+            f'<p><em>Fuente: <a href="{data["source_url"]}" '
+            f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
+        )
     return "\n".join(parts)
 
 
@@ -921,6 +1003,321 @@ def _detect_media(soup: BeautifulSoup, url: str) -> dict:
     return media
 
 
+# ── Parseo de input + detección de YouTube ────────────────────────────────────
+
+_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
+_YOUTUBE_ID_RE = re.compile(r'(?:v=|youtu\.be/|shorts/|embed/|/v/)([A-Za-z0-9_-]{11})')
+_YOUTUBE_HOST_RE = re.compile(r'(?://|\.)(?:youtube\.com|youtu\.be|m\.youtube\.com)/', re.IGNORECASE)
+
+
+def extract_url_from_text(text: str) -> str | None:
+    """Extrae el primer URL del mensaje. Devuelve None si no hay ninguno."""
+    m = _URL_RE.search(text or "")
+    return m.group(0).rstrip('.,;:!?)]}') if m else None
+
+
+def detect_url_kind(url: str) -> str:
+    """Devuelve 'youtube' | 'article' | 'tweet' | 'instagram' | 'unknown'."""
+    if not url:
+        return "unknown"
+    low = url.lower()
+    if _YOUTUBE_HOST_RE.search(low):
+        return "youtube"
+    if "twitter.com" in low or "x.com/" in low:
+        if "/status/" in low:
+            return "tweet"
+    if "instagram.com/p/" in low or "instagram.com/reel/" in low:
+        return "instagram"
+    if low.startswith(("http://", "https://")):
+        return "article"
+    return "unknown"
+
+
+def youtube_video_id(url: str) -> str | None:
+    m = _YOUTUBE_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def scrape_youtube(url: str) -> dict:
+    """
+    Extrae un video de YouTube: metadata via oEmbed + transcripción via
+    youtube-transcript-api. Devuelve el dict listo para la fase 2.
+    """
+    video_id = youtube_video_id(url)
+    if not video_id:
+        raise ValueError("No se pudo extraer el video_id de la URL de YouTube")
+
+    # Metadata via oEmbed (sin API key, siempre funciona para públicos)
+    video_url_canon = f"https://www.youtube.com/watch?v={video_id}"
+    title = "Video de YouTube"
+    author = ""
+    thumbnail = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+    try:
+        oembed = requests.get(
+            f"https://www.youtube.com/oembed?url={video_url_canon}&format=json",
+            timeout=10,
+        )
+        if oembed.status_code == 200:
+            meta = oembed.json()
+            title = meta.get("title", title)
+            author = meta.get("author_name", "")
+            thumbnail = meta.get("thumbnail_url", thumbnail)
+    except Exception as e:
+        logger.warning(f"YouTube oEmbed falló: {e}")
+
+    # Transcripción
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import (
+            TranscriptsDisabled, NoTranscriptFound, VideoUnavailable,
+        )
+    except ImportError:
+        raise RuntimeError("youtube-transcript-api no está instalado. Revisá requirements.txt")
+
+    transcript_text = ""
+    try:
+        # Intentar español primero, luego inglés
+        for langs in (["es", "es-AR", "es-419", "es-MX", "es-ES"], ["en", "en-US", "en-GB"]):
+            try:
+                segments = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+                transcript_text = " ".join(seg["text"] for seg in segments)
+                if "en" in langs[0]:
+                    transcript_text += "\n[Nota: transcripción en inglés, revisar traducción]"
+                break
+            except NoTranscriptFound:
+                continue
+        if not transcript_text:
+            # Último intento: cualquier idioma disponible
+            try:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                for t in transcript_list:
+                    try:
+                        segments = t.fetch()
+                        transcript_text = " ".join(seg["text"] for seg in segments)
+                        transcript_text += f"\n[Nota: transcripción en {t.language_code}]"
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+    except TranscriptsDisabled:
+        raise RuntimeError("El dueño del video desactivó las transcripciones.")
+    except VideoUnavailable:
+        raise RuntimeError("El video no está disponible.")
+
+    if not transcript_text or len(transcript_text) < 200:
+        raise RuntimeError(
+            "Este video no tiene transcripción disponible. "
+            "Probá con otro o pegá el link del artículo que lo cubrió."
+        )
+
+    # Limpiar muletillas y marcadores
+    transcript_clean = _clean_transcript(transcript_text)
+
+    # Resumir a tono periodístico (sin LLM — heurística de extracción de frases clave)
+    summary = _summarize_transcript(transcript_clean, author=author, title=title)
+
+    excerpt = summary[:200] + "..." if len(summary) > 200 else summary
+
+    return {
+        "title":               title,
+        "original_title":      title,
+        "text":                summary,
+        "excerpt":             excerpt,
+        "image_url":           thumbnail,
+        "source_url":          video_url_canon,
+        "media": {
+            "has_video":       True,
+            "video_url":       video_url_canon,
+            "has_photo":       True,
+            "photo_url":       thumbnail,
+        },
+        "is_youtube":          True,
+        "youtube_channel":     author,
+        "youtube_video_id":    video_id,
+        "youtube_transcript":  transcript_clean,
+    }
+
+
+def _clean_transcript(text: str) -> str:
+    """Limpia muletillas y marcadores de transcripción."""
+    # Sacar marcadores tipo [Música], [Aplausos], [Risas]
+    text = re.sub(r'\[[^\]]{1,30}\]', '', text)
+    # Sacar muletillas frecuentes
+    fillers = [
+        r'\b(?:eh|em|este|o sea|digamos|viste|no\??|sabés|mirá|bueno)\b',
+        r'\b(?:you know|I mean|like|uh|um)\b',
+    ]
+    for f in fillers:
+        text = re.sub(f, '', text, flags=re.IGNORECASE)
+    # Colapsar espacios
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _summarize_transcript(transcript: str, author: str = "", title: str = "") -> str:
+    """
+    Genera un resumen periodístico de la transcripción sin usar LLM.
+    Heurística: selecciona oraciones con mayor densidad de palabras significativas,
+    mantiene citas textuales (palabras entre comillas o con verbos declarativos),
+    arma párrafos narrativos en tercera persona.
+    """
+    if not transcript:
+        return ""
+
+    # Dividir en oraciones
+    sentences = re.split(r'(?<=[.!?])\s+', transcript)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
+
+    if not sentences:
+        return transcript[:800]
+
+    # Scoring simple: longitud moderada (40-200 chars) + presencia de keywords significativos
+    signal_words = {
+        "pyme", "empresa", "industria", "economía", "inflación", "dólar",
+        "gobierno", "ley", "trabajo", "empleo", "producción", "exportación",
+        "importación", "inversión", "mercado", "impuesto", "tasa", "crédito",
+        "afip", "arca", "bcra", "fmi", "milei", "kicillof", "caputo",
+        "cámara", "sindicato", "sector", "país", "argentina",
+    }
+    scored = []
+    for i, s in enumerate(sentences):
+        low = s.lower()
+        length = len(s)
+        if length < 40 or length > 260:
+            continue
+        score = sum(1 for w in signal_words if w in low)
+        # Bonus por frases con cifras
+        if re.search(r'\d+[.,]?\d*\s*%|\$\s*[\d.,]+', s):
+            score += 2
+        # Bonus por citas/declaraciones
+        if re.search(r'"[^"]{10,}"|afirm|señal|sostuv|advirt|denunc|explic|indic', low):
+            score += 2
+        # Bonus por posición al inicio del video
+        if i < len(sentences) * 0.2:
+            score += 1
+        scored.append((score, i, s))
+
+    # Tomar top ~40% de las oraciones, reordenadas por posición original
+    scored.sort(key=lambda x: -x[0])
+    n_keep = max(12, int(len(sentences) * 0.4))
+    top = sorted(scored[:n_keep], key=lambda x: x[1])
+
+    # Reemitir como párrafos narrativos (hasta 800 palabras total)
+    body_sentences = []
+    word_count = 0
+    for _, _, s in top:
+        body_sentences.append(s)
+        word_count += len(s.split())
+        if word_count > 800:
+            break
+
+    body = " ".join(body_sentences)
+
+    # Dividir en párrafos cada ~100 palabras
+    words = body.split()
+    paragraphs = []
+    current = []
+    for w in words:
+        current.append(w)
+        if len(current) >= 100 and w.endswith(('.', '!', '?')):
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+
+    # Intro contextual si hay autor/título
+    intro_parts = []
+    if author:
+        intro_parts.append(f"En una entrevista publicada en el canal *{author}* de YouTube,")
+    elif title:
+        intro_parts.append(f"En el video *{title}*,")
+
+    if intro_parts:
+        intro = " ".join(intro_parts) + " se abordaron los siguientes puntos principales:"
+        return intro + "\n\n" + "\n\n".join(paragraphs)
+
+    return "\n\n".join(paragraphs)
+
+
+# ── Detección de hilo editorial ──────────────────────────────────────────────
+
+HILO_KEYWORDS = {
+    1: [  # "Informarse es respetarse" — info útil
+        "afip", "arca", "monotributo", "vencimiento", "ganancias", "iva",
+        "moratoria", "blanqueo", "régimen", "decreto", "resolución general",
+        "ley de", "alícuota", "categoría", "plan de pago", "factura electrónica",
+        "percepción", "retención", "convenio colectivo", "paritaria",
+        "jubilación", "anses", "cuit", "cbu", "plazo", "presentación",
+        "declaración jurada", "tarifas",
+    ],
+    2: [  # "La voz de las pymes" — sectorial/empresarial
+        "empresario", "empresaria", "pyme", "industria", "industrial",
+        "exportación", "importación", "mercado interno", "producción",
+        "cámara", "cadena de valor", "agro", "textil", "calzado",
+        "metalmecánica", "automotriz", "vitivinicultura", "minería",
+        "construcción", "comercio", "retail", "balanza comercial",
+        "inversión productiva", "empleo industrial", "parque industrial",
+        "clúster", "cooperativa",
+    ],
+    3: [  # Opinión/posición política
+        "editorial", "opinión", "análisis", "crítica", "debate",
+        "modelo económico", "ajuste", "neoliberal", "desarrollo nacional",
+        "soberanía", "concentración", "monopolio", "oligopolio", "fmi",
+        "reforma laboral", "reforma tributaria", "rigi",
+        "libertario", "kirchnerismo", "peronismo", "milei", "caputo",
+        "kicillof", "unión industrial", "aea",
+        "denuncia", "cuestiona", "advierte", "repudia", "defiende",
+    ],
+}
+
+_HILO_HINT_RE = re.compile(
+    r'\b(?:hilo\s*([123])|h([123])|informarse|voz\s*pymes|opini[oó]n)\b',
+    re.IGNORECASE,
+)
+
+
+def extract_hilo_hint(text: str) -> int | None:
+    """Si el operador mencionó hilo explícito en el mensaje, devolver 1/2/3."""
+    m = _HILO_HINT_RE.search(text or "")
+    if not m:
+        return None
+    if m.group(1):
+        return int(m.group(1))
+    if m.group(2):
+        return int(m.group(2))
+    txt = m.group(0).lower()
+    if "informarse" in txt:
+        return 1
+    if "voz" in txt:
+        return 2
+    if "opinión" in txt or "opinion" in txt:
+        return 3
+    return None
+
+
+def detect_hilo(data: dict) -> int:
+    """Detecta el hilo editorial por keyword matching."""
+    corpus = (
+        data.get("title", "") + " " +
+        data.get("title", "") + " " +  # doble peso al título
+        data.get("excerpt", "") + " " +
+        (data.get("text", "")[:800] or "")
+    ).lower()
+    scores = {}
+    for hilo, kws in HILO_KEYWORDS.items():
+        scores[hilo] = sum(corpus.count(kw) for kw in kws)
+    # YouTube raramente es hilo 1 salvo tutoriales
+    if data.get("is_youtube") and scores[1] < scores[2] + scores[3]:
+        scores[1] = max(0, scores[1] - 2)
+    if max(scores.values()) == 0:
+        return 2  # fallback: voz de las pymes
+    return max(scores, key=scores.get)
+
+
+HILO_NAMES = {1: "Informarse es respetarse", 2: "La voz de las pymes", 3: "Opinión / Análisis"}
+
+
 def scrape(url: str) -> dict:
     session = requests.Session()
     session.headers.update(HEADERS_BROWSER)
@@ -1122,13 +1519,25 @@ def build_preview(data: dict) -> str:
     elif media.get("has_photo"):
         media_str = "📸 Foto"
 
+    # Hilo editorial
+    hilo = data.get("hilo", 2)
+    hilo_emoji = {1: "📋", 2: "🗣️", 3: "💭"}.get(hilo, "")
+    hilo_line = f"*Hilo:* {hilo_emoji} {hilo} — {HILO_NAMES.get(hilo, '?')}\n"
+
+    # YouTube?
+    yt_line = ""
+    if data.get("is_youtube"):
+        yt_line = f"*YouTube:* 🎬 canal _{data.get('youtube_channel','?')}_\n"
+
     return (
-        f"*{s_title}*\n\n"
+        f"*{md_escape(s_title)}*\n\n"
+        f"{yt_line}"
+        f"{hilo_line}"
         f"*Keyword:* {s_kw}\n"
         f"*Slug:* /{s_slug}\n"
         f"*Categorias:* {cats_str}\n"
         f"*Etiquetas:* {tag_preview}\n\n"
-        f"_{s_desc}_\n\n"
+        f"_{md_escape(s_desc)}_\n\n"
         f"Imagen: {media_str}  |  Palabras: ~{words}"
     )
 
@@ -1262,15 +1671,34 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # ── Flujo normal: procesar URL ──
-    if not text_in.startswith(("http://", "https://")):
-        await update.message.reply_text("Enviame un link valido (que empiece con http)")
+    # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
+    url = extract_url_from_text(text_in)
+    if not url:
+        await update.message.reply_text(
+            "No encontré un link en el mensaje. Mandame una URL (http/https)."
+        )
         return
 
-    msg = await update.message.reply_text("Analizando la nota...")
+    # Hint de hilo si el operador lo mencionó
+    hilo_hint = extract_hilo_hint(text_in)
+    kind = detect_url_kind(url)
+
+    if kind == "instagram":
+        await update.message.reply_text(
+            "Instagram todavía no lo soporto. Pegá el link del artículo original."
+        )
+        return
+
+    msg = await update.message.reply_text(
+        "🎬 Bajando transcripción de YouTube..." if kind == "youtube"
+        else "Analizando la nota..."
+    )
 
     try:
-        data = await asyncio.to_thread(scrape, text_in)
+        if kind == "youtube":
+            data = await asyncio.to_thread(scrape_youtube, url)
+        else:
+            data = await asyncio.to_thread(scrape, url)
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response is not None else "?"
         logger.error(f"scrape HTTP {code}: {e}")
@@ -1278,14 +1706,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"El sitio devolvió error {code}. Puede estar bloqueando bots.")
         return
     except requests.exceptions.Timeout:
-        logger.error(f"scrape timeout: {text_in}")
+        logger.error(f"scrape timeout: {url}")
         stat_error()
         await msg.edit_text("Timeout: el sitio tardó demasiado en responder.")
+        return
+    except RuntimeError as e:
+        logger.error(f"scrape runtime: {e}")
+        stat_error()
+        await msg.edit_text(f"⚠️ {e}")
         return
     except Exception as e:
         logger.error(f"scrape: {type(e).__name__}: {e}")
         stat_error()
-        await msg.edit_text(f"No pude leer la nota: {type(e).__name__}")
+        await msg.edit_text(f"No pude leer la nota: {type(e).__name__}: {e}")
         return
 
     # Si no se extrajo texto
@@ -1297,6 +1730,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Determinar hilo (hint del operador o auto-detect)
+    hilo = hilo_hint or detect_hilo(data)
+    data["hilo"] = hilo
+
     context.user_data["article"] = data
     context.user_data.setdefault("tw_on", True)
     context.user_data.setdefault("tg_on", True)
@@ -1304,6 +1741,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("dest_on", False)
     context.user_data.setdefault("orig_title_on", False)
     data["orig_title_on"] = context.user_data["orig_title_on"]
+
+    # Si es YouTube, embed del video ON por defecto
+    if data.get("is_youtube"):
+        context.user_data["yt_embed_on"] = True
 
     # Mostrar preview
     kb = _preview_kb_from_ctx(context)
