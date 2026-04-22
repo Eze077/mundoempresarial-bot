@@ -853,6 +853,138 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
         return None
 
 
+def _fit_tweet(text: str, limit: int = 280) -> str:
+    """Recorta un tweet al límite respetando límite de palabra."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    boundary = cut.rfind(" ")
+    return (cut[:boundary] if boundary > limit * 0.6 else cut).rstrip() + "…"
+
+
+def generate_thread_with_gpt(title: str, body_text: str, wp_url: str, hashtags: str = "") -> list[str]:
+    """
+    Genera un hilo de Twitter de 3-5 tweets usando gpt-4o-mini.
+    Primer tweet lleva URL de la nota. Último lleva hashtags.
+    Devuelve lista de strings (ya recortados a 280).
+    """
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OPENAI_API_KEY no configurada. No puedo generar hilos sin GPT."
+        )
+
+    prompt = (
+        "Sos el community manager de @MundoEmpresarial_AR, medio digital de noticias "
+        "económicas argentinas para pymes. Te paso una nota ya publicada y tu tarea es "
+        "convertirla en un HILO de Twitter/X de 3 a 5 tweets.\n\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Cada tweet máximo 240 caracteres (dejamos margen para URLs y numeración).\n"
+        "2. Primer tweet: gancho + dato fuerte de la nota. Funciona como titular potente.\n"
+        "3. Tweets del medio: puntos clave, datos concretos, cifras, citas importantes con "
+        "atribución.\n"
+        "4. Último tweet: cierre con reflexión o llamado a leer más. NO URL acá.\n"
+        "5. Numerá con (1/n), (2/n), etc. al FINAL de cada tweet.\n"
+        "6. Tono directo, informativo. Español rioplatense (vos, ustedes), sin clickbait.\n"
+        "7. Máximo 2 emojis relevantes por tweet. No abusar.\n"
+        "8. NO pongas hashtags — se agregan aparte.\n"
+        "9. Comillas tipográficas \"…\", nunca rectas.\n"
+        "10. NO empieces con 🧵 ni con Abro hilo ni similares.\n"
+        "11. Separá los tweets con una línea '---' sola.\n\n"
+        f"Título de la nota: {title}\n\n"
+        "Contenido de la nota:\n"
+        "---\n"
+        f"{body_text[:5000]}\n"
+        "---\n\n"
+        "Devolvé SOLO los tweets separados por '---' (cada uno en su propio bloque). "
+        "Sin explicaciones ni encabezados."
+    )
+
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.45,
+            },
+            timeout=60,
+        )
+    except Exception as e:
+        raise RuntimeError(f"GPT API error: {e}")
+
+    if r.status_code != 200:
+        raise RuntimeError(f"GPT API {r.status_code}: {r.text[:200]}")
+
+    content = r.json()["choices"][0]["message"]["content"].strip()
+    raw = [t.strip() for t in re.split(r'\n\s*-{3,}\s*\n', content) if t.strip()]
+
+    if not raw:
+        # Fallback: split por líneas en blanco si GPT no usó ---
+        raw = [t.strip() for t in re.split(r'\n{2,}', content) if t.strip()]
+
+    if not raw:
+        raise RuntimeError("GPT no devolvió tweets parseables")
+
+    tweets = raw[:5]  # Hard cap 5 tweets
+
+    # Agregar URL al primer tweet
+    if tweets:
+        tweets[0] = _fit_tweet(tweets[0] + "\n\n" + wp_url, 280)
+
+    # Agregar hashtags al último tweet si hay espacio
+    if hashtags and len(tweets) > 1:
+        last_with_ht = tweets[-1] + "\n\n" + hashtags
+        tweets[-1] = _fit_tweet(last_with_ht, 280)
+
+    # Asegurar que ninguno pase 280
+    tweets = [_fit_tweet(t, 280) for t in tweets]
+    return tweets
+
+
+def post_twitter_thread(tweets: list[str], image_url: str = "") -> list[str]:
+    """
+    Publica una cadena de tweets como hilo. El primero lleva la imagen.
+    Devuelve lista de URLs (en orden). Si alguno falla, corta el hilo ahí.
+    """
+    auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+    urls = []
+    prev_id = None
+
+    media_id = None
+    if image_url:
+        try:
+            media_id = upload_twitter_media(image_url, auth)
+        except Exception as e:
+            logger.warning(f"post_twitter_thread: upload_media falló: {e}")
+
+    for i, text in enumerate(tweets):
+        payload = {"text": text}
+        if prev_id:
+            payload["reply"] = {"in_reply_to_tweet_id": prev_id}
+        if i == 0 and media_id:
+            payload["media"] = {"media_ids": [media_id]}
+        try:
+            r = requests.post(
+                "https://api.twitter.com/2/tweets",
+                json=payload, auth=auth, timeout=20,
+            )
+            if r.status_code != 201:
+                logger.error(f"Thread tweet {i+1}/{len(tweets)} falló: {r.status_code} {r.text[:200]}")
+                break
+            tweet_id = r.json()["data"]["id"]
+            urls.append(f"https://twitter.com/i/web/status/{tweet_id}")
+            prev_id = tweet_id
+        except Exception as e:
+            logger.error(f"Thread tweet {i+1} excepción: {e}")
+            break
+
+    return urls
+
+
 def delete_tweet(tweet_id: str) -> bool:
     """Elimina un tweet via API v2. Necesita tweet_id (no URL)."""
     try:
@@ -1761,6 +1893,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Hola! Comandos disponibles:\n\n"
         "Pega un link → analiza y publica la nota\n"
         "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
+        "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
         "/stats → ver estadísticas del día"
     )
@@ -2345,6 +2478,183 @@ def update_post(post_id: int, payload: dict) -> bool:
         return True
     logger.error(f"update_post {post_id}: {r.status_code} {r.text[:300]}")
     return False
+
+
+# ── Hilo de Twitter ───────────────────────────────────────────────────────────
+
+async def cmd_hilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Uso: /hilo <URL o ID>  —  genera un hilo de Twitter para una nota ya publicada."""
+    args = " ".join(context.args).strip()
+    if not args:
+        await update.message.reply_text(
+            "Uso: /hilo <URL o ID>\n"
+            "Ejemplo: /hilo https://mundoempresarial.ar/mi-nota/\n"
+            "O: /hilo 1234"
+        )
+        return
+
+    if not OPENAI_API_KEY:
+        await update.message.reply_text(
+            "❌ Necesito OPENAI_API_KEY configurada en Railway para generar hilos."
+        )
+        return
+
+    msg = await update.message.reply_text("Buscando la nota y generando el hilo...")
+
+    post = await asyncio.to_thread(find_post, args)
+    if not post:
+        await msg.edit_text("No encontré la nota. Verificá la URL o el ID.")
+        return
+
+    # Limpiar el contenido HTML a texto plano para GPT
+    content_html = post.get("content", "") or ""
+    # Sacar tags HTML para que GPT tenga el texto limpio
+    body_soup = BeautifulSoup(content_html, "html.parser")
+    # Sacar el comentario de mebot para que no aparezca
+    body_text = body_soup.get_text(separator="\n").strip()
+    body_text = re.sub(r'<!--.*?-->', '', body_text, flags=re.DOTALL)
+    # Limpiar líneas vacías múltiples
+    body_text = re.sub(r'\n{3,}', '\n\n', body_text)
+
+    title = BeautifulSoup(post["title"], "html.parser").get_text()
+    wp_url = utm_url(post["link"], "twitter")
+
+    raw_tags = extract_tags(title)[:2]
+    hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+
+    try:
+        tweets = await asyncio.to_thread(
+            generate_thread_with_gpt, title, body_text, wp_url, hashtags
+        )
+    except RuntimeError as e:
+        await msg.edit_text(f"❌ {e}")
+        return
+    except Exception as e:
+        logger.error(f"cmd_hilo generate: {e}")
+        await msg.edit_text(f"❌ Error generando hilo: {type(e).__name__}")
+        return
+
+    if not tweets or len(tweets) < 2:
+        await msg.edit_text("❌ GPT devolvió un hilo muy corto, probá de nuevo.")
+        return
+
+    # Guardar para publicación
+    context.user_data["thread_post"] = {
+        "post": post,
+        "tweets": tweets,
+        "image_url": "",
+    }
+    # Intentar obtener la imagen destacada del post (para el primer tweet)
+    if post.get("featured_media"):
+        try:
+            h = wp_auth()
+            r = requests.get(
+                f"{WP_URL}/wp-json/wp/v2/media/{post['featured_media']}",
+                headers=h, timeout=10,
+            )
+            if r.status_code == 200:
+                context.user_data["thread_post"]["image_url"] = r.json().get("source_url", "")
+        except Exception:
+            pass
+
+    # Mostrar preview
+    preview_text = _build_thread_preview(tweets, post["title"])
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Publicar hilo", callback_data="thread_publish"),
+            InlineKeyboardButton("🔄 Regenerar", callback_data="thread_regen"),
+        ],
+        [InlineKeyboardButton("Cancelar", callback_data="thread_cancel")],
+    ])
+    await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb)
+
+
+def _build_thread_preview(tweets: list[str], title: str) -> str:
+    """Preview del hilo para Telegram."""
+    title_clean = BeautifulSoup(title, "html.parser").get_text()
+    lines = [f"🧵 *Vista previa del hilo ({len(tweets)} tweets)*", ""]
+    lines.append(f"_Nota:_ {md_escape(title_clean[:80])}")
+    lines.append("")
+    for i, tw in enumerate(tweets, 1):
+        lines.append(f"*[{i}/{len(tweets)}]* ({len(tw)} chars)")
+        lines.append(f"```\n{tw}\n```")
+    return "\n".join(lines)
+
+
+async def handle_thread_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "thread_cancel":
+        context.user_data.pop("thread_post", None)
+        await query.edit_message_text("Hilo cancelado.")
+        return
+
+    stored = context.user_data.get("thread_post")
+    if not stored:
+        await query.edit_message_text("No hay hilo pendiente. Usá /hilo <URL>.")
+        return
+
+    if query.data == "thread_regen":
+        post = stored["post"]
+        await query.edit_message_text("🔄 Regenerando hilo...")
+
+        content_html = post.get("content", "") or ""
+        body_soup = BeautifulSoup(content_html, "html.parser")
+        body_text = body_soup.get_text(separator="\n").strip()
+        body_text = re.sub(r'<!--.*?-->', '', body_text, flags=re.DOTALL)
+        body_text = re.sub(r'\n{3,}', '\n\n', body_text)
+
+        title = BeautifulSoup(post["title"], "html.parser").get_text()
+        wp_url = utm_url(post["link"], "twitter")
+        raw_tags = extract_tags(title)[:2]
+        hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+
+        try:
+            tweets = await asyncio.to_thread(
+                generate_thread_with_gpt, title, body_text, wp_url, hashtags
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error regenerando: {type(e).__name__}")
+            return
+
+        stored["tweets"] = tweets
+        context.user_data["thread_post"] = stored
+
+        preview_text = _build_thread_preview(tweets, post["title"])
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🚀 Publicar hilo", callback_data="thread_publish"),
+                InlineKeyboardButton("🔄 Regenerar", callback_data="thread_regen"),
+            ],
+            [InlineKeyboardButton("Cancelar", callback_data="thread_cancel")],
+        ])
+        await query.edit_message_text(preview_text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if query.data == "thread_publish":
+        await query.edit_message_text(f"🚀 Publicando hilo de {len(stored['tweets'])} tweets...")
+
+        urls = await asyncio.to_thread(
+            post_twitter_thread, stored["tweets"], stored["image_url"]
+        )
+
+        if not urls:
+            await query.edit_message_text("❌ No se pudo publicar el primer tweet del hilo.")
+            return
+
+        n_expected = len(stored["tweets"])
+        n_actual = len(urls)
+        status = f"✅ Hilo publicado ({n_actual}/{n_expected} tweets)"
+        if n_actual < n_expected:
+            status = f"⚠️ Hilo publicado parcialmente ({n_actual}/{n_expected})"
+
+        # Link al primer tweet (el hilo se ve desde ahí)
+        await query.edit_message_text(
+            f"{status}\n\n🔗 Primer tweet:\n{urls[0]}"
+        )
+        context.user_data.pop("thread_post", None)
+        return
 
 
 async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2969,12 +3279,14 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CommandHandler("editar", cmd_editar))
+    app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
+    app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
