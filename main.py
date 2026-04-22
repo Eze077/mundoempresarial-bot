@@ -675,7 +675,83 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
     return None
 
 
-def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> str | None:
+def _target_datetime_for_slot(slot: str):
+    """
+    Devuelve datetime ARG para el slot pedido.
+    slot: 'morning' (8:00), 'noon' (12:00), 'evening' (18:00)
+    Si la hora ya pasó hoy, va a mañana.
+    """
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+
+    slots = {"morning": 8, "noon": 12, "evening": 18}
+    hour = slots.get(slot, 8)
+
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    # Morning siempre es mañana (convención)
+    if slot == "morning" or target <= now + timedelta(minutes=5):
+        target = target + timedelta(days=1)
+    return target
+
+
+def find_scheduled_collision(target_dt, window_minutes: int = 5):
+    """
+    Busca en WP si ya hay otro post programado dentro de la ventana ±N minutos.
+    Devuelve el datetime ajustado (offset +3 min por cada colisión, hasta 20 min).
+    """
+    from datetime import timedelta
+    try:
+        h = wp_auth()
+        # Traer futuros ordenados por fecha
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts"
+            f"?status=future&orderby=date&order=asc&per_page=50",
+            headers=h, timeout=10,
+        )
+        if r.status_code != 200:
+            return target_dt
+        scheduled = r.json()
+    except Exception as e:
+        logger.warning(f"find_scheduled_collision: {e}")
+        return target_dt
+
+    # Parsear las fechas de los posts programados (formato 'YYYY-MM-DDTHH:MM:SS')
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    scheduled_dts = []
+    for post in scheduled:
+        date_str = post.get("date", "")
+        if not date_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(date_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz_arg)
+            scheduled_dts.append(dt)
+        except ValueError:
+            continue
+
+    # Offset si hay colisión dentro de la ventana
+    adjusted = target_dt
+    for _ in range(10):  # máximo 10 offsets = +30 min
+        collision = any(
+            abs((s - adjusted).total_seconds()) < window_minutes * 60
+            for s in scheduled_dts
+        )
+        if not collision:
+            return adjusted
+        adjusted = adjusted + timedelta(minutes=3)
+    return adjusted
+
+
+def publish_post(data: dict, image_id: int | None, destacado: bool = False,
+                 scheduled_date=None) -> str | None:
+    """
+    Publica o programa un post en WordPress.
+    Si scheduled_date es un datetime (timezone-aware), el post se crea con
+    status=future y date=scheduled_date (ISO en tz del sitio, Argentina UTC-3).
+    """
     s_title  = get_title(data)
     s_kw     = focus_keyword(data["title"])
     s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
@@ -696,11 +772,20 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
     tag_names = list(dict.fromkeys(tag_names))[:8]
     tag_ids = get_or_create_tags(tag_names)
 
+    # Si hay scheduled_date → programar. Si no → publicar ya.
+    if scheduled_date:
+        status = "future"
+        # WP espera ISO en la tz del sitio, formato "YYYY-MM-DDTHH:MM:SS"
+        date_str = scheduled_date.strftime("%Y-%m-%dT%H:%M:%S")
+    else:
+        status = "publish"
+        date_str = None
+
     payload = {
         "title":      s_title,
         "content":    content,
         "excerpt":    s_desc,
-        "status":     "publish",
+        "status":     status,
         "slug":       s_slug,
         "categories": cat_ids,
         "tags":       tag_ids,
@@ -712,6 +797,8 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False) -> s
             "rank_math_og_content_image": data.get("image_url", ""),
         },
     }
+    if date_str:
+        payload["date"] = date_str
     if image_id:
         payload["featured_media"] = image_id
 
@@ -1911,8 +1998,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
         "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
-        "/curador → briefing de noticias relevantes de últimas 24h (auto a las 8:00)\n"
+        "/curador → briefing de noticias relevantes de últimas 24h\n"
         "/feedback_ver → ver qué aprendió el curador de tus decisiones\n"
+        "/cola → ver notas programadas pendientes\n"
         "/fuentes [dominio] → ver repositorio de fuentes\n"
         "/stats → ver estadísticas del día"
     )
@@ -1921,6 +2009,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra las estadísticas del día."""
     await update.message.reply_text(build_daily_report(), parse_mode="Markdown")
+
+
+async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra las notas programadas pendientes."""
+    fb = await asyncio.to_thread(_load_feedback)
+    pending = fb.get("scheduled_jobs", [])
+
+    if not pending:
+        await update.message.reply_text("📭 No hay notas programadas pendientes.")
+        return
+
+    from datetime import datetime
+    pending = sorted(pending, key=lambda j: j.get("run_at", ""))
+
+    lines = [f"📅 *Cola de publicaciones programadas* ({len(pending)})", ""]
+    for j in pending:
+        try:
+            dt = datetime.fromisoformat(j["run_at"])
+            when = dt.strftime("%A %d/%m %H:%M")
+        except Exception:
+            when = j.get("run_at", "?")
+        title = j.get("data", {}).get("title", "(sin título)")[:70]
+        lines.append(f"• *{when}* — {md_escape(title)}")
+        lines.append(f"  {j.get('post_url', '')}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_feedback_ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2140,12 +2254,33 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
             InlineKeyboardButton(orig_label, callback_data="toggle_orig_title"),
         ],
         [
-            InlineKeyboardButton("Publicar", callback_data="pub"),
+            InlineKeyboardButton("🚀 Publicar ahora", callback_data="pub"),
+            InlineKeyboardButton("⏰ Programar", callback_data="pub_schedule"),
         ],
         [
             InlineKeyboardButton("Cambiar titulo", callback_data="change_title"),
             InlineKeyboardButton("Cancelar", callback_data="cancel"),
         ],
+    ])
+
+
+def build_schedule_kb() -> InlineKeyboardMarkup:
+    """Sub-menú de programación con los 3 slots: mañana 8, mediodía 12, tarde 18."""
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+
+    # Mañana 8:00 siempre es mañana (salvo que sean antes de las 7am, pero redondeamos a mañana siempre)
+    morning_day = "Mañana"
+    # 12:00 y 18:00: si ya pasó la hora hoy, es mañana
+    noon_day = "Hoy" if now.hour < 11 else "Mañana"
+    evening_day = "Hoy" if now.hour < 17 else "Mañana"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🌅 {morning_day} 08:00", callback_data="sched_morning")],
+        [InlineKeyboardButton(f"☀️ {noon_day} 12:00", callback_data="sched_noon")],
+        [InlineKeyboardButton(f"🌇 {evening_day} 18:00", callback_data="sched_evening")],
+        [InlineKeyboardButton("↩️ Volver", callback_data="sched_back")],
     ])
 
 
@@ -2490,6 +2625,101 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.get("article")
     if not data:
         await query.edit_message_text("Error: no hay nota pendiente.")
+        return
+
+    # ── Programar publicación ──
+    if query.data == "pub_schedule":
+        await query.edit_message_text(
+            build_preview(data) + "\n\n⏰ *Elegí cuándo publicar:*",
+            parse_mode="Markdown",
+            reply_markup=build_schedule_kb(),
+        )
+        return
+
+    if query.data == "sched_back":
+        await query.edit_message_text(
+            build_preview(data), parse_mode="Markdown",
+            reply_markup=_preview_kb_from_ctx(context),
+        )
+        return
+
+    if query.data in ("sched_morning", "sched_noon", "sched_evening"):
+        slot = query.data.replace("sched_", "")
+        target = _target_datetime_for_slot(slot)
+
+        await query.edit_message_text("🔍 Verificando colisiones con otras notas programadas…")
+        adjusted = await asyncio.to_thread(find_scheduled_collision, target)
+
+        offset_msg = ""
+        if adjusted != target:
+            delta_min = int((adjusted - target).total_seconds() / 60)
+            offset_msg = f" (ajustado +{delta_min} min para evitar colisión)"
+
+        await query.edit_message_text(
+            f"📤 Programando para *{adjusted.strftime('%A %d/%m %H:%M')}*{offset_msg}…",
+            parse_mode="Markdown",
+        )
+
+        # Subir imagen
+        image_id = None
+        if data.get("image_url"):
+            kw = focus_keyword(data["title"])
+            alt = f"{kw} - {get_title(data)}"
+            image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
+
+        destacado = context.user_data.get("dest_on", False)
+        published = await asyncio.to_thread(
+            publish_post, data, image_id, destacado, adjusted
+        )
+
+        if not published:
+            await query.edit_message_text("❌ Error al programar la nota. Revisá los logs.")
+            return
+
+        post_url = published["link"]
+        post_id = published["id"]
+        post_content = published["content"]
+
+        # Persistir job en feedback store para recovery en redeploys
+        try:
+            await asyncio.to_thread(
+                _add_scheduled_job,
+                post_id, post_url, adjusted,
+                data, context.user_data, post_content,
+            )
+        except Exception as e:
+            logger.warning(f"No pude persistir scheduled job: {e}")
+
+        # Programar social via job_queue
+        job_data = {
+            "post_id":     post_id,
+            "post_url":    post_url,
+            "post_content": post_content,
+            "data":        data,
+            "tw_on":       context.user_data.get("tw_on", True),
+            "tg_on":       context.user_data.get("tg_on", True),
+            "wa_on":       context.user_data.get("wa_on", False),
+            "chat_id":     query.message.chat_id,
+        }
+        try:
+            context.application.job_queue.run_once(
+                _fire_scheduled_social,
+                when=adjusted,
+                data=job_data,
+                name=f"sched_social_{post_id}",
+            )
+        except Exception as e:
+            logger.error(f"run_once falló: {e}")
+
+        stat_publish(data["title"], data.get("source_url", ""))
+        context.user_data.pop("article", None)
+
+        await query.edit_message_text(
+            f"✅ *Programado* para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
+            f"📝 WP: {post_url}\n"
+            f"🔔 A esa hora se disparan los posteos en canal TG y el preview de Twitter.",
+            parse_mode="Markdown",
+        )
         return
 
     if query.data == "change_ht":
@@ -3499,7 +3729,167 @@ def _default_feedback() -> dict:
         "keyword_weights": {},  # {kw: int}
         "hilo_hints":      {},  # {kw: 1|2|3} — keywords que sugieren un hilo específico
         "interactions":    [],  # últimas 100 acciones para debug
+        "scheduled_jobs":  [],  # posts programados pendientes (para recovery post-redeploy)
     }
+
+
+def _add_scheduled_job(post_id: int, post_url: str, run_at,
+                       data: dict, user_data: dict, post_content: str):
+    """Agrega un job programado al feedback store."""
+    fb = _load_feedback()
+    fb.setdefault("scheduled_jobs", []).append({
+        "post_id":      post_id,
+        "post_url":     post_url,
+        "run_at":       run_at.isoformat(),
+        "data": {
+            "title":        data.get("title", ""),
+            "original_title": data.get("original_title", ""),
+            "excerpt":      data.get("excerpt", ""),
+            "image_url":    data.get("image_url", ""),
+            "source_url":   data.get("source_url", ""),
+            "is_youtube":   data.get("is_youtube", False),
+            "youtube_video_id": data.get("youtube_video_id", ""),
+            "title_edited": data.get("title_edited", False),
+            "orig_title_on": user_data.get("orig_title_on", False),
+        },
+        "tw_on":        user_data.get("tw_on", True),
+        "tg_on":        user_data.get("tg_on", True),
+        "wa_on":        user_data.get("wa_on", False),
+        "post_content": post_content[:500],  # truncado para no engrosar el store
+    })
+    _save_feedback(fb)
+
+
+def _remove_scheduled_job(post_id: int):
+    """Saca un job del store (cuando ya se ejecutó)."""
+    fb = _load_feedback()
+    fb["scheduled_jobs"] = [
+        j for j in fb.get("scheduled_jobs", []) if j.get("post_id") != post_id
+    ]
+    _save_feedback(fb)
+
+
+async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
+    """Callback de job_queue.run_once: dispara canal TG + preview de Twitter."""
+    job_data = context.job.data
+    data = job_data.get("data", {})
+    post_url = job_data.get("post_url", "")
+    post_id = job_data.get("post_id")
+    chat_id = job_data.get("chat_id")
+    tg_on = job_data.get("tg_on", True)
+    tw_on = job_data.get("tw_on", True)
+
+    results = [f"🔔 Nota programada publicada: {post_url}"]
+
+    # Canal TG
+    tg_msg_id = 0
+    if tg_on:
+        tg_msg_id = await publish_to_channel(context.bot, data, post_url)
+        results.append("✅ Canal TG" if tg_msg_id else "❌ Canal TG falló")
+
+    # Guardar tg_msg_id
+    if tg_msg_id and post_id:
+        await asyncio.to_thread(
+            append_social_meta, post_id, job_data.get("post_content", ""),
+            "", tg_msg_id,
+        )
+
+    # Twitter: mandar preview con botones al admin
+    if tw_on and chat_id:
+        tweet_preview = build_tweet(data, post_url)
+        kb_tweet = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Twittear", callback_data="tweet"),
+                InlineKeyboardButton("No twittear", callback_data="no_tweet"),
+            ],
+            [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
+        ])
+        # Re-popular user_data para que los botones funcionen
+        try:
+            user_data = context.application.user_data[int(chat_id)]
+            user_data["published"] = {
+                "url": post_url, "data": data,
+                "id": post_id, "content": job_data.get("post_content", ""),
+                "tg_msg_id": tg_msg_id,
+            }
+        except Exception:
+            pass
+
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text="\n".join(results) + f"\n\n— Preview del tweet —\n`{md_escape(tweet_preview)}`",
+            parse_mode="Markdown",
+            reply_markup=kb_tweet,
+        )
+    elif chat_id:
+        await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
+
+    # Remover del store
+    if post_id:
+        await asyncio.to_thread(_remove_scheduled_job, post_id)
+
+
+def _restore_scheduled_jobs(app):
+    """Al iniciar el bot, re-registra jobs programados cuya hora aún no pasó."""
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+
+    try:
+        fb = _load_feedback()
+        pending = fb.get("scheduled_jobs", [])
+    except Exception as e:
+        logger.warning(f"Restore scheduled jobs: {e}")
+        return
+
+    if not pending:
+        return
+
+    restored = 0
+    expired = 0
+    for job in pending:
+        try:
+            run_at = datetime.fromisoformat(job["run_at"])
+            if run_at.tzinfo is None:
+                run_at = run_at.replace(tzinfo=tz_arg)
+        except Exception:
+            continue
+
+        if run_at <= datetime.now(tz_arg):
+            # Ya pasó — lo sacamos del store sin ejecutar (el WP post ya se publicó solo)
+            expired += 1
+            continue
+
+        try:
+            app.job_queue.run_once(
+                _fire_scheduled_social,
+                when=run_at,
+                data={
+                    "post_id":      job["post_id"],
+                    "post_url":     job["post_url"],
+                    "post_content": job.get("post_content", ""),
+                    "data":         job["data"],
+                    "tw_on":        job.get("tw_on", True),
+                    "tg_on":        job.get("tg_on", True),
+                    "wa_on":        job.get("wa_on", False),
+                    "chat_id":      int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None,
+                },
+                name=f"sched_social_{job['post_id']}",
+            )
+            restored += 1
+        except Exception as e:
+            logger.warning(f"No pude re-registrar job {job.get('post_id')}: {e}")
+
+    # Limpiar expirados
+    if expired:
+        fb["scheduled_jobs"] = [
+            j for j in pending
+            if datetime.fromisoformat(j["run_at"]).replace(
+                tzinfo=tz_arg if datetime.fromisoformat(j["run_at"]).tzinfo is None else None
+            ) > datetime.now(tz_arg)
+        ]
+        _save_feedback(fb)
+
+    logger.info(f"Scheduled jobs restaurados: {restored} pendientes, {expired} expirados")
 
 
 def _load_feedback() -> dict:
@@ -4212,6 +4602,7 @@ def main():
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("curador", cmd_curador))
     app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
+    app.add_handler(CommandHandler("cola", cmd_cola))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
@@ -4243,6 +4634,12 @@ def main():
         name="daily_report",
     )
     logger.info("Reporte diario programado para las 23:00 ARG")
+
+    # Re-registrar scheduled jobs persistidos (sobreviven redeploys)
+    try:
+        _restore_scheduled_jobs(app)
+    except Exception as e:
+        logger.warning(f"restore_scheduled_jobs: {e}")
 
     logger.info("Bot iniciado y esperando links...")
     app.run_polling(drop_pending_updates=True)
