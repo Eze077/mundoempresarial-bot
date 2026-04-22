@@ -1,0 +1,181 @@
+{
+  "_schema": {
+    "version": 1,
+    "description": "Repositorio de fuentes utilizadas por el bot de MundoEmpresarial.ar. Se consulta con /fuentes. Cada entrada usa el dominio raíz (sin www) como clave.",
+    "campos": {
+      "name": "Nombre visible del medio",
+      "tipo": "Generalista / Economía / Política / Pyme / Agro / Internacional / Opinión / Sectorial / Oficial",
+      "orientacion": "Descripción breve del sesgo editorial del medio",
+      "distancia_editorial": "1-10. 1 = 100% alineado con la línea de MundoEmpresarial (ENAC, desarrollismo nacional, pyme). 10 = opuesto (neoliberal, concentrado, anti-industria)",
+      "hilo_tipico": "1 = Informarse es respetarse (info útil). 2 = Voz de las pymes (sectorial). 3 = Opinión/posición política",
+      "confiabilidad": "1-10. Calidad informativa (datos chequeados, pluralidad, rigor)",
+      "notas": "Observaciones editoriales libres",
+      "quirks": "Problemas técnicos conocidos al scrapear (403, brotli, SPA, etc.)"
+    }
+  },
+
+  "infobae.com": {
+    "name": "Infobae",
+    "tipo": "Generalista",
+    "orientacion": "Centro-derecha / pro-mercado. Línea editorial crítica del peronismo. Cobertura amplia.",
+    "distancia_editorial": 7,
+    "hilo_tipico": 2,
+    "confiabilidad": 7,
+    "notas": "Buen stock de notas de coyuntura económica. Fuente frecuente pero hay que filtrar sesgo al reescribir.",
+    "quirks": "JSON-LD con articleBody completo. Funciona OK."
+  },
+
+  "lapoliticaonline.com": {
+    "name": "La Política Online",
+    "tipo": "Política",
+    "orientacion": "Investigación periodística. Mirada crítica del poder según el gobierno de turno. Histórico crítico del macrismo, más heterogéneo con Milei.",
+    "distancia_editorial": 4,
+    "hilo_tipico": 3,
+    "confiabilidad": 8,
+    "notas": "Buen material para Hilo 3 (posición política). Notas con ángulo analítico.",
+    "quirks": "Bloquea IPs cloud con 403 sin headers completos. Requiere Sec-Fetch-* + Referer google.com (ya configurado en HEADERS_BROWSER)."
+  },
+
+  "somospymes.com": {
+    "name": "Somos Pymes",
+    "tipo": "Pyme",
+    "orientacion": "Alineado con pymes productivas. Afín a la línea ENAC / desarrollismo nacional.",
+    "distancia_editorial": 2,
+    "hilo_tipico": 2,
+    "confiabilidad": 8,
+    "notas": "Fuente natural para Hilo 2 (voz de las pymes). Se puede citar sin mucho reframe.",
+    "quirks": ""
+  },
+
+  "ambito.com": {
+    "name": "Ámbito Financiero",
+    "tipo": "Economía",
+    "orientacion": "Mercado financiero y económico. Línea promerado más ortodoxa.",
+    "distancia_editorial": 6,
+    "hilo_tipico": 2,
+    "confiabilidad": 8,
+    "notas": "Excelente para datos (dólar, bonos, mercados). JSON-LD completo.",
+    "quirks": "Servía Brotli y rompía el scraper. Fixed quitando br del Accept-Encoding."
+  },
+
+  "cronista.com": {
+    "name": "El Cronista",
+    "tipo": "Economía",
+    "orientacion": "Económico empresarial. Línea pro-mercado, más pro-gran-empresa que pyme.",
+    "distancia_editorial": 7,
+    "hilo_tipico": 2,
+    "confiabilidad": 7,
+    "notas": "Buena cobertura de empresas grandes. Filtra por interés pyme antes de reescribir.",
+    "quirks": ""
+  },
+
+  "baenegocios.com": {
+    "name": "BAE Negocios",
+    "tipo": "Economía",
+    "orientacion": "Económico con mirada sindical-productiva. Más cercano a lo heterodoxo.",
+    "distancia_editorial": 3,
+    "hilo_tipico": 2,
+    "confiabilidad": 7,
+    "notas": "Tono alineado con la línea MundoEmpresarial. Citas de sindicatos y pymes frecuentes.",
+    "quirks": ""
+  },
+
+  "perfil.com": {
+    "name": "Perfil",
+    "tipo": "Generalista",
+    "orientacion": "Centro. Fontevecchia como ancla editorial. Notas de análisis.",
+    "distancia_editorial": 5,
+    "hilo_tipico": 2,
+    "confiabilidad": 7,
+    "notas": "Mixto. Bueno para contexto político.",
+    "quirks": ""
+  },
+
+  "pagina12.com.ar": {
+    "name": "Página/12",
+    "tipo": "Política",
+    "orientacion": "Izquierda peronista / kirchnerismo. Mirada crítica del neoliberalismo y la concentración.",
+    "distancia_editorial": 2,
+    "hilo_tipico": 3,
+    "confiabilidad": 7,
+    "notas": "Fuente afín a la línea editorial. Buen material para Hilo 3 en posición política.",
+    "quirks": ""
+  },
+
+  "eldestapeweb.com": {
+    "name": "El Destape",
+    "tipo": "Política",
+    "orientacion": "Peronismo / Navarro. Mirada crítica del macrismo y mileísmo.",
+    "distancia_editorial": 2,
+    "hilo_tipico": 3,
+    "confiabilidad": 6,
+    "notas": "Fuente afín. Tono militante, reescribir con filtro informativo.",
+    "quirks": ""
+  },
+
+  "clarin.com": {
+    "name": "Clarín",
+    "tipo": "Generalista",
+    "orientacion": "Establishment / conservador-moderado. Línea histórica pro-gran-empresa.",
+    "distancia_editorial": 8,
+    "hilo_tipico": 2,
+    "confiabilidad": 8,
+    "notas": "Referencia amplia pero requiere reframe al ángulo pyme.",
+    "quirks": ""
+  },
+
+  "lanacion.com.ar": {
+    "name": "La Nación",
+    "tipo": "Generalista",
+    "orientacion": "Conservador-liberal. Línea pro-mercado tradicional.",
+    "distancia_editorial": 9,
+    "hilo_tipico": 2,
+    "confiabilidad": 8,
+    "notas": "Muy amplia en cobertura. Filtrar fuerte antes de reescribir desde la línea MundoEmpresarial.",
+    "quirks": ""
+  },
+
+  "letrap.com.ar": {
+    "name": "Letra P",
+    "tipo": "Política",
+    "orientacion": "Análisis político de fondo. Sesgo medido, enfocado en roscas y poder.",
+    "distancia_editorial": 5,
+    "hilo_tipico": 3,
+    "confiabilidad": 8,
+    "notas": "Buena fuente para análisis de agenda política. Muy útil para Hilo 3.",
+    "quirks": ""
+  },
+
+  "aciprensa.com": {
+    "name": "ACI Prensa",
+    "tipo": "Internacional",
+    "orientacion": "Medio católico internacional. Cobertura del Vaticano y la Iglesia.",
+    "distancia_editorial": 6,
+    "hilo_tipico": 3,
+    "confiabilidad": 7,
+    "notas": "Útil cuando cruza temas sociales (pobreza, trabajo, doctrina social de la Iglesia) con posición editorial MundoEmpresarial.",
+    "quirks": "No trae articleBody en JSON-LD, cae a trafilatura."
+  },
+
+  "legadofrancisco.org": {
+    "name": "Legado Francisco",
+    "tipo": "Opinión",
+    "orientacion": "Pensamiento social inspirado en Francisco. Afín al humanismo / desarrollismo con sensibilidad social.",
+    "distancia_editorial": 2,
+    "hilo_tipico": 3,
+    "confiabilidad": 8,
+    "notas": "Material para Hilo 3 con lectura humanista. Muy alineado con la filosofía MundoEmpresarial.",
+    "quirks": "Sitio SPA (React). El scraper cae a Google Cache. A veces no hay texto recuperable."
+  },
+
+  "youtube.com": {
+    "name": "YouTube",
+    "tipo": "Video",
+    "orientacion": "Plataforma — depende del canal fuente.",
+    "distancia_editorial": 5,
+    "hilo_tipico": 2,
+    "confiabilidad": 5,
+    "notas": "Procesa video + transcripción + resumen con GPT. El canal fuente queda en data.youtube_channel. Evaluar canal caso por caso.",
+    "quirks": "Transcripción con cascada: youtube-transcript-api → yt-dlp → Whisper API. PO Token bypass vía player_client mobile."
+  }
+}

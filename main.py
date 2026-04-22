@@ -94,9 +94,25 @@ CATEGORY_KEYWORDS = {
           "minorista", "mayorista", "shopping", "supermercado", "inflación de precios"],
     99:  ["congreso", "diputados", "senado", "senadores", "legislatura",
           "proyecto de ley", "cámara", "sesión", "legislativo"],
-    239: ["digital", "digitalización", "tecnología", "software", "app", "aplicación",
-          "ecommerce", "e-commerce", "startup", "inteligencia artificial", "ia",
-          "fintech", "blockchain", "automatización", "plataforma"],
+    239: [  # Digitalización Pymes — SOLO tecnología aplicada a pymes / innovación empresarial
+          # No usar palabras genéricas como "digital" / "plataforma" / "app" / "aplicación" sueltas
+          "digitalización de pymes", "transformación digital",
+          "pyme digital", "pymes digitales",
+          "ecommerce", "e-commerce", "comercio electrónico", "tienda online",
+          "fintech", "neobanco", "billetera virtual", "billetera electrónica",
+          "software empresarial", "sistema de gestión", "erp", "crm",
+          "facturación electrónica",
+          "marketplace", "plataforma b2b", "plataforma b2c",
+          "automatización industrial", "robótica industrial",
+          "ciberseguridad empresarial", "ciberataque empresa",
+          "inteligencia artificial aplicada", "ia generativa", "chatgpt empresa",
+          "machine learning empresarial",
+          "cloud computing", "servicios en la nube", "saas",
+          "startup argentina", "startups", "unicornio argentino",
+          "innovación empresarial", "i+d empresarial",
+          "blockchain empresarial", "tokenización",
+          "big data", "data analytics",
+          "iot industrial", "industria 4.0"],
     94:  ["economía", "inflación", "dólar", "tipo de cambio", "reservas",
           "banco central", "bcra", "pbi", "recesión", "crecimiento", "cepo",
           "devaluación", "tasas", "tasa", "deuda", "déficit", "superávit",
@@ -1895,6 +1911,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
         "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
         "/borrar <URL o ID> → manda una nota a la papelera\n"
+        "/fuentes [dominio] → ver repositorio de fuentes\n"
         "/stats → ver estadísticas del día"
     )
 
@@ -1902,6 +1919,130 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra las estadísticas del día."""
     await update.message.reply_text(build_daily_report(), parse_mode="Markdown")
+
+
+# ── Fuentes (sources.json) ───────────────────────────────────────────────────
+
+_SOURCES_CACHE = None
+
+
+def _load_sources() -> dict:
+    """Lee sources.json desde el disco (cacheado en memoria)."""
+    global _SOURCES_CACHE
+    if _SOURCES_CACHE is not None:
+        return _SOURCES_CACHE
+    try:
+        path = os.path.join(os.path.dirname(__file__), "sources.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _SOURCES_CACHE = {k: v for k, v in data.items() if not k.startswith("_")}
+        return _SOURCES_CACHE
+    except Exception as e:
+        logger.error(f"Error cargando sources.json: {e}")
+        _SOURCES_CACHE = {}
+        return {}
+
+
+def _domain_of(url: str) -> str:
+    """Extrae el dominio raíz de un URL (sin www, sin subdominios m./amp.)."""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+    host = host.replace("www.", "").replace("m.", "").replace("amp.", "")
+    return host
+
+
+def find_source(url_or_domain: str) -> tuple[str, dict] | None:
+    """Busca una fuente por URL completa o por dominio. Devuelve (domain, data) o None."""
+    sources = _load_sources()
+    needle = url_or_domain if "." in url_or_domain else ""
+    if url_or_domain.startswith(("http://", "https://")):
+        needle = _domain_of(url_or_domain)
+    # Match exacto
+    if needle in sources:
+        return needle, sources[needle]
+    # Match por sufijo (lapoliticaonline.com vs lapoliticaonline.com.ar)
+    for domain, data in sources.items():
+        if needle and (needle.endswith(domain) or domain.endswith(needle)):
+            return domain, data
+    return None
+
+
+async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /fuentes           → lista todas las fuentes registradas
+    /fuentes <domain>  → detalle de una fuente específica
+    """
+    args = " ".join(context.args).strip()
+    sources = _load_sources()
+
+    if args:
+        # Buscar una fuente puntual
+        found = find_source(args)
+        if not found:
+            await update.message.reply_text(
+                f"No encontré *{md_escape(args)}* en el repositorio.\n"
+                f"Probá con /fuentes para ver la lista completa.",
+                parse_mode="Markdown",
+            )
+            return
+        domain, d = found
+        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}.get(
+            d.get("hilo_tipico", 2), "?"
+        )
+        msg = (
+            f"📡 *{md_escape(d.get('name', domain))}* "
+            f"`({md_escape(domain)})`\n\n"
+            f"*Tipo:* {md_escape(d.get('tipo', '?'))}\n"
+            f"*Hilo típico:* {d.get('hilo_tipico', '?')} — {hilo_name}\n"
+            f"*Distancia editorial:* {d.get('distancia_editorial', '?')}/10 "
+            f"(1=alineado, 10=opuesto)\n"
+            f"*Confiabilidad:* {d.get('confiabilidad', '?')}/10\n\n"
+            f"*Orientación:*\n_{md_escape(d.get('orientacion', '?'))}_\n\n"
+            f"*Notas:*\n{md_escape(d.get('notas', '-'))}\n"
+        )
+        quirks = d.get("quirks", "")
+        if quirks:
+            msg += f"\n*Quirks técnicos:*\n{md_escape(quirks)}\n"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    # Lista completa, agrupada por hilo típico
+    if not sources:
+        await update.message.reply_text("No hay fuentes registradas.")
+        return
+
+    grouped = {1: [], 2: [], 3: []}
+    for domain, d in sources.items():
+        h = d.get("hilo_tipico", 2)
+        grouped.setdefault(h, []).append((domain, d))
+
+    hilo_labels = {
+        1: "1 — 📋 Informarse es respetarse",
+        2: "2 — 🗣️ La voz de las pymes",
+        3: "3 — 💭 Opinión / Análisis",
+    }
+
+    parts = [f"📡 *Repositorio de fuentes* ({len(sources)} medios)\n"]
+    for hilo in (1, 2, 3):
+        entries = grouped.get(hilo, [])
+        if not entries:
+            continue
+        parts.append(f"\n*Hilo {hilo_labels[hilo]}*")
+        # Ordenar por distancia editorial (más afines primero)
+        entries.sort(key=lambda x: x[1].get("distancia_editorial", 99))
+        for domain, d in entries:
+            dist = d.get("distancia_editorial", "?")
+            stars = "⭐" * (11 - dist) if isinstance(dist, int) else ""
+            parts.append(
+                f"• *{md_escape(d.get('name', domain))}* "
+                f"`{md_escape(domain)}` — dist {dist}/10 {stars[:5]}"
+            )
+
+    parts.append("\n_Usá_ `/fuentes <dominio>` _para ver detalle._")
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
 
 
 CAT_NAMES = {
@@ -3280,6 +3421,7 @@ def main():
     app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
+    app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
