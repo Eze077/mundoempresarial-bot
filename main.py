@@ -1091,13 +1091,20 @@ def _transcript_via_whisper(video_id: str) -> str:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_opts = {
-            "format": "bestaudio[abr<=64]/bestaudio/best",
+            "format": "bestaudio/best",
             "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "http_headers": {
                 "User-Agent": HEADERS_BROWSER["User-Agent"],
                 "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+            },
+            # Bypassar PO Token usando clients mobile
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "mweb", "web"],
+                    "player_skip": ["configs"],
+                },
             },
         }
         if has_ffmpeg:
@@ -1107,11 +1114,20 @@ def _transcript_via_whisper(video_id: str) -> str:
                 "preferredquality": "64",
             }]
 
-        try:
-            with yt_dlp.YoutubeDL(audio_opts) as ydl:
-                ydl.download([video_url])
-        except Exception as e:
-            logger.error(f"Whisper: yt-dlp download falló: {type(e).__name__}: {e}")
+        download_ok = False
+        for attempt_opts in (audio_opts, {**audio_opts, "extractor_args": {"youtube": {"player_client": ["android"]}}}):
+            try:
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    ydl.download([video_url])
+                download_ok = True
+                break
+            except Exception as e:
+                logger.warning(
+                    f"Whisper yt-dlp intento falló: {type(e).__name__}: {str(e)[:200]}"
+                )
+                continue
+        if not download_ok:
+            logger.error("Whisper: todos los intentos de download fallaron")
             return ""
 
         files = glob.glob(os.path.join(tmpdir, "audio.*"))
@@ -1171,18 +1187,33 @@ def _transcript_via_ytdlp(video_id: str) -> str:
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        # Headers de browser para no parecer bot
+        # Headers de browser
         "http_headers": {
             "User-Agent": HEADERS_BROWSER["User-Agent"],
             "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
         },
+        # Bypassar PO Token: usar clients mobile que aún no lo requieren
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb", "ios", "android", "web"],
+                "player_skip": ["configs"],
+            },
+        },
     }
 
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-    except Exception as e:
-        logger.error(f"yt-dlp extract_info falló: {type(e).__name__}: {e}")
+    info = None
+    for attempt_opts in (opts, {**opts, "extractor_args": {"youtube": {"player_client": ["android"]}}}):
+        try:
+            with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+            break
+        except Exception as e:
+            logger.warning(
+                f"yt-dlp extract_info intento falló: {type(e).__name__}: {str(e)[:200]}"
+            )
+            continue
+    if info is None:
+        logger.error("yt-dlp: todos los intentos de extract_info fallaron")
         return ""
 
     manual = info.get("subtitles") or {}
