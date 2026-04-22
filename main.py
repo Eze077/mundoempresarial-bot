@@ -560,11 +560,18 @@ def format_content(data: dict, kw: str = "") -> str:
             parts.append(f"<p><strong>{para_html}</strong></p>")
 
             # Si es YouTube, embebemos el video justo después del lead
-            if data.get("is_youtube") and data.get("source_url"):
+            if data.get("is_youtube") and data.get("youtube_video_id"):
+                yt_id = data["youtube_video_id"]
                 parts.append(
-                    f'<figure class="wp-block-embed is-type-video is-provider-youtube">'
-                    f'<div class="wp-block-embed__wrapper">{data["source_url"]}</div>'
-                    f'</figure>'
+                    f'<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube aligncenter" '
+                    f'style="margin:24px 0;">'
+                    f'<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;">'
+                    f'<iframe src="https://www.youtube.com/embed/{yt_id}" '
+                    f'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" '
+                    f'title="Video de YouTube" '
+                    f'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" '
+                    f'allowfullscreen></iframe>'
+                    f'</div></figure>'
                 )
 
             if h2_index < len(h2_labels):
@@ -1362,8 +1369,13 @@ def scrape_youtube(url: str) -> dict:
     # Limpiar muletillas y marcadores
     transcript_clean = _clean_transcript(transcript_text)
 
-    # Resumir a tono periodístico (sin LLM — heurística de extracción de frases clave)
-    summary = _summarize_transcript(transcript_clean, author=author, title=title)
+    # Resumir a tono periodístico. Preferimos GPT (tercera persona atribuida),
+    # con fallback heurístico si no hay API key o si falla.
+    summary = ""
+    if OPENAI_API_KEY:
+        summary = _summarize_with_gpt(transcript_clean, speaker=author, title=title)
+    if not summary or len(summary) < 200:
+        summary = _summarize_transcript(transcript_clean, author=author, title=title)
 
     excerpt = summary[:200] + "..." if len(summary) > 200 else summary
 
@@ -1401,6 +1413,66 @@ def _clean_transcript(text: str) -> str:
     # Colapsar espacios
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+def _summarize_with_gpt(transcript: str, speaker: str = "", title: str = "") -> str:
+    """
+    Resumen periodístico en tercera persona usando OpenAI gpt-4o-mini.
+    Atribuye afirmaciones al hablante por nombre. Costo ~$0.001 por video.
+    """
+    if not OPENAI_API_KEY:
+        return ""
+    if not transcript or len(transcript) < 200:
+        return ""
+
+    speaker_hint = speaker or "el hablante principal"
+    prompt = (
+        "Sos el editor periodístico de MundoEmpresarial.ar, medio de noticias económicas "
+        "argentinas para pymes y empresarios. Te paso la transcripción de un video de YouTube "
+        "y tu tarea es convertirla en un resumen periodístico publicable.\n\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Escribí en TERCERA PERSONA. Nunca uses primera persona del hablante "
+        "(yo, me, mi, nosotros). Todo va atribuido por nombre o por cargo.\n"
+        f"2. El hablante principal del video es: {speaker_hint}. Usalo como sujeto de las "
+        "afirmaciones. Ejemplo: 'Alejandro Bercovich sostuvo que...'  'El periodista "
+        "describió...' 'Bercovich criticó...'\n"
+        "3. Largo: 400-700 palabras en 4-6 párrafos cortos (máx 100 palabras por párrafo).\n"
+        "4. Lead (primer párrafo) con el hecho o tesis central en 1-2 oraciones.\n"
+        "5. Citas textuales entre comillas tipográficas cuando la frase vale, con atribución.\n"
+        "6. Español rioplatense (vos, ustedes), sin muletillas ni tics del oral.\n"
+        "7. Incluí cifras, nombres propios, fechas si aparecen.\n"
+        "8. Ningún H2 ni formato HTML: devolvé texto plano con párrafos separados por doble "
+        "salto de línea. El HTML lo agrego yo después.\n\n"
+        f"Título del video: {title}\n\n"
+        "Transcripción original:\n"
+        "---\n"
+        f"{transcript[:12000]}\n"
+        "---\n\n"
+        "Devolvé SOLO el resumen, sin explicaciones ni encabezados."
+    )
+
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+            },
+            timeout=90,
+        )
+        if r.status_code == 200:
+            content = r.json()["choices"][0]["message"]["content"].strip()
+            logger.info(f"GPT resumen OK: {len(content)} chars")
+            return content
+        logger.error(f"GPT resumen {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        logger.error(f"GPT resumen falló: {type(e).__name__}: {e}")
+    return ""
 
 
 def _summarize_transcript(transcript: str, author: str = "", title: str = "") -> str:
