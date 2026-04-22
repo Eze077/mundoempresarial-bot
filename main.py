@@ -1071,14 +1071,21 @@ def _transcript_via_whisper(video_id: str) -> str:
     if not OPENAI_API_KEY:
         logger.info("Whisper: OPENAI_API_KEY no configurada, salteando")
         return ""
+    logger.info(f"Whisper: iniciando (key configurada, len={len(OPENAI_API_KEY)})")
 
     try:
         import yt_dlp
     except ImportError:
+        logger.error("Whisper: yt-dlp no instalado")
         return ""
 
     import tempfile
     import glob
+    import shutil
+
+    # Verificar que ffmpeg esté disponible
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+    logger.info(f"Whisper: ffmpeg disponible={has_ffmpeg}")
 
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -1088,38 +1095,37 @@ def _transcript_via_whisper(video_id: str) -> str:
             "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "postprocessors": [{
+            "http_headers": {
+                "User-Agent": HEADERS_BROWSER["User-Agent"],
+                "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+            },
+        }
+        if has_ffmpeg:
+            audio_opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "64",
-            }],
-        }
+            }]
+
         try:
             with yt_dlp.YoutubeDL(audio_opts) as ydl:
                 ydl.download([video_url])
         except Exception as e:
-            # Si ffmpeg no está disponible, intentar sin conversión
-            logger.warning(f"yt-dlp audio con ffmpeg falló: {e}, probando sin conversión")
-            audio_opts.pop("postprocessors", None)
-            try:
-                with yt_dlp.YoutubeDL(audio_opts) as ydl:
-                    ydl.download([video_url])
-            except Exception as e2:
-                logger.error(f"yt-dlp audio falló: {e2}")
-                return ""
+            logger.error(f"Whisper: yt-dlp download falló: {type(e).__name__}: {e}")
+            return ""
 
         files = glob.glob(os.path.join(tmpdir, "audio.*"))
+        logger.info(f"Whisper: archivos descargados: {[os.path.basename(f) for f in files]}")
         if not files:
             logger.error("Whisper: no se descargó el audio")
             return ""
 
         audio_path = files[0]
         size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        logger.info(f"Whisper: audio descargado {audio_path} ({size_mb:.1f} MB)")
+        logger.info(f"Whisper: audio {audio_path} ({size_mb:.2f} MB)")
 
-        # Whisper API tiene límite de 25 MB por archivo
         if size_mb > 24.5:
-            logger.error(f"Whisper: audio {size_mb:.1f} MB excede 25 MB. No soportado por ahora.")
+            logger.error(f"Whisper: audio {size_mb:.1f} MB excede 25 MB, necesita split (no implementado)")
             return ""
 
         try:
@@ -1135,15 +1141,16 @@ def _transcript_via_whisper(video_id: str) -> str:
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     data=data,
                     files=files_upload,
-                    timeout=120,
+                    timeout=180,
                 )
+            logger.info(f"Whisper API response: HTTP {r.status_code}, {len(r.text)} bytes")
             if r.status_code == 200:
                 text = r.text.strip()
                 logger.info(f"Whisper OK: {len(text)} chars")
                 return text
-            logger.error(f"Whisper API {r.status_code}: {r.text[:200]}")
+            logger.error(f"Whisper API {r.status_code}: {r.text[:400]}")
         except Exception as e:
-            logger.error(f"Whisper request falló: {e}")
+            logger.error(f"Whisper request falló: {type(e).__name__}: {e}")
     return ""
 
 
@@ -1160,18 +1167,30 @@ def _transcript_via_ytdlp(video_id: str) -> str:
         return ""
 
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    opts = {"skip_download": True, "quiet": True, "no_warnings": True}
+    opts = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        # Headers de browser para no parecer bot
+        "http_headers": {
+            "User-Agent": HEADERS_BROWSER["User-Agent"],
+            "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+        },
+    }
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
     except Exception as e:
-        logger.error(f"yt-dlp extract_info falló: {e}")
+        logger.error(f"yt-dlp extract_info falló: {type(e).__name__}: {e}")
         return ""
 
-    # Preferencia: manual es > manual es-AR > auto es-orig > auto es > auto en
     manual = info.get("subtitles") or {}
     auto = info.get("automatic_captions") or {}
+    logger.info(
+        f"yt-dlp info OK: manual_langs={list(manual.keys())[:5]}, "
+        f"auto_langs_total={len(auto)}, es_auto={'es' in auto or 'es-orig' in auto}"
+    )
 
     candidates = []
     for lang in ("es", "es-AR", "es-419", "es-ES", "es-MX"):
@@ -1186,12 +1205,19 @@ def _transcript_via_ytdlp(video_id: str) -> str:
         if lang in auto:
             candidates.append((auto[lang], lang, "auto-en"))
 
+    logger.info(f"yt-dlp candidates: {[(lang, src) for _, lang, src in candidates[:5]]}")
+
     for fmts, lang, source in candidates:
         vtt_fmt = next((f for f in fmts if f.get("ext") == "vtt"), None)
         if not vtt_fmt:
+            logger.info(f"yt-dlp {lang}/{source}: no hay formato vtt")
             continue
         try:
-            r = requests.get(vtt_fmt["url"], timeout=15)
+            r = requests.get(
+                vtt_fmt["url"], timeout=15,
+                headers={"User-Agent": HEADERS_BROWSER["User-Agent"]},
+            )
+            logger.info(f"yt-dlp fetch {lang}/{source}: HTTP {r.status_code}, {len(r.text)} bytes")
             if r.status_code != 200:
                 continue
             text = _parse_vtt(r.text)
@@ -1200,9 +1226,11 @@ def _transcript_via_ytdlp(video_id: str) -> str:
                 if source.endswith("-en"):
                     text += "\n[Nota: transcripción en inglés, revisar traducción]"
                 return text
+            logger.info(f"yt-dlp {lang}/{source}: parsed text too short ({len(text)} chars)")
         except Exception as e:
-            logger.warning(f"fetch VTT {lang}: {e}")
+            logger.warning(f"fetch VTT {lang}/{source}: {type(e).__name__}: {e}")
             continue
+    logger.warning("yt-dlp: ningún candidato devolvió texto válido")
     return ""
 
 
