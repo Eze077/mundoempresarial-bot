@@ -1265,20 +1265,39 @@ def scrape_youtube(url: str) -> dict:
     except ImportError:
         logger.warning("youtube-transcript-api no está instalado")
 
+    tier_status = {"t1_api": "no_text", "t2_ytdlp": "skipped", "t3_whisper": "skipped"}
+    if transcript_text and len(transcript_text) >= 200:
+        tier_status["t1_api"] = "ok"
+
     # Fallback 2: yt-dlp (subs oficiales / auto-generados via innertube)
     if not transcript_text or len(transcript_text) < 200:
         logger.info("Intentando fallback con yt-dlp...")
-        transcript_text = _transcript_via_ytdlp(video_id)
+        try:
+            transcript_text = _transcript_via_ytdlp(video_id)
+            tier_status["t2_ytdlp"] = "ok" if transcript_text and len(transcript_text) >= 200 else "no_text"
+        except Exception as e:
+            tier_status["t2_ytdlp"] = f"err: {type(e).__name__}"
+            logger.error(f"yt-dlp tier 2 falló: {e}")
 
     # Fallback 3: Whisper (baja audio y transcribe, $0.006/min)
     if not transcript_text or len(transcript_text) < 200:
-        logger.info("Intentando fallback con Whisper API...")
-        transcript_text = _transcript_via_whisper(video_id)
+        if not OPENAI_API_KEY:
+            tier_status["t3_whisper"] = "no_api_key"
+        else:
+            logger.info("Intentando fallback con Whisper API...")
+            try:
+                transcript_text = _transcript_via_whisper(video_id)
+                tier_status["t3_whisper"] = "ok" if transcript_text and len(transcript_text) >= 200 else "no_text"
+            except Exception as e:
+                tier_status["t3_whisper"] = f"err: {type(e).__name__}"
+                logger.error(f"Whisper tier 3 falló: {e}")
 
     if not transcript_text or len(transcript_text) < 200:
+        status_str = ", ".join(f"{k}={v}" for k, v in tier_status.items())
+        logger.error(f"Todos los fallbacks YouTube fallaron: {status_str}")
         raise RuntimeError(
-            "No se pudo obtener la transcripción de este video. "
-            "Probá con otro o pegá el link del artículo que lo cubrió."
+            f"No pude obtener transcripción. Estado: {status_str}. "
+            f"Probá con otro video o pegá el link del artículo que lo cubrió."
         )
 
     # Limpiar muletillas y marcadores
