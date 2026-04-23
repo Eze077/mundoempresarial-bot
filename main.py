@@ -295,6 +295,93 @@ def meta_description(excerpt: str, text: str, kw: str = "") -> str:
     return (cut[:boundary] if boundary > 100 else cut) + "..."
 
 
+def rewrite_excerpt_with_gpt(title: str, text: str, original_excerpt: str, keyword: str = "") -> str:
+    """
+    Reescribe la bajada (excerpt) en el estilo editorial de MundoEmpresarial.
+    Igual que con el título: no recorta, reelabora.
+    Fallback a meta_description() si no hay OPENAI_API_KEY o si GPT falla.
+    """
+    if not OPENAI_API_KEY:
+        return meta_description(original_excerpt, text, kw=keyword)
+
+    prompt = (
+        "Sos el editor de MundoEmpresarial.ar, medio económico argentino "
+        "para pymes. Te paso el título de una nota, la bajada original de la "
+        "fuente y los primeros párrafos del texto. Escribí una NUEVA bajada "
+        "en el estilo del medio.\n\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Largo: ENTRE 120 y 155 caracteres (Rank Math lo premia).\n"
+        f"2. Debe contener el keyword: \"{keyword}\"\n"
+        "3. COMPLEMENTA el título, NO lo repite palabra por palabra.\n"
+        "4. Aporta un dato fresco, gancho, contexto o consecuencia que "
+        "invite a leer.\n"
+        "5. Español rioplatense (vos), directo, informativo. Sin clickbait.\n"
+        "6. Tercera persona, voz activa.\n"
+        "7. Sin puntos suspensivos. Terminá con punto o sin puntuación final.\n"
+        "8. No envuelvas la respuesta en comillas.\n\n"
+        f"Título: {title}\n\n"
+        f"Bajada original (referencia, no copiar):\n{(original_excerpt or '')[:400]}\n\n"
+        f"Primeros párrafos:\n{(text or '')[:1500]}\n\n"
+        "Devolvé SOLO la bajada, una sola línea, nada más."
+    )
+
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.45,
+            },
+            timeout=30,
+        )
+        if r.status_code == 200:
+            result = r.json()["choices"][0]["message"]["content"].strip()
+            # Limpiar comillas por si GPT las puso
+            result = result.strip('"').strip("'").strip("«»").strip()
+            # Sacar prefijos tipo "Bajada:" si GPT los metió
+            result = re.sub(r'^(?:Bajada|Excerpt|Subtítulo)\s*:\s*', '', result, flags=re.IGNORECASE)
+            # Forzar largo <=156
+            if len(result) > 156:
+                cut = result[:153]
+                boundary = cut.rfind(" ")
+                result = (cut[:boundary] if boundary > 100 else cut) + "..."
+            # Si el keyword no quedó, anteponerlo
+            if keyword and keyword.lower() not in result.lower():
+                result = meta_description(result, text, kw=keyword)
+            logger.info(f"GPT bajada OK: {len(result)} chars")
+            return result
+        logger.warning(f"GPT excerpt {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"GPT excerpt error: {e}")
+
+    return meta_description(original_excerpt, text, kw=keyword)
+
+
+def get_excerpt(data: dict, kw: str = "") -> str:
+    """Devuelve la bajada a usar según los flags del preview.
+
+    Prioridad:
+    1. Editada manualmente (data['excerpt_edited']) → tal cual.
+    2. Toggle 'bajada original' ON → la del og:description de la fuente.
+    3. Reescrita por GPT (cacheada en data['rewritten_excerpt']).
+    4. Fallback: meta_description() de la original.
+    """
+    if data.get("excerpt_edited"):
+        return data.get("excerpt", "")
+    original = data.get("original_excerpt") or data.get("excerpt", "")
+    if data.get("orig_excerpt_on"):
+        return meta_description(original, data.get("text", ""), kw=kw)
+    cached = data.get("rewritten_excerpt", "")
+    if cached:
+        return cached
+    return meta_description(original, data.get("text", ""), kw=kw)
+
+
 def focus_keyword(title: str) -> str:
     for w in title.split():
         clean = w.strip('.,;:!?()[]"\'«»—:')
@@ -754,7 +841,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     """
     s_title  = get_title(data)
     s_kw     = focus_keyword(data["title"])
-    s_desc   = meta_description(data["excerpt"], data["text"], kw=s_kw)
+    s_desc   = get_excerpt(data, kw=s_kw)
     s_slug   = url_slug(data["title"])
     content  = format_content(data, kw=s_kw)
 
@@ -1619,6 +1706,7 @@ def scrape_youtube(url: str) -> dict:
         "original_title":      title,
         "text":                summary,
         "excerpt":             excerpt,
+        "original_excerpt":    excerpt,
         "image_url":           thumbnail,
         "source_url":          video_url_canon,
         "media": {
@@ -2068,13 +2156,14 @@ def scrape(url: str) -> dict:
 
     clean_title = title.strip()
     return {
-        "title":          clean_title,
-        "original_title": clean_title,
-        "text":           text,
-        "excerpt":        excerpt,
-        "image_url":      image_url,
-        "source_url":     url,
-        "media":          media_info,
+        "title":            clean_title,
+        "original_title":   clean_title,
+        "text":             text,
+        "excerpt":          excerpt,
+        "original_excerpt": excerpt,
+        "image_url":        image_url,
+        "source_url":       url,
+        "media":            media_info,
     }
 
 
@@ -2083,8 +2172,10 @@ def scrape(url: str) -> dict:
 async def publish_to_channel(bot, data: dict, wp_url: str):
     """Publica en el canal. Devuelve message_id (int) o None si falló."""
     s_title = get_title(data)
+    kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+    s_excerpt = get_excerpt(data, kw=kw)
     tracked_url = utm_url(wp_url, "telegram")
-    text = f"📰 *{s_title}*\n\n{data['excerpt'][:200]}\n\n🔗 [Leer nota completa]({tracked_url})"
+    text = f"📰 *{s_title}*\n\n{s_excerpt[:200]}\n\n🔗 [Leer nota completa]({tracked_url})"
     try:
         if data.get("image_url"):
             msg = await bot.send_photo(
@@ -2359,15 +2450,17 @@ def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
         wa_on   = ud.get("wa_on", False),
         dest_on = ud.get("dest_on", False),
         orig_on = ud.get("orig_title_on", False),
+        orig_excerpt_on = ud.get("orig_excerpt_on", False),
     )
 
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False) -> InlineKeyboardMarkup:
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False) -> InlineKeyboardMarkup:
     tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
     wa_label = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
     dest_label = "⭐ Destacado" if dest_on else "☆ Destacado"
     orig_label = "✅ Titulo original" if orig_on else "❌ Titulo original"
+    orig_ex_label = "✅ Bajada original" if orig_excerpt_on else "❌ Bajada original"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
@@ -2379,6 +2472,7 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
         ],
         [
             InlineKeyboardButton(orig_label, callback_data="toggle_orig_title"),
+            InlineKeyboardButton(orig_ex_label, callback_data="toggle_orig_excerpt"),
         ],
         [
             InlineKeyboardButton("🚀 Publicar ahora", callback_data="pub"),
@@ -2414,7 +2508,7 @@ def build_schedule_kb() -> InlineKeyboardMarkup:
 def build_preview(data: dict) -> str:
     s_title = get_title(data)
     s_kw    = focus_keyword(data["title"])
-    s_desc  = meta_description(data["excerpt"], data["text"], kw=s_kw)
+    s_desc  = get_excerpt(data, kw=s_kw)
     s_slug  = url_slug(data["title"])
     words   = len(data["text"].split())
     cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
@@ -2652,7 +2746,24 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("wa_on", False)
     context.user_data.setdefault("dest_on", False)
     context.user_data.setdefault("orig_title_on", False)
+    context.user_data.setdefault("orig_excerpt_on", False)
     data["orig_title_on"] = context.user_data["orig_title_on"]
+    data["orig_excerpt_on"] = context.user_data["orig_excerpt_on"]
+
+    # Generar la bajada reescrita (GPT) una sola vez y cachear en data
+    if not data.get("rewritten_excerpt"):
+        kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+        try:
+            data["rewritten_excerpt"] = await asyncio.to_thread(
+                rewrite_excerpt_with_gpt,
+                get_title(data),
+                data.get("text", ""),
+                data.get("original_excerpt") or data.get("excerpt", ""),
+                kw,
+            )
+        except Exception as e:
+            logger.warning(f"rewrite_excerpt falló: {e}")
+            data["rewritten_excerpt"] = ""
 
     # Si es YouTube, embed del video ON por defecto
     if data.get("is_youtube"):
@@ -2739,6 +2850,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = context.user_data.get("article")
         if data:
             data["orig_title_on"] = new_val
+            context.user_data["article"] = data
+            await query.edit_message_text(
+                build_preview(data),
+                parse_mode="Markdown",
+                reply_markup=_preview_kb_from_ctx(context),
+            )
+        else:
+            await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
+        return
+
+    if query.data == "toggle_orig_excerpt":
+        new_val = not context.user_data.get("orig_excerpt_on", False)
+        context.user_data["orig_excerpt_on"] = new_val
+        data = context.user_data.get("article")
+        if data:
+            data["orig_excerpt_on"] = new_val
             context.user_data["article"] = data
             await query.edit_message_text(
                 build_preview(data),
@@ -2966,7 +3093,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if wa_on:
             s_title = get_title(data)
-            wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
+            kw_wa = focus_keyword(data.get("original_title") or data.get("title", ""))
+            s_excerpt_wa = get_excerpt(data, kw=kw_wa)
+            wa_text = f"📰 {s_title}\n\n{s_excerpt_wa[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(
                 f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
             )
@@ -3679,7 +3808,9 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if pub_wa:
             s_title = get_title(data)
-            wa_text = f"📰 {s_title}\n\n{data['excerpt'][:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
+            kw_wa2 = focus_keyword(data.get("original_title") or data.get("title", ""))
+            s_excerpt_wa2 = get_excerpt(data, kw=kw_wa2)
+            wa_text = f"📰 {s_title}\n\n{s_excerpt_wa2[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(f"— Copiá y pegá en WhatsApp —\n\n{wa_text}")
             results.append("✅ Texto para WhatsApp preparado")
 
@@ -3869,15 +4000,19 @@ def _add_scheduled_job(post_id: int, post_url: str, run_at,
         "post_url":     post_url,
         "run_at":       run_at.isoformat(),
         "data": {
-            "title":        data.get("title", ""),
-            "original_title": data.get("original_title", ""),
-            "excerpt":      data.get("excerpt", ""),
-            "image_url":    data.get("image_url", ""),
-            "source_url":   data.get("source_url", ""),
-            "is_youtube":   data.get("is_youtube", False),
-            "youtube_video_id": data.get("youtube_video_id", ""),
-            "title_edited": data.get("title_edited", False),
-            "orig_title_on": user_data.get("orig_title_on", False),
+            "title":             data.get("title", ""),
+            "original_title":    data.get("original_title", ""),
+            "excerpt":           data.get("excerpt", ""),
+            "original_excerpt":  data.get("original_excerpt", ""),
+            "rewritten_excerpt": data.get("rewritten_excerpt", ""),
+            "image_url":         data.get("image_url", ""),
+            "source_url":        data.get("source_url", ""),
+            "is_youtube":        data.get("is_youtube", False),
+            "youtube_video_id":  data.get("youtube_video_id", ""),
+            "title_edited":      data.get("title_edited", False),
+            "excerpt_edited":    data.get("excerpt_edited", False),
+            "orig_title_on":     user_data.get("orig_title_on", False),
+            "orig_excerpt_on":   user_data.get("orig_excerpt_on", False),
         },
         "tw_on":        user_data.get("tw_on", True),
         "tg_on":        user_data.get("tg_on", True),
