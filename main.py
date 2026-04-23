@@ -4649,6 +4649,13 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
             await query.answer("❌ No tengo el URL del artículo.", show_alert=True)
             return
         await query.answer("📰 Disparando flujo de publicación…", show_alert=False)
+
+        # Sacar los botones del mensaje del curador: ya se eligió esta nota
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
         # Simular que el usuario pegó el link — ejecutar handle_link
         fake_message = type("FakeMsg", (), {
             "text": link,
