@@ -1249,11 +1249,29 @@ def clean_text(raw: str) -> str:
 # ── Scraper ────────────────────────────────────────────────────────────────────
 
 def _fix_encoding(resp: requests.Response) -> str:
+    """
+    Decodifica el body en el encoding más probable.
+    Muchos sitios argentinos son 'mixed encoding': 99% UTF-8 pero con uno o dos
+    bytes sueltos (0x95, 0x92, etc) de Windows-1252. Si caemos a latin-1 completo,
+    los bytes UTF-8 válidos se re-interpretan mal (ej. 'Ã³' en vez de 'ó').
+    Estrategia:
+    1. UTF-8 estricto si funciona limpio.
+    2. Si falla, probar con 'errors=replace' → reemplaza inválidos con � pero
+       preserva bien los caracteres UTF-8 correctos. Si los � son pocos (<0.1%),
+       usamos esto.
+    3. Fallback final a latin-1 si todo lo anterior falla.
+    """
     raw = resp.content
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
+    # Mixed-encoding: preservar UTF-8 válido y reemplazar los pocos bytes rotos
+    replaced = raw.decode("utf-8", errors="replace")
+    total = len(replaced)
+    bad = replaced.count("�")
+    if total > 0 and bad / total < 0.01:  # <1% de bytes rotos → preferir UTF-8
+        return replaced
     return raw.decode("latin-1")
 
 
