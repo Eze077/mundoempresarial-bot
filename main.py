@@ -1873,13 +1873,46 @@ def detect_hilo(data: dict) -> int:
 HILO_NAMES = {1: "Informarse es respetarse", 2: "La voz de las pymes", 3: "Opinión / Análisis"}
 
 
+def _decode_google_news_path(google_url: str) -> str | None:
+    """
+    Los URLs de Google News (news.google.com/rss/articles/<ID> o /articles/<ID>)
+    tienen el URL original codificado en el path en protobuf base64url.
+    Lo decodeamos offline buscando un 'http(s)://...' en los bytes decodeados.
+    Devuelve el URL extraído o None.
+    """
+    m = re.search(r'/(?:rss/)?articles/([A-Za-z0-9_-]+)', google_url or "")
+    if not m:
+        return None
+    encoded = m.group(1)
+    # Normalizar padding base64url
+    encoded += "=" * (-len(encoded) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(encoded)
+    except Exception:
+        return None
+    # Buscar el primer URL http(s) en los bytes; limpiar control chars al final
+    m = re.search(rb'https?://[^\s\x00-\x1f"<>]+', raw)
+    if not m:
+        return None
+    candidate = m.group(0).decode("utf-8", errors="ignore")
+    # Recortar caracteres de padding comunes del protobuf
+    candidate = re.sub(r'[\\\x00-\x1f\x7f-\xff]+$', '', candidate)
+    # Rechazar si el dominio sigue siendo google
+    if "google.com" in candidate.lower():
+        return None
+    return candidate
+
+
 def resolve_google_redirect(url: str) -> str:
     """
-    Los links de Google News RSS (news.google.com/rss/articles/...) redirigen
-    al artículo real. Si seguimos redirects, terminamos en la nota. Si caemos
-    en la pantalla de consentimiento ('consent.google.com' o 'support.google.com'),
-    intentamos decodificar el URL original del path.
-    Devuelve la URL final real o el URL original si no es un link de Google.
+    Los links de Google News RSS (news.google.com/rss/articles/...) apuntan
+    a un proxy de Google que redirige al artículo real.
+
+    Estrategia:
+    1. googlenewsdecoder lib — pega al endpoint interno de Google para
+       resolver el ID encriptado a URL real (método actual 2024+).
+    2. Decode offline del base64 en el path (funciona para URLs viejas).
+    3. Si falla, seguir redirects con cookie CONSENT=YES.
     """
     if not url:
         return url
@@ -1887,47 +1920,77 @@ def resolve_google_redirect(url: str) -> str:
     low = url.lower()
     is_gnews = (
         "news.google.com/" in low
-        or "news.google.com/rss/" in low
         or "consent.google.com" in low
+        or "google.com/url" in low
     )
     if not is_gnews:
         return url
 
+    # 1) googlenewsdecoder (más confiable para URLs modernas)
+    if "news.google.com/" in low:
+        try:
+            from googlenewsdecoder import gnewsdecoder
+            result = gnewsdecoder(url, interval=1)
+            if isinstance(result, dict) and result.get("status") and result.get("decoded_url"):
+                decoded_url = result["decoded_url"]
+                logger.info(f"Google News decoded: {decoded_url[:100]}")
+                return decoded_url
+            logger.warning(f"gnewsdecoder no pudo: {result}")
+        except ImportError:
+            logger.warning("googlenewsdecoder no instalado")
+        except Exception as e:
+            logger.warning(f"gnewsdecoder error: {e}")
+
+    # 2) Decode offline del base64 (formato viejo)
+    decoded = _decode_google_news_path(url)
+    if decoded:
+        logger.info(f"Google News decodeado offline: {decoded[:80]}")
+        return decoded
+
+    # 3) Fallback online — seguir redirects
     try:
-        # Headers de navegador + no aceptar consent cookie, seguir redirects
         session = requests.Session()
         session.headers.update({
             **HEADERS_BROWSER,
-            # Forzar variante sin consent challenge
-            "Cookie": "CONSENT=YES+cb.20210328-17-p0.es+FX+666",
+            "Cookie": (
+                "CONSENT=YES+cb.20210328-17-p0.es+FX+666; "
+                "SOCS=CAESHAgBEhJnd3NfMjAyNDAxMDItMF9SQzIaAmVzIAEaBgiAn7SuBg"
+            ),
         })
         r = session.get(url, timeout=15, allow_redirects=True)
         final_url = r.url
 
-        # Si después de seguir redirects seguimos en Google, intentar extraer
-        # el URL real del HTML (Google News a veces devuelve un interstitial JS)
-        if "google.com" in final_url.lower():
-            from urllib.parse import unquote, urlparse, parse_qs
-            # 1) query param 'url' (usado por google.com/url?url=X)
-            qs = parse_qs(urlparse(final_url).query)
-            if "url" in qs:
-                return unquote(qs["url"][0])
-            # 2) meta refresh en el HTML
-            m = re.search(
-                r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+url=([^"\'>\s]+)',
-                r.text, re.IGNORECASE,
-            )
-            if m:
-                return m.group(1)
-            # 3) anchor a un dominio externo en el HTML
-            m = re.search(
-                r'<a[^>]+href="(https?://(?!(?:www\.)?(?:google|consent|support)\.)[^"]+)"',
-                r.text,
-            )
-            if m:
-                return m.group(1)
-            logger.warning(f"Google redirect no resuelto para {url[:80]}")
+        if "google.com" not in final_url.lower():
+            return final_url
 
+        # 3) Google sirvió HTML: extraer URL final
+        from urllib.parse import unquote, urlparse, parse_qs
+        qs = parse_qs(urlparse(final_url).query)
+        if "url" in qs:
+            return unquote(qs["url"][0])
+        if "continue" in qs:
+            return unquote(qs["continue"][0])
+
+        # meta refresh
+        m = re.search(
+            r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+url=([^"\'>\s]+)',
+            r.text, re.IGNORECASE,
+        )
+        if m:
+            return m.group(1)
+        # location.href JS
+        m = re.search(r'location(?:\.replace\(|\.href\s*=\s*)["\']([^"\']+)["\']', r.text)
+        if m and "google.com" not in m.group(1).lower():
+            return m.group(1)
+        # Anchor a dominio externo
+        m = re.search(
+            r'<a[^>]+href="(https?://(?!(?:www\.)?(?:google|consent|support|youtube)\.)[^"]+)"',
+            r.text,
+        )
+        if m:
+            return m.group(1)
+
+        logger.warning(f"Google redirect NO resuelto para {url[:80]}")
         return final_url
     except Exception as e:
         logger.warning(f"resolve_google_redirect: {e}")
