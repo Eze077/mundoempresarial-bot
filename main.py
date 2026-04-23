@@ -4080,12 +4080,18 @@ def _score_article(title: str, summary: str, source_meta: dict, published_dt) ->
 
 
 def _dedupe_articles(articles: list) -> list:
-    """Elimina duplicados por similaridad de título."""
+    """
+    Elimina duplicados. Dos pasadas:
+    1. Jaccard por palabras significativas (>55% match = duplicado obvio).
+    2. Si hay OPENAI_API_KEY, una pasada final agrupa por evento semántico
+       con embeddings (notas sobre el mismo hecho pero distinto ángulo/titular).
+    """
     def _normalize(t: str) -> set:
         t = re.sub(r'[^\w\sáéíóúñ]', ' ', (t or "").lower())
         words = {w for w in t.split() if len(w) > 3 and w not in STOP_WORDS}
         return words
 
+    # Pasada 1: Jaccard
     unique = []
     for art in articles:
         art_words = _normalize(art["title"])
@@ -4098,18 +4104,88 @@ def _dedupe_articles(articles: list) -> list:
                 continue
             shared = art_words & u_words
             ratio = len(shared) / max(len(art_words), len(u_words))
-            if ratio > 0.7 or art["title"].strip().lower() == u["title"].strip().lower():
+            if ratio > 0.55 or art["title"].strip().lower() == u["title"].strip().lower():
                 dupe_of = u
                 break
         if dupe_of:
             dupe_of.setdefault("also_in", []).append(art["source_name"])
-            # Si el duplicado tiene mayor score, lo reemplaza
             if art["score"] > dupe_of["score"]:
                 art["also_in"] = dupe_of.get("also_in", []) + [dupe_of["source_name"]]
                 unique[unique.index(dupe_of)] = art
         else:
             unique.append(art)
+
+    # Pasada 2: embeddings semánticos (si hay OPENAI_API_KEY)
+    if OPENAI_API_KEY and len(unique) > 1:
+        unique = _dedupe_with_embeddings(unique)
+
     return unique
+
+
+def _dedupe_with_embeddings(articles: list, similarity_threshold: float = 0.82) -> list:
+    """
+    Usa text-embedding-3-small para detectar notas sobre el mismo evento
+    con títulos distintos entre medios distintos. Costo ~$0.00001 por nota.
+    """
+    if not articles:
+        return articles
+    try:
+        texts = [f"{a['title']}. {a.get('summary','')[:200]}" for a in articles]
+        r = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"model": "text-embedding-3-small", "input": texts},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            logger.warning(f"Embeddings {r.status_code}: {r.text[:200]}")
+            return articles
+        embeddings = [d["embedding"] for d in r.json()["data"]]
+    except Exception as e:
+        logger.warning(f"Embeddings dedup: {e}")
+        return articles
+
+    # Similitud coseno (embeddings ya vienen normalizados de OpenAI)
+    def cosine(a, b):
+        return sum(x * y for x, y in zip(a, b))
+
+    # Agrupar: cada artículo se queda o se absorbe por el de mayor score
+    kept_idxs = []
+    absorbed_into = {}  # idx → idx_del_que_absorbe
+
+    for i, art in enumerate(articles):
+        found_cluster = None
+        for j in kept_idxs:
+            sim = cosine(embeddings[i], embeddings[j])
+            if sim >= similarity_threshold:
+                found_cluster = j
+                break
+        if found_cluster is not None:
+            # Absorber: el de mayor score queda, el otro se suma al also_in
+            if art["score"] > articles[found_cluster]["score"]:
+                # Reemplazar en kept_idxs + mover el viejo al also_in del nuevo
+                old = articles[found_cluster]
+                art.setdefault("also_in", []).append(old["source_name"])
+                if old.get("also_in"):
+                    art["also_in"].extend(old["also_in"])
+                articles[found_cluster] = art
+            else:
+                kept = articles[found_cluster]
+                kept.setdefault("also_in", []).append(art["source_name"])
+                if art.get("also_in"):
+                    kept["also_in"].extend(art.get("also_in", []))
+        else:
+            kept_idxs.append(i)
+
+    result = [articles[i] for i in kept_idxs]
+    # Deduplicate also_in entries
+    for art in result:
+        if art.get("also_in"):
+            art["also_in"] = list(dict.fromkeys(art["also_in"]))[:5]
+    return result
 
 
 def _google_news_rss(domain: str) -> str:
@@ -4134,8 +4210,9 @@ def _fetch_feed(url: str):
         return None, str(e)
 
 
-def curar_noticias(max_results: int = 15) -> list:
-    """Scanea los feeds RSS de sources.json y devuelve las más relevantes de las últimas 24h.
+def curar_noticias(max_results: int = 15, lookback_hours: int = 24) -> list:
+    """Scanea los feeds RSS de sources.json y devuelve las más relevantes.
+    lookback_hours: ventana hacia atrás (24 por default, 8 para los slots del día).
     Si el feed directo falla, cae a Google News RSS filtrado por dominio."""
     try:
         import feedparser
@@ -4148,7 +4225,7 @@ def curar_noticias(max_results: int = 15) -> list:
     sources = _load_sources()
     results = []
     now = datetime.now(tz.utc)
-    window = now - timedelta(hours=24)
+    window = now - timedelta(hours=lookback_hours)
 
     for domain, meta in sources.items():
         rss_url = meta.get("rss_url", "")
@@ -4209,12 +4286,12 @@ def curar_noticias(max_results: int = 15) -> list:
                 "hilo_tipico": meta.get("hilo_tipico", 2),
             })
 
-    # Dedupe y ordenar
+    # Dedupe (Jaccard + embeddings semánticos si hay OPENAI_API_KEY)
     unique = _dedupe_articles(results)
     unique.sort(key=lambda x: -x["score"])
 
-    # Asignar hilo final: detect_hilo + override del feedback aprendido
-    for art in unique[:max_results]:
+    # Asignar hilo a cada nota (detect_hilo + feedback_hilo_hints)
+    for art in unique:
         fake_data = {
             "title":   art["title"],
             "text":    art["summary"],
@@ -4223,7 +4300,22 @@ def curar_noticias(max_results: int = 15) -> list:
         base_hilo = detect_hilo(fake_data)
         art["hilo"] = _apply_feedback_hilo(art["title"], art["summary"], base_hilo)
 
-    return unique[:max_results]
+    # Tomar hasta 5 por hilo (sin padding: si hay menos, hay menos)
+    # Umbral mínimo de score para considerar "significativa": base ≥ 4
+    MIN_SCORE_SIGNIFICATIVA = 4
+    per_hilo = {1: [], 2: [], 3: []}
+    for art in unique:
+        if art["score"] < MIN_SCORE_SIGNIFICATIVA:
+            continue
+        h = art.get("hilo", 2)
+        if len(per_hilo.setdefault(h, [])) < 5:
+            per_hilo[h].append(art)
+
+    # Armar resultado final: intercalar hilos en orden de score
+    final = []
+    for h in (1, 2, 3):
+        final.extend(per_hilo.get(h, []))
+    return final
 
 
 def _format_curador_report(articles: list, suggestion_line: str = "") -> str:
@@ -4343,20 +4435,29 @@ def _build_feedback_kb(article_idx: int) -> InlineKeyboardMarkup:
 async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: str, context: ContextTypes.DEFAULT_TYPE):
     """Envía el briefing con un mensaje por artículo para poder meter botones de feedback."""
     from datetime import datetime
-    today = datetime.now().strftime("%d/%m/%Y")
+    now = datetime.now()
+    today = now.strftime("%d/%m/%Y %H:%M")
+
+    # Contadores por hilo
+    from collections import Counter
+    by_hilo = Counter(art.get("hilo", 2) for art in articles)
+    counts_str = " · ".join(
+        f"{n} hilo {h}" for h, n in sorted(by_hilo.items()) if n > 0
+    )
 
     # Guardar artículos en chat_data para que los callbacks puedan resolver el idx
     if not hasattr(context, 'chat_data') or context.chat_data is None:
-        # Fallback cuando se invoca desde el scheduler (no hay chat_data por chat)
         pass
     context.chat_data["curador_articles"] = articles
 
     # Header
     await bot.send_message(
         chat_id=chat_id,
-        text=f"📰 *Curador diario — {today}*\n_{len(articles)} notas relevantes de las últimas 24h_\n\n"
-             "Usá los botones para darme feedback: 👍 relevante · 👎 irrelevante · "
-             "🧵N reclasificar al hilo N · 📰 publicar",
+        text=(
+            f"📰 *Curador — {today}*\n"
+            f"_{len(articles)} notas significativas · {counts_str}_\n\n"
+            "Feedback: 👍 relevante · 👎 irrelevante · 🧵N reclasificar · 📰 publicar"
+        ),
         parse_mode="Markdown",
     )
 
@@ -4502,23 +4603,26 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
-    """Envía el briefing del curador todos los días a las 8:00 AM ARG."""
+    """
+    Envía el briefing del curador. Se dispara en los 3 slots: 7:30, 11:30, 17:30 ARG.
+    Cada slot hace lookback de 8 horas (no 24) para que no se repitan notas
+    entre slots del mismo día.
+    """
     chat_id = ADMIN_CHAT_ID
     if not chat_id:
-        logger.warning("No hay ADMIN_CHAT_ID para enviar curador diario")
+        logger.warning("No hay ADMIN_CHAT_ID para enviar curador")
         return
     try:
-        articles = await asyncio.to_thread(curar_noticias, 15)
+        # Lookback 8h para no pisar el slot anterior
+        articles = await asyncio.to_thread(curar_noticias, 15, 8)
         if not articles:
-            logger.info("Curador 8AM: 0 artículos relevantes, no envío briefing")
+            logger.info(f"Curador slot: 0 artículos significativos, no envío (sin padding)")
             return
 
         suggestion = ""
         if OPENAI_API_KEY:
             suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
 
-        # En el scheduler: persistir articles en application.chat_data para que
-        # los callbacks de feedback puedan resolverlos
         chat_data = context.application.chat_data[int(chat_id)]
         chat_data["curador_articles"] = articles
 
@@ -4528,9 +4632,9 @@ async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
         })()
 
         await _send_curador_briefing(context.bot, int(chat_id), articles, suggestion, fake_ctx)
-        logger.info(f"Curador 8AM enviado: {len(articles)} artículos")
+        logger.info(f"Curador slot enviado: {len(articles)} artículos")
     except Exception as e:
-        logger.error(f"Error enviando curador diario: {type(e).__name__}: {e}")
+        logger.error(f"Error enviando curador: {type(e).__name__}: {e}")
 
 
 # ── Reporte diario programado ────────────────────────────────────────────────
@@ -4619,13 +4723,14 @@ def main():
     tz_arg = timezone(timedelta(hours=-3))
     job_queue = app.job_queue
 
-    # Curador diario a las 8:00 AM ARG
-    job_queue.run_daily(
-        send_daily_curador,
-        time=dtime(hour=8, minute=0, tzinfo=tz_arg),
-        name="daily_curador",
-    )
-    logger.info("Curador diario programado para las 08:00 ARG")
+    # Curador: 3 briefings diarios en Argentina
+    for hh, mm, name in [(7, 30, "curador_07_30"), (11, 30, "curador_11_30"), (17, 30, "curador_17_30")]:
+        job_queue.run_daily(
+            send_daily_curador,
+            time=dtime(hour=hh, minute=mm, tzinfo=tz_arg),
+            name=name,
+        )
+    logger.info("Curador programado 3x por día: 07:30, 11:30 y 17:30 ARG")
 
     # Reporte de stats a las 23:00 ARG
     job_queue.run_daily(
