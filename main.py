@@ -1873,7 +1873,71 @@ def detect_hilo(data: dict) -> int:
 HILO_NAMES = {1: "Informarse es respetarse", 2: "La voz de las pymes", 3: "Opinión / Análisis"}
 
 
+def resolve_google_redirect(url: str) -> str:
+    """
+    Los links de Google News RSS (news.google.com/rss/articles/...) redirigen
+    al artículo real. Si seguimos redirects, terminamos en la nota. Si caemos
+    en la pantalla de consentimiento ('consent.google.com' o 'support.google.com'),
+    intentamos decodificar el URL original del path.
+    Devuelve la URL final real o el URL original si no es un link de Google.
+    """
+    if not url:
+        return url
+
+    low = url.lower()
+    is_gnews = (
+        "news.google.com/" in low
+        or "news.google.com/rss/" in low
+        or "consent.google.com" in low
+    )
+    if not is_gnews:
+        return url
+
+    try:
+        # Headers de navegador + no aceptar consent cookie, seguir redirects
+        session = requests.Session()
+        session.headers.update({
+            **HEADERS_BROWSER,
+            # Forzar variante sin consent challenge
+            "Cookie": "CONSENT=YES+cb.20210328-17-p0.es+FX+666",
+        })
+        r = session.get(url, timeout=15, allow_redirects=True)
+        final_url = r.url
+
+        # Si después de seguir redirects seguimos en Google, intentar extraer
+        # el URL real del HTML (Google News a veces devuelve un interstitial JS)
+        if "google.com" in final_url.lower():
+            from urllib.parse import unquote, urlparse, parse_qs
+            # 1) query param 'url' (usado por google.com/url?url=X)
+            qs = parse_qs(urlparse(final_url).query)
+            if "url" in qs:
+                return unquote(qs["url"][0])
+            # 2) meta refresh en el HTML
+            m = re.search(
+                r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+url=([^"\'>\s]+)',
+                r.text, re.IGNORECASE,
+            )
+            if m:
+                return m.group(1)
+            # 3) anchor a un dominio externo en el HTML
+            m = re.search(
+                r'<a[^>]+href="(https?://(?!(?:www\.)?(?:google|consent|support)\.)[^"]+)"',
+                r.text,
+            )
+            if m:
+                return m.group(1)
+            logger.warning(f"Google redirect no resuelto para {url[:80]}")
+
+        return final_url
+    except Exception as e:
+        logger.warning(f"resolve_google_redirect: {e}")
+        return url
+
+
 def scrape(url: str) -> dict:
+    # Resolver redirect de Google News si aplica
+    url = resolve_google_redirect(url)
+
     session = requests.Session()
     session.headers.update(HEADERS_BROWSER)
     resp = session.get(url, timeout=20)
