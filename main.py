@@ -1222,8 +1222,21 @@ NOISE_FRAGMENTS = [
 
 
 def clean_text(raw: str) -> str:
+    """
+    Filtra líneas de ruido del texto scrapeado.
+    IMPORTANTE: el filtro de noise_fragments solo se aplica a líneas CORTAS
+    (< 200 chars). Una línea larga que menciona 'twitter' o 'seguinos' de
+    pasada es contenido legítimo, no ruido del footer/sidebar.
+    """
     if not raw:
         return ""
+
+    # Si todo el texto viene en una sola línea (ej. JSON-LD articleBody),
+    # partirlo en oraciones antes de filtrar, así el filtro de noise no
+    # descarta párrafos completos por una palabra suelta.
+    if "\n" not in raw and len(raw) > 500:
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ¿¡])', raw)
+        raw = "\n".join(sentences)
 
     clean = []
     for line in raw.split("\n"):
@@ -1232,7 +1245,8 @@ def clean_text(raw: str) -> str:
             continue
         low = s.lower()
 
-        if any(frag in low for frag in NOISE_FRAGMENTS):
+        # Filtrar noise SOLO en líneas cortas (típicamente CTAs, footer, share)
+        if len(s) < 200 and any(frag in low for frag in NOISE_FRAGMENTS):
             continue
 
         if any(c in s for c in ("Ã", "Â", "â€", "Ã©", "Ã¡", "Ã³", "Ã±")):
