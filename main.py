@@ -2146,14 +2146,20 @@ def scrape(url: str) -> dict:
     media_info = _detect_media(soup, url)
 
     # 1) Intentar JSON-LD primero
+    text = ""
+    extraction_method = ""
     ld = _extract_jsonld(soup)
     if ld and len(ld["text"]) > 100:
         text = clean_text(ld["text"])
         title = ld["title"] or title
         image_url = ld["image_url"] or image_url
+        extraction_method = f"json-ld ({len(text)} chars)"
     else:
         # 2) Fallback a trafilatura
-        text = clean_text(trafilatura.extract(html) or "")
+        traf_raw = trafilatura.extract(html) or ""
+        text = clean_text(traf_raw)
+        if text:
+            extraction_method = f"trafilatura ({len(text)} chars, raw {len(traf_raw)})"
 
     # 3) Si trafilatura también falla, intentar selectores de noticias comunes
     if not text or len(text) < 100:
@@ -2168,9 +2174,16 @@ def scrape(url: str) -> dict:
                 paras = [p.get_text(strip=True) for p in el.find_all("p") if len(p.get_text(strip=True)) > 20]
                 if paras:
                     text = clean_text("\n".join(paras))
+                    extraction_method = f"css-selector '{sel}' ({len(text)} chars)"
                     break
 
     excerpt = excerpt or (text[:200] + "..." if text else "")
+
+    # Log del método de extracción (útil para debug en Railway)
+    logger.info(
+        f"scrape({url[:60]}): method={extraction_method or 'NONE'}, "
+        f"html_size={len(html)}, title='{title[:50]}'"
+    )
 
     clean_title = title.strip()
     return {
@@ -2182,6 +2195,8 @@ def scrape(url: str) -> dict:
         "image_url":        image_url,
         "source_url":       url,
         "media":            media_info,
+        "_extraction_method": extraction_method or "none",
+        "_html_size":         len(html),
     }
 
 
@@ -2748,9 +2763,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Si no se extrajo texto
     if not data.get("text") or len(data["text"]) < 200:
         stat_error()
+        method = data.get("_extraction_method", "none")
+        html_sz = data.get("_html_size", 0)
+        text_len = len(data.get("text", ""))
+        logger.error(
+            f"Extract falló para {text_in[:80]}: method={method}, "
+            f"html={html_sz}B, text={text_len} chars"
+        )
         await msg.edit_text(
-            "No pude extraer el texto de la nota. "
-            "Puede ser un sitio que carga contenido con JavaScript (SPA)."
+            f"⚠️ No pude extraer el texto.\n"
+            f"Método: `{method}` · HTML: {html_sz:,} bytes · texto: {text_len} chars\n"
+            f"Puede ser un sitio SPA o el HTML no tiene los selectores esperados.",
+            parse_mode="Markdown",
         )
         return
 
