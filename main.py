@@ -2103,29 +2103,149 @@ def resolve_google_redirect(url: str) -> str:
         return url
 
 
+def _try_amp_url(url: str, session: requests.Session) -> str | None:
+    """
+    Muchos sitios AR tienen versión AMP de la nota en /amp o ?amp=1 que
+    suele NO estar detrás del mismo anti-bot.
+    """
+    from urllib.parse import urlparse, urlunparse
+    variants = []
+    p = urlparse(url)
+    path = p.path.rstrip("/")
+    # Variantes comunes
+    variants.append(urlunparse(p._replace(path=path + "/amp")))
+    variants.append(urlunparse(p._replace(path=path + "/amp/")))
+    variants.append(urlunparse(p._replace(query="amp=1")))
+    variants.append(urlunparse(p._replace(query="outputType=amp")))
+
+    for v in variants:
+        try:
+            r = session.get(v, timeout=15, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 5000:
+                logger.info(f"AMP version OK: {v[:80]}")
+                return _fix_encoding(r)
+        except Exception:
+            continue
+    return None
+
+
+def _try_bot_user_agents(url: str) -> str | None:
+    """
+    Retry con User-Agents de crawlers conocidos. Muchos medios permiten
+    Googlebot/Bingbot para SEO aunque bloqueen User-Agents de browser
+    genéricos desde IPs cloud.
+    """
+    bots = [
+        ("Googlebot", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"),
+        ("Bingbot", "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)"),
+        ("GoogleNews", "Googlebot-News"),
+        ("facebookexternalhit", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"),
+        ("TwitterBot", "Twitterbot/1.0"),
+    ]
+    for name, ua in bots:
+        try:
+            r = requests.get(
+                url,
+                headers={
+                    "User-Agent": ua,
+                    "Accept": "text/html,application/xhtml+xml,*/*",
+                    "Accept-Language": "es-AR,es;q=0.9",
+                },
+                timeout=15,
+                allow_redirects=True,
+            )
+            if r.status_code == 200 and len(r.text) > 5000:
+                logger.info(f"Acceso via {name} UA: {url[:60]}")
+                return _fix_encoding(r)
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_wayback(url: str, session: requests.Session) -> str | None:
+    """
+    Si el sitio nos bloquea, probá Wayback Machine (archive.org) que suele
+    tener un snapshot reciente y no bloquea IPs cloud.
+    """
+    try:
+        api = requests.get(
+            f"https://archive.org/wayback/available?url={url}",
+            timeout=10,
+        )
+        if api.status_code == 200:
+            data = api.json()
+            snap = data.get("archived_snapshots", {}).get("closest", {})
+            snap_url = snap.get("url", "")
+            if snap_url and snap.get("available"):
+                logger.info(f"Wayback snapshot encontrado: {snap_url}")
+                # Wayback Machine sirve el contenido original con su chrome al lado,
+                # usar el modificador 'id_' que devuelve el HTML tal cual fue capturado
+                snap_url = snap_url.replace("/web/", "/web/").replace(
+                    f"/web/{snap.get('timestamp')}/",
+                    f"/web/{snap.get('timestamp')}id_/"
+                )
+                r = session.get(snap_url, timeout=20, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 5000:
+                    return _fix_encoding(r)
+    except Exception as e:
+        logger.warning(f"Wayback fallback falló: {e}")
+    return None
+
+
+def _fetch_google_cache(url: str, session: requests.Session) -> str | None:
+    """Último recurso: Google Cache."""
+    from urllib.parse import quote
+    try:
+        r = session.get(
+            f"https://webcache.googleusercontent.com/search?q=cache:{quote(url)}",
+            timeout=15,
+        )
+        if r.status_code == 200 and len(r.text) > 5000:
+            return _fix_encoding(r)
+    except Exception as e:
+        logger.warning(f"Google Cache falló: {e}")
+    return None
+
+
 def scrape(url: str) -> dict:
     # Resolver redirect de Google News si aplica
     url = resolve_google_redirect(url)
 
     session = requests.Session()
     session.headers.update(HEADERS_BROWSER)
-    resp = session.get(url, timeout=20)
-    resp.raise_for_status()
 
-    html = _fix_encoding(resp)
+    html = None
+    try:
+        resp = session.get(url, timeout=20)
+        if resp.status_code == 403:
+            # Cascada de fallbacks para bypass de bloqueos
+            logger.warning(f"403 en {url[:80]}, probando fallbacks…")
+            html = _try_bot_user_agents(url)
+            if not html:
+                logger.warning("Bot UAs rechazados, probando AMP…")
+                html = _try_amp_url(url, session)
+            if not html:
+                logger.warning("AMP no disponible, probando Wayback…")
+                html = _fetch_wayback(url, session)
+            if not html:
+                logger.warning("Wayback sin snapshot, probando Google Cache…")
+                html = _fetch_google_cache(url, session)
+            if not html:
+                resp.raise_for_status()
+        else:
+            resp.raise_for_status()
+            html = _fix_encoding(resp)
+    except requests.exceptions.HTTPError:
+        if not html:
+            raise
 
     # Detectar SPA (React/Vue/Angular) — contenido cargado por JS
-    if len(html) < 5000 and ('id="root"' in html or 'id="app"' in html or 'id="__next"' in html):
-        # Intentar con Google Cache como fallback para SPAs
-        from urllib.parse import quote
-        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{quote(url)}"
-        try:
-            cache_resp = session.get(cache_url, timeout=15)
-            if cache_resp.status_code == 200 and len(cache_resp.text) > 5000:
-                html = _fix_encoding(cache_resp)
-                logger.info(f"SPA detectado, usando Google Cache para {url}")
-        except Exception:
-            pass
+    if html and len(html) < 5000 and ('id="root"' in html or 'id="app"' in html or 'id="__next"' in html):
+        # Intentar con Wayback o Google Cache como fallback para SPAs
+        spa_html = _fetch_wayback(url, session) or _fetch_google_cache(url, session)
+        if spa_html:
+            html = spa_html
+            logger.info(f"SPA detectado, usando fallback para {url}")
 
     soup = BeautifulSoup(html, "html.parser")
 
