@@ -2665,61 +2665,162 @@ def _check_credits_status() -> dict:
         "📊", f"{tw_count} tweets emitidos este mes", "pago",
     )
 
-    # 3. RapidAPI (CRM Bodegas + posibles otros endpoints)
+    # 3. RapidAPI — chequeo via headers x-ratelimit-* del endpoint que use el user
     rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
+    rapidapi_host = os.environ.get("RAPIDAPI_TEST_HOST", "")
+    rapidapi_path = os.environ.get("RAPIDAPI_TEST_PATH", "/")
     if rapidapi_key:
-        # RapidAPI no tiene endpoint público de quota global; cada API expone
-        # headers x-ratelimit-* en sus respuestas. Hacemos un test contra un
-        # endpoint conocido (httpbin via RapidAPI).
-        try:
-            r = requests.get(
-                "https://httpbin-rapidapi.p.rapidapi.com/get",
-                headers={
-                    "X-RapidAPI-Key": rapidapi_key,
-                    "X-RapidAPI-Host": "httpbin-rapidapi.p.rapidapi.com",
-                },
-                timeout=10,
+        # Si configuró un host de test puntual (ej. el que usa para CRM Bodegas),
+        # usamos ese. Si no, probamos contra un endpoint público de testing.
+        candidates = []
+        if rapidapi_host:
+            candidates.append((rapidapi_host, rapidapi_path))
+        candidates.extend([
+            ("httpbin-rapidapi.p.rapidapi.com", "/get"),
+            ("rapidapi-developer.p.rapidapi.com", "/"),
+        ])
+        ok = False
+        for host, path in candidates:
+            try:
+                r = requests.get(
+                    f"https://{host}{path}",
+                    headers={"X-RapidAPI-Key": rapidapi_key, "X-RapidAPI-Host": host},
+                    timeout=10,
+                )
+                # Aunque devuelva 4xx, los headers x-ratelimit-* suelen estar presentes
+                limit = r.headers.get("x-ratelimit-requests-limit") or r.headers.get("x-ratelimit-limit")
+                remaining = r.headers.get("x-ratelimit-requests-remaining") or r.headers.get("x-ratelimit-remaining")
+                if r.status_code in (200, 401, 403, 404, 429) and (limit or remaining):
+                    if r.status_code == 429:
+                        result["rapidapi"] = ("❌", f"Rate limit / quota agotada (rest {remaining}/{limit})", "pago")
+                    elif r.status_code in (401, 403):
+                        result["rapidapi"] = ("⚠️", f"Endpoint sin permisos pero key activa (rest {remaining}/{limit})", "pago")
+                    else:
+                        result["rapidapi"] = ("✅", f"key OK · quota mensual restante {remaining}/{limit}", "pago")
+                    ok = True
+                    break
+                if r.status_code == 200:
+                    result["rapidapi"] = ("✅", f"key OK ({host} no expone ratelimit headers)", "pago")
+                    ok = True
+                    break
+            except Exception:
+                continue
+        if not ok:
+            result["rapidapi"] = (
+                "⚠️",
+                "No pude testear (configurá RAPIDAPI_TEST_HOST con un endpoint del que tengas suscripción)",
+                "pago",
             )
-            if r.status_code == 200:
-                limit = r.headers.get("x-ratelimit-requests-limit", "?")
-                remaining = r.headers.get("x-ratelimit-requests-remaining", "?")
-                result["rapidapi"] = ("✅", f"key OK · quota mensual restante {remaining}/{limit}", "pago")
-            elif r.status_code == 401 or r.status_code == 403:
-                result["rapidapi"] = ("❌", "Key inválida o sin permisos", "pago")
-            elif r.status_code == 429:
-                result["rapidapi"] = ("❌", "Rate limit / quota agotada", "pago")
-            else:
-                result["rapidapi"] = ("⚠️", f"HTTP {r.status_code} (test endpoint puede no existir)", "pago")
-        except Exception as e:
-            result["rapidapi"] = ("⚠️", f"No pude testear: {type(e).__name__}", "pago")
     else:
         result["rapidapi"] = ("⚙️", "RAPIDAPI_KEY sin configurar en Railway", "pago")
 
-    # 4. Instagram scraper (servicio externo, suele ser RapidAPI o similar)
+    # 4. Instagram scraper — providers conocidos: Apify, RapidAPI Instagram-scraper, ScrapingBee
     ig_key = os.environ.get("IG_SCRAPER_KEY", "") or os.environ.get("INSTAGRAM_API_KEY", "")
-    ig_provider = os.environ.get("IG_SCRAPER_PROVIDER", "")
+    ig_provider = (os.environ.get("IG_SCRAPER_PROVIDER", "") or "").lower()
     if ig_key:
-        result["ig_scraper"] = ("⚙️", f"Configurado ({ig_provider or 'sin provider'}) — chequeo manual", "freemium")
+        # Chequeo según provider
+        if ig_provider == "apify":
+            try:
+                r = requests.get(
+                    f"https://api.apify.com/v2/users/me?token={ig_key}",
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    j = r.json().get("data", {})
+                    plan = j.get("plan", {}).get("id", "?")
+                    result["ig_scraper"] = ("✅", f"Apify OK · plan {plan}", "freemium")
+                elif r.status_code == 401:
+                    result["ig_scraper"] = ("❌", "Apify token inválido", "freemium")
+                else:
+                    result["ig_scraper"] = ("⚠️", f"Apify HTTP {r.status_code}", "freemium")
+            except Exception as e:
+                result["ig_scraper"] = ("❌", f"Apify error: {type(e).__name__}", "freemium")
+        elif ig_provider == "scrapingbee":
+            try:
+                r = requests.get(
+                    f"https://app.scrapingbee.com/api/v1/usage?api_key={ig_key}",
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    j = r.json()
+                    used = j.get("used_api_credit", "?")
+                    max_c = j.get("max_api_credit", "?")
+                    result["ig_scraper"] = ("✅", f"ScrapingBee {used}/{max_c} créditos usados", "freemium")
+                else:
+                    result["ig_scraper"] = ("⚠️", f"ScrapingBee HTTP {r.status_code}", "freemium")
+            except Exception as e:
+                result["ig_scraper"] = ("❌", f"ScrapingBee: {type(e).__name__}", "freemium")
+        elif ig_provider == "rapidapi":
+            # Va a través de RapidAPI, ya cubierto arriba pero hacemos un check mínimo
+            ig_host = os.environ.get("IG_RAPIDAPI_HOST", "instagram-scraper-api2.p.rapidapi.com")
+            try:
+                r = requests.get(
+                    f"https://{ig_host}/v1/info?username_or_id_or_url=mundoempresarialar",
+                    headers={"X-RapidAPI-Key": ig_key, "X-RapidAPI-Host": ig_host},
+                    timeout=10,
+                )
+                remaining = r.headers.get("x-ratelimit-requests-remaining", "?")
+                limit = r.headers.get("x-ratelimit-requests-limit", "?")
+                emoji = "✅" if r.status_code == 200 else "⚠️"
+                result["ig_scraper"] = (emoji, f"RapidAPI IG · rest {remaining}/{limit}", "freemium")
+            except Exception as e:
+                result["ig_scraper"] = ("❌", f"IG-RapidAPI: {type(e).__name__}", "freemium")
+        else:
+            result["ig_scraper"] = (
+                "⚙️",
+                "Configurado pero sin IG_SCRAPER_PROVIDER (apify/scrapingbee/rapidapi)",
+                "freemium",
+            )
     else:
         result["ig_scraper"] = (
             "⚙️",
-            "IG_SCRAPER_KEY sin configurar (decime cuál usás y lo agrego)",
+            "IG_SCRAPER_KEY + IG_SCRAPER_PROVIDER (apify|scrapingbee|rapidapi) sin configurar",
             "freemium",
         )
 
-    # 5. EnvíaloSimple (email transaccional para newsletter)
-    es_user = os.environ.get("ENVIALO_SIMPLE_USER", "") or os.environ.get("ENVIALOSIMPLE_USER", "")
-    es_api = os.environ.get("ENVIALO_SIMPLE_API_KEY", "") or os.environ.get("ENVIALOSIMPLE_API_KEY", "")
-    if es_api:
-        # EnvíaloSimple no tiene API REST documentada de quota, solo SMTP.
-        # Marcamos como configurado y sugerimos chequeo en el panel.
-        result["envialo_simple"] = ("⚙️", "Configurado (chequear panel para créditos restantes)", "pago")
-    elif es_user:
-        result["envialo_simple"] = ("⚠️", "User sí, API key no — sin chequeo automático", "pago")
+    # 5. EnvíaloSimple — email transaccional newsletter
+    es_token = (
+        os.environ.get("ENVIALO_SIMPLE_TOKEN", "")
+        or os.environ.get("ENVIALOSIMPLE_TOKEN", "")
+        or os.environ.get("ENVIALO_SIMPLE_API_KEY", "")
+    )
+    if es_token:
+        # EnvíaloSimple tiene API REST en envialosimple.email/api/v1
+        # con auth bearer. Endpoint /api/v1/account/info devuelve plan + saldo.
+        try:
+            r = requests.get(
+                "https://api.envialosimple.com/v1/account",
+                headers={"Authorization": f"Bearer {es_token}"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                j = r.json() if r.text.startswith("{") else {}
+                # Distintas versiones del endpoint usan distintos campos; mostrar lo crudo
+                detail_parts = []
+                for k in ("plan", "credits", "credits_remaining", "saldo", "balance"):
+                    v = j.get(k)
+                    if v is not None:
+                        detail_parts.append(f"{k}={v}")
+                detail = " · ".join(detail_parts) if detail_parts else "OK"
+                result["envialo_simple"] = ("✅", detail, "pago")
+            elif r.status_code in (401, 403):
+                result["envialo_simple"] = ("❌", "Token inválido o expirado", "pago")
+            else:
+                result["envialo_simple"] = (
+                    "⚙️",
+                    f"HTTP {r.status_code} (endpoint puede haber cambiado, chequear panel)",
+                    "pago",
+                )
+        except Exception as e:
+            result["envialo_simple"] = (
+                "⚙️",
+                f"No pude consultar API ({type(e).__name__}) — chequear envialosimple.email",
+                "pago",
+            )
     else:
         result["envialo_simple"] = (
             "⚙️",
-            "Sin API key del bot — credenciales en .env.local.newsletter",
+            "ENVIALO_SIMPLE_TOKEN sin configurar (panel: envialosimple.email)",
             "pago",
         )
 
