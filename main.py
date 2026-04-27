@@ -1098,10 +1098,9 @@ def _alert_twitter_billing(error_msg: str, status_code: int):
         alert_admin_throttled(
             "twitter_402",
             "⚠️ *Twitter sin crédito*\n"
-            "Free tier de X API consumido (500 tweets/mes).\n"
-            "Opciones:\n"
-            "• Esperar al 1° del próximo mes\n"
-            "• Upgrade en https://developer.x.com → Basic ($100/mes, 50k tweets)\n\n"
+            "La cuenta de X (vinculada a xAI) se quedó sin créditos pre-pagos.\n\n"
+            "Recargar en: https://console.x.ai → Facturación → Créditos\n"
+            "(o developer.x.com → Facturación → Créditos)\n\n"
             f"Detalle: `{error_msg[:200]}`",
         )
     elif status_code == 429:
@@ -1114,24 +1113,14 @@ def _alert_twitter_billing(error_msg: str, status_code: int):
 
 
 def _increment_tweet_count():
-    """Incrementa el counter mensual de tweets en feedback store + avisos al 80%/95%."""
+    """Incrementa el counter mensual de tweets emitidos (info, no quota)."""
     from datetime import datetime
     fb = _load_feedback()
     key = "tweets_count_" + datetime.now().strftime("%Y%m")
     fb[key] = fb.get(key, 0) + 1
     _save_feedback(fb)
-
-    count = fb[key]
-    # Avisos en thresholds clave (free tier 500/mes)
-    thresholds = {400: "🟡 80%", 450: "🟠 90%", 490: "🔴 98%"}
-    if count in thresholds:
-        emoji = thresholds[count]
-        alert_admin_throttled(
-            f"tweet_count_{count}",
-            f"📊 *Tweets del mes:* {count}/500 ({emoji} del free tier de X).\n"
-            "Si llegás a 500 los siguientes van a fallar con HTTP 402 hasta el 1° del mes.",
-            cooldown_minutes=24 * 60,  # No repetir el mismo aviso en el día
-        )
+    # Cuenta xAI: créditos pre-pagos, no hay threshold fijo conocido.
+    # El aviso real se dispara con el 402 cuando se acaban los créditos.
 
 
 # Variable global para que el caller pueda leer el último error de Twitter
@@ -1166,8 +1155,8 @@ def _do_tweet(payload: dict, auth: OAuth1) -> tuple[str | None, str]:
         # Mensajes amigables para errores típicos
         if r.status_code == 402:
             detail = (
-                "Sin créditos en X API (free tier 500 tweets/mes consumido). "
-                "Esperá al 1° del mes o upgradéa el plan en developer.x.com. "
+                "Cuenta X sin créditos pre-pagos (xAI Console). "
+                "Recargar en console.x.ai → Facturación → Créditos. "
                 "Detalle: " + detail
             )
         elif r.status_code == 429:
@@ -2670,14 +2659,11 @@ def _check_credits_status() -> dict:
     fb = _load_feedback()
     month_key = "tweets_count_" + datetime.now().strftime("%Y%m")
     tw_count = fb.get(month_key, 0)
-    pct = tw_count / 500 * 100 if tw_count else 0
-    if tw_count >= 480:
-        tw_emoji = "🔴"
-    elif tw_count >= 400:
-        tw_emoji = "🟡"
-    else:
-        tw_emoji = "🟢"
-    result["twitter_quota"] = (tw_emoji, f"{tw_count}/500 free tier ({pct:.0f}%)", "pago")
+    # Cuenta xAI: pre-paid credits, no free tier mensual fijo. Mostramos sólo el
+    # contador de tweets emitidos en el mes como info útil, no como % de un cap.
+    result["twitter_quota"] = (
+        "📊", f"{tw_count} tweets emitidos este mes", "pago",
+    )
 
     # 3. RapidAPI (CRM Bodegas + posibles otros endpoints)
     rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
@@ -2841,11 +2827,12 @@ def _format_credits_report(status: dict) -> str:
     recs = []
     if status.get("openai", (None,))[0] == "❌":
         recs.append("• Recargar OpenAI: https://platform.openai.com/account/billing")
-    tw_q = status.get("twitter_quota", (None, "", ""))
-    if "🔴" in tw_q[0]:
-        recs.append("• Twitter cerca del límite: https://developer.x.com")
+    if status.get("twitter_auth", (None,))[0] == "❌":
+        recs.append("• Twitter auth roto — chequear OAuth en developer.x.com")
     if status.get("donweb", (None,))[0] == "❌":
         recs.append("• Sitio caído — entrar al panel de DonWeb")
+    # Tip permanente sobre dónde recargar X (cuenta vinculada a xAI)
+    recs.append("• Créditos de X: https://console.x.ai → Facturación → Créditos")
     if recs:
         lines.append("⚠️ *Acciones sugeridas:*")
         lines.extend(recs)
