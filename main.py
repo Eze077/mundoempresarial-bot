@@ -2552,20 +2552,47 @@ async def delete_from_channel(bot, message_id: int) -> bool:
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hola! Comandos disponibles:\n\n"
-        "Pega un link → analiza y publica la nota\n"
-        "/editar <URL o ID> → editar título, categoría o foto de una nota\n"
-        "/hilo <URL o ID> → generar y publicar un hilo de Twitter\n"
-        "/borrar <URL o ID> → manda una nota a la papelera\n"
-        "/curador → briefing de noticias relevantes de últimas 24h\n"
-        "/feedback_ver → ver qué aprendió el curador de tus decisiones\n"
-        "/cola → ver notas programadas pendientes\n"
-        "/fuentes [dominio] → ver repositorio de fuentes\n"
-        "/creditos → estado de servicios pagos (OpenAI, Twitter)\n"
-        "/stats → ver estadísticas del día"
+def _build_commands_text() -> str:
+    """Texto de ayuda con todos los comandos disponibles. Reusable para /start y /comandos."""
+    return (
+        "🤖 *Bot MundoEmpresarial — Comandos disponibles*\n\n"
+        "📥 *Publicar*\n"
+        "• Pegar link (con o sin texto alrededor) → scrape + preview + publicación.\n"
+        "  Soporta artículos, YouTube (con transcripción), URLs de Google News.\n"
+        "• `/editar <URL o ID>` → editar título, categoría, foto, redes sociales o borrar.\n"
+        "• `/hilo <URL o ID>` → generar hilo de Twitter desde una nota ya publicada.\n"
+        "• `/borrar <URL o ID>` → mandar una nota directo a la papelera de WP.\n"
+        "\n"
+        "📰 *Curaduría diaria*\n"
+        "• `/curador` → briefing on-demand de las noticias top de las últimas 24h.\n"
+        "  (Auto: 7:30 / 11:30 / 17:30 ARG, 5 notas por hilo)\n"
+        "• `/feedback_ver` → ver qué dominios y keywords aprendió el curador a "
+        "favorecer/penalizar en base a tus 👍👎 sobre las notas.\n"
+        "\n"
+        "📂 *Datos del ecosistema*\n"
+        "• `/fuentes [dominio]` → repositorio de medios que usás (orientación editorial, "
+        "afinidad, hilo típico, quirks técnicos).\n"
+        "• `/cola` → notas programadas pendientes de publicar.\n"
+        "• `/stats` → publicadas / canceladas / errores del día y fuentes.\n"
+        "  (Auto: reporte diario 23:00 ARG)\n"
+        "\n"
+        "💳 *Servicios y créditos*\n"
+        "• `/creditos` → estado de OpenAI, X/Twitter, RapidAPI, EnvíaloSimple, DonWeb, "
+        "Telegram, WordPress, dolarapi, etc.\n"
+        "  (Auto: reporte semanal lunes 09:00 ARG + alertas reactivas ante 402/quota)\n"
+        "• `/testtwitter` → diagnóstico OAuth 1.0a de Twitter (whoami).\n"
+        "\n"
+        "ℹ️ *Ayuda*\n"
+        "• `/start` o `/comandos` → este listado.\n"
     )
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(_build_commands_text(), parse_mode="Markdown")
+
+
+async def cmd_comandos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(_build_commands_text(), parse_mode="Markdown")
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5776,6 +5803,8 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("comandos", cmd_comandos))
+    app.add_handler(CommandHandler("help", cmd_comandos))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
