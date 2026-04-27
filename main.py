@@ -326,7 +326,7 @@ def rewrite_excerpt_with_gpt(title: str, text: str, original_excerpt: str, keywo
     )
 
     try:
-        r = requests.post(
+        r = openai_post(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -1018,6 +1018,122 @@ def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
     return None
 
 
+# ── Sistema de alertas para servicios pagos ──────────────────────────────────
+
+_ALERT_COOLDOWN: dict = {}  # {alert_key: timestamp_utc} para no spamear
+
+
+def alert_admin_sync(message: str):
+    """Manda alerta al ADMIN_CHAT_ID. Versión sync para usar desde funciones no-async."""
+    if not ADMIN_CHAT_ID or not TELEGRAM_TOKEN:
+        logger.warning(f"alert_admin sin destino: {message[:100]}")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id":    int(ADMIN_CHAT_ID),
+                "text":       f"🚨 *ALERTA*\n\n{message}",
+                "parse_mode": "Markdown",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"alert_admin_sync: {e}")
+
+
+def alert_admin_throttled(key: str, message: str, cooldown_minutes: int = 60) -> bool:
+    """Manda alerta solo si pasaron N minutos desde la última con la misma key."""
+    from datetime import datetime
+    now = datetime.utcnow().timestamp()
+    last = _ALERT_COOLDOWN.get(key, 0)
+    if now - last < cooldown_minutes * 60:
+        return False
+    _ALERT_COOLDOWN[key] = now
+    alert_admin_sync(message)
+    return True
+
+
+def openai_post(endpoint: str, **kwargs):
+    """
+    Wrapper de requests.post para endpoints de OpenAI que detecta automáticamente
+    errores de billing/quota/auth y alerta al admin. Devuelve el Response normal.
+    """
+    r = requests.post(endpoint, **kwargs)
+    _check_openai_billing(r)
+    return r
+
+
+def _check_openai_billing(r: requests.Response, label: str = "OpenAI"):
+    """Si la respuesta indica problema de billing/quota, alertar al admin."""
+    try:
+        body_lower = r.text.lower()
+    except Exception:
+        body_lower = ""
+
+    if r.status_code == 429 and "insufficient_quota" in body_lower:
+        alert_admin_throttled(
+            "openai_quota",
+            "⚠️ *OpenAI sin crédito*\n"
+            "Recargar en https://platform.openai.com/account/billing\n\n"
+            "Mientras no haya crédito:\n"
+            "• Curador no genera sugerencias top 3\n"
+            "• Reescritura de bajadas y resúmenes cae a heurística\n"
+            "• Comando /hilo no funciona\n"
+            "• Whisper fallback YouTube falla\n"
+            "• Dedup semántico del curador deshabilitado",
+        )
+    elif r.status_code == 401:
+        alert_admin_throttled(
+            "openai_auth",
+            "⚠️ *OpenAI auth falló*\n"
+            "La API key fue revocada o no es válida.\n"
+            "Revisar `OPENAI_API_KEY` en Railway.",
+        )
+
+
+def _alert_twitter_billing(error_msg: str, status_code: int):
+    """Detecta errores de billing/rate limit en Twitter y alerta al admin."""
+    if status_code == 402:
+        alert_admin_throttled(
+            "twitter_402",
+            "⚠️ *Twitter sin crédito*\n"
+            "Free tier de X API consumido (500 tweets/mes).\n"
+            "Opciones:\n"
+            "• Esperar al 1° del próximo mes\n"
+            "• Upgrade en https://developer.x.com → Basic ($100/mes, 50k tweets)\n\n"
+            f"Detalle: `{error_msg[:200]}`",
+        )
+    elif status_code == 429:
+        alert_admin_throttled(
+            "twitter_429",
+            "⚠️ *Twitter rate limit alcanzado*\n"
+            "Esperá 15-30 min antes de seguir tweeteando.",
+            cooldown_minutes=30,
+        )
+
+
+def _increment_tweet_count():
+    """Incrementa el counter mensual de tweets en feedback store + avisos al 80%/95%."""
+    from datetime import datetime
+    fb = _load_feedback()
+    key = "tweets_count_" + datetime.now().strftime("%Y%m")
+    fb[key] = fb.get(key, 0) + 1
+    _save_feedback(fb)
+
+    count = fb[key]
+    # Avisos en thresholds clave (free tier 500/mes)
+    thresholds = {400: "🟡 80%", 450: "🟠 90%", 490: "🔴 98%"}
+    if count in thresholds:
+        emoji = thresholds[count]
+        alert_admin_throttled(
+            f"tweet_count_{count}",
+            f"📊 *Tweets del mes:* {count}/500 ({emoji} del free tier de X).\n"
+            "Si llegás a 500 los siguientes van a fallar con HTTP 402 hasta el 1° del mes.",
+            cooldown_minutes=24 * 60,  # No repetir el mismo aviso en el día
+        )
+
+
 # Variable global para que el caller pueda leer el último error de Twitter
 _LAST_TWITTER_ERROR: str = ""
 
@@ -1045,7 +1161,9 @@ def _do_tweet(payload: dict, auth: OAuth1) -> tuple[str | None, str]:
                 detail = err["errors"][0].get("message", detail)
         except Exception:
             detail = r.text[:200]
-        # Mensajes amigables para errores típicos de billing/rate limit
+        # Alertar al admin de errores de billing/rate-limit
+        _alert_twitter_billing(detail or r.text[:200], r.status_code)
+        # Mensajes amigables para errores típicos
         if r.status_code == 402:
             detail = (
                 "Sin créditos en X API (free tier 500 tweets/mes consumido). "
@@ -1082,6 +1200,10 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
         # 1er intento: con imagen si la conseguimos subir
         url, err = _do_tweet(payload, auth)
         if url:
+            try:
+                _increment_tweet_count()
+            except Exception:
+                pass
             return url
 
         # Si falló y teníamos media, retry sin media (puede ser que upload v1.1
@@ -1091,6 +1213,10 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
             payload.pop("media", None)
             url2, err2 = _do_tweet(payload, auth)
             if url2:
+                try:
+                    _increment_tweet_count()
+                except Exception:
+                    pass
                 _LAST_TWITTER_ERROR = f"⚠️ Tuit OK pero sin imagen (media falló: {err})"
                 return url2
             err = err2
@@ -1151,7 +1277,7 @@ def generate_thread_with_gpt(title: str, body_text: str, wp_url: str, hashtags: 
     )
 
     try:
-        r = requests.post(
+        r = openai_post(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -1574,7 +1700,7 @@ def _transcript_via_whisper(video_id: str) -> str:
                     "language": "es",
                     "response_format": "text",
                 }
-                r = requests.post(
+                r = openai_post(
                     "https://api.openai.com/v1/audio/transcriptions",
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     data=data,
@@ -1868,7 +1994,7 @@ def _summarize_with_gpt(transcript: str, speaker: str = "", title: str = "") -> 
     )
 
     try:
-        r = requests.post(
+        r = openai_post(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -2448,6 +2574,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/feedback_ver → ver qué aprendió el curador de tus decisiones\n"
         "/cola → ver notas programadas pendientes\n"
         "/fuentes [dominio] → ver repositorio de fuentes\n"
+        "/creditos → estado de servicios pagos (OpenAI, Twitter)\n"
         "/stats → ver estadísticas del día"
     )
 
@@ -2481,6 +2608,126 @@ async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  {j.get('post_url', '')}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+def _check_credits_status() -> dict:
+    """Health check sync de servicios pagos. Devuelve dict con resultado de cada uno."""
+    from datetime import datetime
+    result = {}
+
+    # OpenAI: llamada barata (1 token) para verificar quota
+    if OPENAI_API_KEY:
+        try:
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "ok"}],
+                    "max_tokens": 1,
+                },
+                timeout=15,
+            )
+            body_low = r.text.lower()
+            if r.status_code == 200:
+                result["openai"] = ("✅", "OK")
+            elif r.status_code == 429 and "insufficient_quota" in body_low:
+                result["openai"] = ("❌", "SIN CRÉDITO")
+            elif r.status_code == 401:
+                result["openai"] = ("❌", "API key inválida o revocada")
+            elif r.status_code == 429:
+                result["openai"] = ("⚠️", "Rate limit (puede ser temporal)")
+            else:
+                result["openai"] = ("⚠️", f"HTTP {r.status_code}")
+        except Exception as e:
+            result["openai"] = ("❌", f"Error: {type(e).__name__}")
+    else:
+        result["openai"] = ("⚠️", "OPENAI_API_KEY no configurada")
+
+    # Twitter: counter mensual del free tier (500/mes)
+    fb = _load_feedback()
+    month_key = "tweets_count_" + datetime.now().strftime("%Y%m")
+    tw_count = fb.get(month_key, 0)
+    pct = tw_count / 500 * 100 if tw_count else 0
+    if tw_count >= 480:
+        emoji = "🔴"
+    elif tw_count >= 400:
+        emoji = "🟡"
+    else:
+        emoji = "🟢"
+    result["twitter"] = (emoji, f"{tw_count}/500 free tier ({pct:.0f}%)")
+
+    # Twitter auth: probar /users/me (no consume créditos de escritura)
+    if TWITTER_API_KEY and TWITTER_API_SECRET and TWITTER_TOKEN and TWITTER_SECRET:
+        try:
+            auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+            r = requests.get("https://api.twitter.com/2/users/me", auth=auth, timeout=10)
+            if r.status_code == 200:
+                result["twitter_auth"] = ("✅", f"@{r.json().get('data', {}).get('username', '?')}")
+            else:
+                result["twitter_auth"] = ("❌", f"HTTP {r.status_code}")
+        except Exception as e:
+            result["twitter_auth"] = ("❌", f"Error: {type(e).__name__}")
+    else:
+        result["twitter_auth"] = ("⚠️", "Credenciales incompletas")
+
+    return result
+
+
+def _format_credits_report(status: dict) -> str:
+    """Arma el mensaje de reporte de créditos."""
+    from datetime import datetime
+    lines = [f"💳 *Estado de servicios pagos — {datetime.now().strftime('%d/%m/%Y %H:%M')}*", ""]
+
+    if "openai" in status:
+        emoji, detail = status["openai"]
+        lines.append(f"*OpenAI* (gpt-4o-mini, embeddings, Whisper): {emoji} {detail}")
+        if "SIN" in detail:
+            lines.append("  → Recargar en https://platform.openai.com/account/billing")
+
+    if "twitter_auth" in status:
+        emoji, detail = status["twitter_auth"]
+        lines.append(f"*Twitter auth*: {emoji} {detail}")
+
+    if "twitter" in status:
+        emoji, detail = status["twitter"]
+        lines.append(f"*Twitter free tier*: {emoji} {detail}")
+        if "500" in detail and any(s in detail for s in ("48", "49", "50")):
+            lines.append("  → Considerar upgrade a Basic en https://developer.x.com")
+
+    lines.append("")
+    lines.append("_Servicios gratuitos no incluidos: Telegram, WordPress, dolarapi, argentinadatos, feedparser, yt-dlp_")
+    return "\n".join(lines)
+
+
+async def cmd_creditos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Health check on-demand de servicios pagos."""
+    msg = await update.message.reply_text("💳 Chequeando estado de servicios pagos…")
+    status = await asyncio.to_thread(_check_credits_status)
+    await msg.edit_text(_format_credits_report(status), parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def send_weekly_credits_check(context: ContextTypes.DEFAULT_TYPE):
+    """Job semanal (lunes 9 AM ARG) que manda al admin el estado de créditos."""
+    chat_id = ADMIN_CHAT_ID
+    if not chat_id:
+        logger.warning("send_weekly_credits_check: sin ADMIN_CHAT_ID")
+        return
+    try:
+        status = await asyncio.to_thread(_check_credits_status)
+        report = _format_credits_report(status)
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text=f"📅 *Reporte semanal*\n\n{report}",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        logger.info("Weekly credits check enviado")
+    except Exception as e:
+        logger.error(f"weekly_credits_check: {e}")
 
 
 async def cmd_feedback_ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4637,7 +4884,7 @@ def _dedupe_with_embeddings(articles: list, similarity_threshold: float = 0.82) 
         return articles
     try:
         texts = [f"{a['title']}. {a.get('summary','')[:200]}" for a in articles]
-        r = requests.post(
+        r = openai_post(
             "https://api.openai.com/v1/embeddings",
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -4904,7 +5151,7 @@ def _suggest_top3_with_gpt(articles: list) -> str:
     )
 
     try:
-        r = requests.post(
+        r = openai_post(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -5220,6 +5467,7 @@ def main():
     app.add_handler(CommandHandler("curador", cmd_curador))
     app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
     app.add_handler(CommandHandler("cola", cmd_cola))
+    app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
@@ -5252,6 +5500,15 @@ def main():
         name="daily_report",
     )
     logger.info("Reporte diario programado para las 23:00 ARG")
+
+    # Health check semanal de servicios pagos: lunes 9 AM ARG
+    job_queue.run_daily(
+        send_weekly_credits_check,
+        time=dtime(hour=9, minute=0, tzinfo=tz_arg),
+        days=(0,),  # 0 = lunes en python-telegram-bot
+        name="weekly_credits",
+    )
+    logger.info("Weekly credits check programado para los lunes 09:00 ARG")
 
     # Re-registrar scheduled jobs persistidos (sobreviven redeploys)
     try:
