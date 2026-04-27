@@ -1018,28 +1018,78 @@ def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
     return None
 
 
+# Variable global para que el caller pueda leer el último error de Twitter
+_LAST_TWITTER_ERROR: str = ""
+
+
+def get_last_twitter_error() -> str:
+    return _LAST_TWITTER_ERROR
+
+
+def _do_tweet(payload: dict, auth: OAuth1) -> tuple[str | None, str]:
+    """Hace la POST a /2/tweets. Devuelve (tweet_url, error_msg)."""
+    try:
+        r = requests.post(
+            "https://api.twitter.com/2/tweets",
+            json=payload, auth=auth, timeout=20,
+        )
+        logger.info(f"Twitter POST /2/tweets → {r.status_code}: {r.text[:300]}")
+        if r.status_code == 201:
+            tweet_id = r.json()["data"]["id"]
+            return f"https://twitter.com/i/web/status/{tweet_id}", ""
+        # Parsear error de Twitter
+        try:
+            err = r.json()
+            detail = err.get("detail") or err.get("title") or err.get("error", "")
+            if isinstance(err.get("errors"), list) and err["errors"]:
+                detail = err["errors"][0].get("message", detail)
+        except Exception:
+            detail = r.text[:200]
+        return None, f"HTTP {r.status_code}: {detail}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | None:
+    global _LAST_TWITTER_ERROR
+    _LAST_TWITTER_ERROR = ""
+
     try:
         tweet_text = build_tweet(data, wp_url, hashtags_override=hashtags_override)
         auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
 
         payload = {"text": tweet_text}
 
-        # Subir imagen si está disponible (para que Twitter muestre preview)
+        # Intentar subir imagen para preview
         image_url = data.get("image_url", "")
+        media_id = None
         if image_url:
             media_id = upload_twitter_media(image_url, auth)
             if media_id:
                 payload["media"] = {"media_ids": [media_id]}
 
-        r = requests.post("https://api.twitter.com/2/tweets", json=payload, auth=auth)
-        if r.status_code == 201:
-            tweet_id = r.json()["data"]["id"]
-            return f"https://twitter.com/i/web/status/{tweet_id}"
-        logger.error(f"Twitter {r.status_code}: {r.text[:400]}")
+        # 1er intento: con imagen si la conseguimos subir
+        url, err = _do_tweet(payload, auth)
+        if url:
+            return url
+
+        # Si falló y teníamos media, retry sin media (puede ser que upload v1.1
+        # esté deprecado o el media_id no es válido)
+        if media_id:
+            logger.warning(f"Tweet con media falló ({err}), reintentando sin imagen…")
+            payload.pop("media", None)
+            url2, err2 = _do_tweet(payload, auth)
+            if url2:
+                _LAST_TWITTER_ERROR = f"⚠️ Tuit OK pero sin imagen (media falló: {err})"
+                return url2
+            err = err2
+
+        _LAST_TWITTER_ERROR = err
+        logger.error(f"Twitter post_tweet falló: {err}")
         return None
     except Exception as e:
-        logger.error(f"Twitter error: {e}")
+        _LAST_TWITTER_ERROR = f"{type(e).__name__}: {e}"
+        logger.error(f"post_tweet exception: {e}")
         return None
 
 
@@ -3174,7 +3224,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         custom_ht = context.user_data.get("custom_hashtags")
         tweet_url = await asyncio.to_thread(post_tweet, stored["data"], stored["url"], custom_ht)
         if tweet_url:
-            # Guardar tweet_id en el post para poder borrarlo luego via /editar
             tw_id = tweet_id_from_url(tweet_url)
             if tw_id and stored.get("id"):
                 tg_msg_id = stored.get("tg_msg_id", 0)
@@ -3182,13 +3231,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     append_social_meta, stored["id"], stored["content"],
                     tw_id, tg_msg_id
                 )
+            warn = get_last_twitter_error()  # advertencia de retry sin imagen, si aplica
+            warn_msg = f"\n{warn}" if warn else ""
             await query.edit_message_text(
                 f"Publicado en WordPress y en Twitter/X!\n\n"
-                f"WP: {stored['url']}\nTweet: {tweet_url}"
+                f"WP: {stored['url']}\nTweet: {tweet_url}{warn_msg}"
             )
         else:
+            err = get_last_twitter_error() or "(sin detalle)"
             await query.edit_message_text(
-                f"Publicado en WordPress pero fallo Twitter.\n\n{stored['url']}"
+                f"Publicado en WordPress pero falló Twitter.\n\n"
+                f"WP: {stored['url']}\n\n"
+                f"⚠️ Twitter dijo: `{md_escape(err[:300])}`",
+                parse_mode="Markdown",
             )
         return
 
