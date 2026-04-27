@@ -1045,6 +1045,17 @@ def _do_tweet(payload: dict, auth: OAuth1) -> tuple[str | None, str]:
                 detail = err["errors"][0].get("message", detail)
         except Exception:
             detail = r.text[:200]
+        # Mensajes amigables para errores típicos de billing/rate limit
+        if r.status_code == 402:
+            detail = (
+                "Sin créditos en X API (free tier 500 tweets/mes consumido). "
+                "Esperá al 1° del mes o upgradéa el plan en developer.x.com. "
+                "Detalle: " + detail
+            )
+        elif r.status_code == 429:
+            detail = "Rate limit de X. Esperá 15 min y reintentá. " + detail
+        elif r.status_code == 403:
+            detail = "Permiso denegado por X (puede ser duplicate / app no configurada). " + detail
         return None, f"HTTP {r.status_code}: {detail}"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
