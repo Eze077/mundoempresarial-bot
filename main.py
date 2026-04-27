@@ -2611,11 +2611,17 @@ async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _check_credits_status() -> dict:
-    """Health check sync de servicios pagos. Devuelve dict con resultado de cada uno."""
+    """
+    Health check sync de TODOS los servicios usados por el bot.
+    Devuelve dict {service_key: (emoji, detail_str, tier)}.
+    tier: 'pago' | 'gratuito' | 'freemium'
+    """
     from datetime import datetime
     result = {}
 
-    # OpenAI: llamada barata (1 token) para verificar quota
+    # ═══ PAGOS CON API DE QUOTA ═══
+
+    # 1. OpenAI (chat / embeddings / Whisper)
     if OPENAI_API_KEY:
         try:
             r = requests.post(
@@ -2633,73 +2639,228 @@ def _check_credits_status() -> dict:
             )
             body_low = r.text.lower()
             if r.status_code == 200:
-                result["openai"] = ("✅", "OK")
+                result["openai"] = ("✅", "OK", "pago")
             elif r.status_code == 429 and "insufficient_quota" in body_low:
-                result["openai"] = ("❌", "SIN CRÉDITO")
+                result["openai"] = ("❌", "SIN CRÉDITO", "pago")
             elif r.status_code == 401:
-                result["openai"] = ("❌", "API key inválida o revocada")
+                result["openai"] = ("❌", "API key inválida o revocada", "pago")
             elif r.status_code == 429:
-                result["openai"] = ("⚠️", "Rate limit (puede ser temporal)")
+                result["openai"] = ("⚠️", "Rate limit (temporal)", "pago")
             else:
-                result["openai"] = ("⚠️", f"HTTP {r.status_code}")
+                result["openai"] = ("⚠️", f"HTTP {r.status_code}", "pago")
         except Exception as e:
-            result["openai"] = ("❌", f"Error: {type(e).__name__}")
+            result["openai"] = ("❌", f"Error: {type(e).__name__}", "pago")
     else:
-        result["openai"] = ("⚠️", "OPENAI_API_KEY no configurada")
+        result["openai"] = ("⚙️", "OPENAI_API_KEY sin configurar", "pago")
 
-    # Twitter: counter mensual del free tier (500/mes)
-    fb = _load_feedback()
-    month_key = "tweets_count_" + datetime.now().strftime("%Y%m")
-    tw_count = fb.get(month_key, 0)
-    pct = tw_count / 500 * 100 if tw_count else 0
-    if tw_count >= 480:
-        emoji = "🔴"
-    elif tw_count >= 400:
-        emoji = "🟡"
-    else:
-        emoji = "🟢"
-    result["twitter"] = (emoji, f"{tw_count}/500 free tier ({pct:.0f}%)")
-
-    # Twitter auth: probar /users/me (no consume créditos de escritura)
+    # 2. Twitter auth + counter mensual
     if TWITTER_API_KEY and TWITTER_API_SECRET and TWITTER_TOKEN and TWITTER_SECRET:
         try:
             auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
             r = requests.get("https://api.twitter.com/2/users/me", auth=auth, timeout=10)
             if r.status_code == 200:
-                result["twitter_auth"] = ("✅", f"@{r.json().get('data', {}).get('username', '?')}")
+                result["twitter_auth"] = ("✅", f"@{r.json().get('data', {}).get('username', '?')}", "pago")
             else:
-                result["twitter_auth"] = ("❌", f"HTTP {r.status_code}")
+                result["twitter_auth"] = ("❌", f"HTTP {r.status_code}", "pago")
         except Exception as e:
-            result["twitter_auth"] = ("❌", f"Error: {type(e).__name__}")
+            result["twitter_auth"] = ("❌", f"Error: {type(e).__name__}", "pago")
     else:
-        result["twitter_auth"] = ("⚠️", "Credenciales incompletas")
+        result["twitter_auth"] = ("⚙️", "Credenciales incompletas", "pago")
+
+    fb = _load_feedback()
+    month_key = "tweets_count_" + datetime.now().strftime("%Y%m")
+    tw_count = fb.get(month_key, 0)
+    pct = tw_count / 500 * 100 if tw_count else 0
+    if tw_count >= 480:
+        tw_emoji = "🔴"
+    elif tw_count >= 400:
+        tw_emoji = "🟡"
+    else:
+        tw_emoji = "🟢"
+    result["twitter_quota"] = (tw_emoji, f"{tw_count}/500 free tier ({pct:.0f}%)", "pago")
+
+    # 3. RapidAPI (CRM Bodegas + posibles otros endpoints)
+    rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
+    if rapidapi_key:
+        # RapidAPI no tiene endpoint público de quota global; cada API expone
+        # headers x-ratelimit-* en sus respuestas. Hacemos un test contra un
+        # endpoint conocido (httpbin via RapidAPI).
+        try:
+            r = requests.get(
+                "https://httpbin-rapidapi.p.rapidapi.com/get",
+                headers={
+                    "X-RapidAPI-Key": rapidapi_key,
+                    "X-RapidAPI-Host": "httpbin-rapidapi.p.rapidapi.com",
+                },
+                timeout=10,
+            )
+            if r.status_code == 200:
+                limit = r.headers.get("x-ratelimit-requests-limit", "?")
+                remaining = r.headers.get("x-ratelimit-requests-remaining", "?")
+                result["rapidapi"] = ("✅", f"key OK · quota mensual restante {remaining}/{limit}", "pago")
+            elif r.status_code == 401 or r.status_code == 403:
+                result["rapidapi"] = ("❌", "Key inválida o sin permisos", "pago")
+            elif r.status_code == 429:
+                result["rapidapi"] = ("❌", "Rate limit / quota agotada", "pago")
+            else:
+                result["rapidapi"] = ("⚠️", f"HTTP {r.status_code} (test endpoint puede no existir)", "pago")
+        except Exception as e:
+            result["rapidapi"] = ("⚠️", f"No pude testear: {type(e).__name__}", "pago")
+    else:
+        result["rapidapi"] = ("⚙️", "RAPIDAPI_KEY sin configurar en Railway", "pago")
+
+    # 4. Instagram scraper (servicio externo, suele ser RapidAPI o similar)
+    ig_key = os.environ.get("IG_SCRAPER_KEY", "") or os.environ.get("INSTAGRAM_API_KEY", "")
+    ig_provider = os.environ.get("IG_SCRAPER_PROVIDER", "")
+    if ig_key:
+        result["ig_scraper"] = ("⚙️", f"Configurado ({ig_provider or 'sin provider'}) — chequeo manual", "freemium")
+    else:
+        result["ig_scraper"] = (
+            "⚙️",
+            "IG_SCRAPER_KEY sin configurar (decime cuál usás y lo agrego)",
+            "freemium",
+        )
+
+    # 5. EnvíaloSimple (email transaccional para newsletter)
+    es_user = os.environ.get("ENVIALO_SIMPLE_USER", "") or os.environ.get("ENVIALOSIMPLE_USER", "")
+    es_api = os.environ.get("ENVIALO_SIMPLE_API_KEY", "") or os.environ.get("ENVIALOSIMPLE_API_KEY", "")
+    if es_api:
+        # EnvíaloSimple no tiene API REST documentada de quota, solo SMTP.
+        # Marcamos como configurado y sugerimos chequeo en el panel.
+        result["envialo_simple"] = ("⚙️", "Configurado (chequear panel para créditos restantes)", "pago")
+    elif es_user:
+        result["envialo_simple"] = ("⚠️", "User sí, API key no — sin chequeo automático", "pago")
+    else:
+        result["envialo_simple"] = (
+            "⚙️",
+            "Sin API key del bot — credenciales en .env.local.newsletter",
+            "pago",
+        )
+
+    # 6. DonWeb hosting (sitio mundoempresarial.ar)
+    try:
+        r = requests.head(WP_URL, timeout=10, allow_redirects=True)
+        if r.status_code in (200, 301, 302):
+            result["donweb"] = ("✅", "Sitio online", "pago anual")
+        else:
+            result["donweb"] = ("⚠️", f"HTTP {r.status_code}", "pago anual")
+    except Exception as e:
+        result["donweb"] = ("❌", f"Sitio caído: {type(e).__name__}", "pago anual")
+
+    # ═══ GRATUITOS ═══
+
+    # Telegram
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
+            timeout=10,
+        )
+        if r.status_code == 200:
+            username = r.json().get("result", {}).get("username", "?")
+            result["telegram"] = ("✅", f"@{username}", "gratuito")
+        else:
+            result["telegram"] = ("❌", f"HTTP {r.status_code}", "gratuito")
+    except Exception as e:
+        result["telegram"] = ("❌", f"Error: {type(e).__name__}", "gratuito")
+
+    # WordPress REST (en realidad pago indirecto via DonWeb pero el API es libre)
+    try:
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?per_page=1", timeout=10)
+        if r.status_code == 200:
+            result["wordpress"] = ("✅", "REST API OK", "gratuito")
+        else:
+            result["wordpress"] = ("⚠️", f"HTTP {r.status_code}", "gratuito")
+    except Exception as e:
+        result["wordpress"] = ("❌", f"Error: {type(e).__name__}", "gratuito")
+
+    # DolarAPI
+    try:
+        r = requests.get("https://dolarapi.com/v1/dolares/oficial", timeout=10)
+        result["dolarapi"] = (("✅", "OK", "gratuito") if r.status_code == 200
+                              else ("⚠️", f"HTTP {r.status_code}", "gratuito"))
+    except Exception:
+        result["dolarapi"] = ("❌", "No responde", "gratuito")
+
+    # ArgentinaDatos
+    try:
+        r = requests.get(
+            "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais/ultimo",
+            timeout=10,
+        )
+        result["argentinadatos"] = (("✅", "OK", "gratuito") if r.status_code == 200
+                                     else ("⚠️", f"HTTP {r.status_code}", "gratuito"))
+    except Exception:
+        result["argentinadatos"] = ("❌", "No responde", "gratuito")
+
+    # YouTube scrapers (yt-dlp + transcript-api + googlenewsdecoder)
+    result["youtube_stack"] = ("✅", "yt-dlp + transcript-api + googlenewsdecoder", "gratuito")
 
     return result
 
 
+# Etiquetas + descripción de cada servicio (orden de aparición en reporte)
+SERVICE_LABELS = {
+    "openai":         ("OpenAI", "gpt-4o-mini, embeddings, Whisper"),
+    "twitter_auth":   ("Twitter / X auth", "OAuth 1.0a developer.x.com"),
+    "twitter_quota":  ("Twitter free tier", "500 tweets/mes"),
+    "rapidapi":       ("RapidAPI", "marketplace de APIs (CRM Bodegas y otros)"),
+    "ig_scraper":     ("Instagram scraper", "servicio externo para IG"),
+    "envialo_simple": ("EnvíaloSimple", "email transaccional newsletter"),
+    "donweb":         ("DonWeb", "hosting de mundoempresarial.ar"),
+    "telegram":       ("Telegram Bot API", "bot + canal"),
+    "wordpress":      ("WordPress REST", "API de mundoempresarial.ar"),
+    "dolarapi":       ("DolarAPI", "cotizaciones AR"),
+    "argentinadatos": ("ArgentinaDatos", "riesgo país"),
+    "youtube_stack":  ("YouTube + Google News", "yt-dlp, transcript-api, decoder"),
+}
+
+
 def _format_credits_report(status: dict) -> str:
-    """Arma el mensaje de reporte de créditos."""
+    """Arma el mensaje de reporte de créditos agrupado por tier (pago / gratuito)."""
     from datetime import datetime
-    lines = [f"💳 *Estado de servicios pagos — {datetime.now().strftime('%d/%m/%Y %H:%M')}*", ""]
+    lines = [f"💳 *Estado de servicios — {datetime.now().strftime('%d/%m/%Y %H:%M')}*", ""]
 
-    if "openai" in status:
-        emoji, detail = status["openai"]
-        lines.append(f"*OpenAI* (gpt-4o-mini, embeddings, Whisper): {emoji} {detail}")
-        if "SIN" in detail:
-            lines.append("  → Recargar en https://platform.openai.com/account/billing")
+    # Agrupar por tier
+    paid_keys = [k for k, v in status.items() if v[2] in ("pago", "pago anual", "freemium")]
+    free_keys = [k for k, v in status.items() if v[2] == "gratuito"]
 
-    if "twitter_auth" in status:
-        emoji, detail = status["twitter_auth"]
-        lines.append(f"*Twitter auth*: {emoji} {detail}")
+    # Pagos primero
+    if paid_keys:
+        lines.append("🟥 *Servicios pagos*")
+        for key in SERVICE_LABELS:
+            if key not in paid_keys:
+                continue
+            emoji, detail, tier = status[key]
+            label, desc = SERVICE_LABELS[key]
+            tier_tag = f" _({tier})_" if tier != "pago" else ""
+            lines.append(f"  {emoji} *{label}*{tier_tag}: {detail}")
+            lines.append(f"      _{desc}_")
+        lines.append("")
 
-    if "twitter" in status:
-        emoji, detail = status["twitter"]
-        lines.append(f"*Twitter free tier*: {emoji} {detail}")
-        if "500" in detail and any(s in detail for s in ("48", "49", "50")):
-            lines.append("  → Considerar upgrade a Basic en https://developer.x.com")
+    # Recomendaciones accionables
+    recs = []
+    if status.get("openai", (None,))[0] == "❌":
+        recs.append("• Recargar OpenAI: https://platform.openai.com/account/billing")
+    tw_q = status.get("twitter_quota", (None, "", ""))
+    if "🔴" in tw_q[0]:
+        recs.append("• Twitter cerca del límite: https://developer.x.com")
+    if status.get("donweb", (None,))[0] == "❌":
+        recs.append("• Sitio caído — entrar al panel de DonWeb")
+    if recs:
+        lines.append("⚠️ *Acciones sugeridas:*")
+        lines.extend(recs)
+        lines.append("")
 
-    lines.append("")
-    lines.append("_Servicios gratuitos no incluidos: Telegram, WordPress, dolarapi, argentinadatos, feedparser, yt-dlp_")
+    # Gratuitos
+    if free_keys:
+        lines.append("🟩 *Servicios gratuitos*")
+        for key in SERVICE_LABELS:
+            if key not in free_keys:
+                continue
+            emoji, detail, _ = status[key]
+            label, desc = SERVICE_LABELS[key]
+            lines.append(f"  {emoji} *{label}*: {detail}")
+
     return "\n".join(lines)
 
 
