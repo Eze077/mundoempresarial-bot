@@ -2784,6 +2784,33 @@ def _check_credits_status() -> dict:
         or os.environ.get("ENVIALOSIMPLE_TOKEN", "")
         or os.environ.get("ENVIALO_SIMPLE_API_KEY", "")
     )
+    # Vencimiento (env var YYYY-MM-DD opcional, viene del panel DonWeb/EnvíaloSimple)
+    es_exp_suffix = ""
+    es_exp = os.environ.get("ENVIALO_SIMPLE_EXPIRES", "")
+    if es_exp:
+        try:
+            from datetime import datetime as _dt2
+            exp_dt = _dt2.strptime(es_exp, "%Y-%m-%d").date()
+            days_left = (exp_dt - _dt2.now().date()).days
+            if days_left < 0:
+                es_exp_suffix = f" · 🔴 VENCIDO hace {-days_left}d"
+            elif days_left <= 3:
+                es_exp_suffix = f" · 🔴 vence en {days_left}d"
+            elif days_left <= 7:
+                es_exp_suffix = f" · 🟡 vence en {days_left}d"
+            else:
+                es_exp_suffix = f" · vence en {days_left}d"
+            if days_left <= 7:
+                alert_admin_throttled(
+                    f"envialo_exp_{es_exp}",
+                    f"⚠️ *EnvíaloSimple por vencer*\n"
+                    f"Vence el {es_exp} ({days_left} días).\n"
+                    f"Renovar en https://donweb.com (panel servicios)",
+                    cooldown_minutes=24 * 60,
+                )
+        except ValueError:
+            es_exp_suffix = " · vencimiento inválido"
+
     if es_token:
         # EnvíaloSimple tiene API REST en envialosimple.email/api/v1
         # con auth bearer. Endpoint /api/v1/account/info devuelve plan + saldo.
@@ -2802,37 +2829,77 @@ def _check_credits_status() -> dict:
                     if v is not None:
                         detail_parts.append(f"{k}={v}")
                 detail = " · ".join(detail_parts) if detail_parts else "OK"
-                result["envialo_simple"] = ("✅", detail, "pago")
+                result["envialo_simple"] = ("✅", detail + es_exp_suffix, "pago")
             elif r.status_code in (401, 403):
-                result["envialo_simple"] = ("❌", "Token inválido o expirado", "pago")
+                result["envialo_simple"] = ("❌", "Token inválido o expirado" + es_exp_suffix, "pago")
             else:
                 result["envialo_simple"] = (
                     "⚙️",
-                    f"HTTP {r.status_code} (endpoint puede haber cambiado, chequear panel)",
+                    f"HTTP {r.status_code} (endpoint puede haber cambiado){es_exp_suffix}",
                     "pago",
                 )
         except Exception as e:
             result["envialo_simple"] = (
                 "⚙️",
-                f"No pude consultar API ({type(e).__name__}) — chequear envialosimple.email",
+                f"No pude consultar API ({type(e).__name__}){es_exp_suffix}",
                 "pago",
             )
     else:
         result["envialo_simple"] = (
             "⚙️",
-            "ENVIALO_SIMPLE_TOKEN sin configurar (panel: envialosimple.email)",
+            f"ENVIALO_SIMPLE_TOKEN sin configurar (panel: envialosimple.email){es_exp_suffix}",
             "pago",
         )
 
     # 6. DonWeb hosting (sitio mundoempresarial.ar)
+    # 6a. Uptime check
     try:
         r = requests.head(WP_URL, timeout=10, allow_redirects=True)
-        if r.status_code in (200, 301, 302):
-            result["donweb"] = ("✅", "Sitio online", "pago anual")
-        else:
-            result["donweb"] = ("⚠️", f"HTTP {r.status_code}", "pago anual")
+        site_status = "online" if r.status_code in (200, 301, 302) else f"HTTP {r.status_code}"
     except Exception as e:
-        result["donweb"] = ("❌", f"Sitio caído: {type(e).__name__}", "pago anual")
+        site_status = f"caído ({type(e).__name__})"
+
+    # 6b. Vencimiento (env var YYYY-MM-DD opcional)
+    donweb_exp = os.environ.get("DONWEB_HOSTING_EXPIRES", "")
+    if donweb_exp:
+        try:
+            from datetime import datetime as _dt
+            exp_dt = _dt.strptime(donweb_exp, "%Y-%m-%d").date()
+            today = _dt.now().date()
+            days_left = (exp_dt - today).days
+            if days_left < 0:
+                emoji = "🔴"
+                exp_str = f"VENCIDO hace {-days_left}d"
+            elif days_left <= 3:
+                emoji = "🔴"
+                exp_str = f"vence en {days_left}d ({donweb_exp}) — RENOVAR YA"
+            elif days_left <= 7:
+                emoji = "🟡"
+                exp_str = f"vence en {days_left}d ({donweb_exp})"
+            else:
+                emoji = "🟢"
+                exp_str = f"vence en {days_left}d ({donweb_exp})"
+            result["donweb"] = (emoji, f"{site_status} · {exp_str}", "pago anual")
+            # Alerta automática si vence pronto
+            if days_left <= 7:
+                alert_admin_throttled(
+                    f"donweb_exp_{donweb_exp}",
+                    f"⚠️ *Hosting DonWeb por vencer*\n"
+                    f"Vence el {donweb_exp} ({days_left} días).\n"
+                    f"Si no renovás, el sitio mundoempresarial.ar se cae y "
+                    f"todo el ecosistema queda offline.\n"
+                    f"Renovar en https://donweb.com",
+                    cooldown_minutes=24 * 60,
+                )
+        except ValueError:
+            result["donweb"] = ("⚠️", f"{site_status} · DONWEB_HOSTING_EXPIRES inválido", "pago anual")
+    else:
+        emoji = "✅" if site_status == "online" else "❌"
+        result["donweb"] = (
+            emoji,
+            f"{site_status} · vencimiento sin trackear (cargar DONWEB_HOSTING_EXPIRES YYYY-MM-DD)",
+            "pago anual",
+        )
 
     # ═══ GRATUITOS ═══
 
