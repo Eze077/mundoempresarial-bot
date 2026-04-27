@@ -4033,9 +4033,11 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             tweet_url = await asyncio.to_thread(post_tweet, data, post_url)
             if tweet_url:
                 new_tweet_id = tweet_url.rsplit("/", 1)[-1]
-                results.append(f"✅ Tuit publicado: {tweet_url}")
+                warn = get_last_twitter_error()  # advertencia de retry sin imagen
+                results.append(f"✅ Tuit publicado: {tweet_url}" + (f"\n   {warn}" if warn else ""))
             else:
-                results.append("❌ Error al publicar en Twitter")
+                err = get_last_twitter_error() or "(sin detalle)"
+                results.append(f"❌ Error al publicar en Twitter\n   ⚠️ `{err[:200]}`")
 
         if pub_wa:
             s_title = get_title(data)
