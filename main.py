@@ -3133,7 +3133,10 @@ _SOURCES_CACHE = None
 
 
 def _load_sources() -> dict:
-    """Lee sources.json desde el disco (cacheado en memoria)."""
+    """
+    Lee sources.json desde el disco + overlay del feedback store (entradas
+    agregadas/borradas por el operador via /fuentes). Cacheado en memoria.
+    """
     global _SOURCES_CACHE
     if _SOURCES_CACHE is not None:
         return _SOURCES_CACHE
@@ -3141,12 +3144,113 @@ def _load_sources() -> dict:
         path = os.path.join(os.path.dirname(__file__), "sources.json")
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        _SOURCES_CACHE = {k: v for k, v in data.items() if not k.startswith("_")}
-        return _SOURCES_CACHE
+        sources = {k: v for k, v in data.items() if not k.startswith("_")}
     except Exception as e:
         logger.error(f"Error cargando sources.json: {e}")
-        _SOURCES_CACHE = {}
-        return {}
+        sources = {}
+
+    # Aplicar overlay (agregadas/borradas en runtime, persiste en feedback store WP)
+    try:
+        fb = _load_feedback()
+        overlay = fb.get("sources_overlay", {}) or {}
+        for domain, src_data in overlay.items():
+            if not isinstance(src_data, dict):
+                continue
+            if src_data.get("_deleted"):
+                sources.pop(domain, None)
+            else:
+                sources[domain] = src_data
+    except Exception as e:
+        logger.warning(f"Sources overlay: {e}")
+
+    _SOURCES_CACHE = sources
+    return _SOURCES_CACHE
+
+
+def _invalidate_sources_cache():
+    global _SOURCES_CACHE
+    _SOURCES_CACHE = None
+
+
+def _add_source(domain: str, source_data: dict) -> bool:
+    """Agrega o actualiza una fuente en el overlay del feedback store."""
+    fb = _load_feedback()
+    overlay = fb.setdefault("sources_overlay", {})
+    overlay[domain] = source_data
+    ok = _save_feedback(fb)
+    _invalidate_sources_cache()
+    return ok
+
+
+def _delete_source(domain: str) -> bool:
+    """Marca una fuente como borrada en el overlay (sobrevive a redeploys)."""
+    fb = _load_feedback()
+    overlay = fb.setdefault("sources_overlay", {})
+    overlay[domain] = {"_deleted": True}
+    ok = _save_feedback(fb)
+    _invalidate_sources_cache()
+    return ok
+
+
+def _parse_source_with_gpt(text: str) -> dict | None:
+    """
+    Parsea descripción libre de una fuente nueva a JSON estructurado vía GPT.
+    Devuelve dict con _domain + campos de sources.json schema, o None si falla.
+    """
+    if not OPENAI_API_KEY:
+        return None
+    if not text or len(text.strip()) < 5:
+        return None
+
+    prompt = (
+        "Sos asistente del bot de MundoEmpresarial.ar (medio AR para pymes "
+        "alineado con ENAC, desarrollismo nacional). Te paso una descripción "
+        "libre de una fuente nueva. Devolvé SOLO un JSON válido con estos campos:\n\n"
+        '{\n'
+        '  "_domain": "dominio.com.ar",  // dominio raíz sin www, sin protocolo, sin path\n'
+        '  "name": "Nombre Display",\n'
+        '  "tipo": "Generalista|Economía|Política|Pyme|Agro|Internacional|Opinión|Sectorial|Oficial",\n'
+        '  "orientacion": "Descripción breve del sesgo editorial del medio",\n'
+        '  "distancia_editorial": 5,    // 1-10. 1=alineado ENAC, 10=opuesto\n'
+        '  "hilo_tipico": 2,             // 1=info útil, 2=voz pymes, 3=opinión\n'
+        '  "confiabilidad": 7,           // 1-10\n'
+        '  "notas": "Observaciones editoriales libres",\n'
+        '  "quirks": "",                 // problemas técnicos conocidos al scrapear\n'
+        '  "rss_url": ""                 // URL del RSS si la conocés, vacío si no\n'
+        '}\n\n'
+        f"Descripción del operador:\n{text}\n\n"
+        "Devolvé SOLO el JSON, sin markdown ni explicaciones."
+    )
+
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+            },
+            timeout=30,
+        )
+        if r.status_code == 200:
+            content = r.json()["choices"][0]["message"]["content"].strip()
+            data = json.loads(content)
+            # Sanitizar dominio
+            dom = (data.get("_domain") or "").strip().lower()
+            dom = dom.replace("https://", "").replace("http://", "").replace("www.", "")
+            dom = dom.split("/")[0]
+            if not dom:
+                return None
+            data["_domain"] = dom
+            return data
+    except Exception as e:
+        logger.error(f"_parse_source_with_gpt: {e}")
+    return None
 
 
 def _domain_of(url: str) -> str:
@@ -3248,7 +3352,103 @@ async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     parts.append("\n_Usá_ `/fuentes <dominio>` _para ver detalle._")
-    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("➕ Agregar fuente", callback_data="src_add"),
+        InlineKeyboardButton("🗑️ Borrar fuente", callback_data="src_del"),
+    ]])
+    await update.message.reply_text(
+        "\n".join(parts), parse_mode="Markdown", reply_markup=kb,
+    )
+
+
+async def handle_sources_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "src_add":
+        context.user_data["waiting_for_new_source"] = True
+        await query.edit_message_text(
+            "➕ *Agregar fuente nueva*\n\n"
+            "Mandame en un mensaje el dominio + descripción libre. Ejemplos:\n\n"
+            "`lanueva.com.ar - Diario de Bahía Blanca, generalista, mirada equilibrada provincial. RSS estándar.`\n\n"
+            "`mdzol.com - Mendoza, generalista, línea pro-mercado tradicional, scoring distancia 7.`\n\n"
+            "GPT te arma el JSON con tipo, orientación, distancia editorial, hilo típico, etc. "
+            "Después podés ajustar con /fuentes <dominio>.\n\n"
+            "_Cancelá ignorando el mensaje y usando otro comando._",
+            parse_mode="Markdown",
+        )
+        return
+
+    if query.data == "src_del":
+        sources = _load_sources()
+        if not sources:
+            await query.edit_message_text("No hay fuentes para borrar.")
+            return
+        sorted_doms = sorted(sources.keys())
+        # Telegram limita botones por mensaje. Si >40 fuentes, paginar (no necesario por ahora).
+        rows = []
+        context.chat_data["src_del_map"] = {}
+        for i, dom in enumerate(sorted_doms[:30]):
+            name = sources[dom].get("name", dom)
+            label = f"❌ {name[:30]}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"srcdel_{i}")])
+            context.chat_data["src_del_map"][i] = dom
+        rows.append([InlineKeyboardButton("Cancelar", callback_data="src_cancel")])
+        await query.edit_message_text(
+            "🗑️ *Elegí qué fuente borrar*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if query.data == "src_cancel":
+        await query.edit_message_text("Cancelado.")
+        return
+
+    if query.data.startswith("srcdel_"):
+        try:
+            idx = int(query.data.split("_", 1)[1])
+        except ValueError:
+            return
+        domain = context.chat_data.get("src_del_map", {}).get(idx)
+        if not domain:
+            await query.answer("Fuente no encontrada", show_alert=True)
+            return
+        context.chat_data["src_del_pending"] = domain
+        sources = _load_sources()
+        info = sources.get(domain, {})
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"❌ Confirmar borrado", callback_data="src_del_confirm"),
+            InlineKeyboardButton("Cancelar", callback_data="src_cancel"),
+        ]])
+        await query.edit_message_text(
+            f"🗑️ Borrar fuente:\n\n"
+            f"*{md_escape(info.get('name', domain))}* (`{md_escape(domain)}`)\n"
+            f"_{md_escape((info.get('orientacion') or '')[:200])}_\n\n"
+            f"¿Confirmás?",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+        return
+
+    if query.data == "src_del_confirm":
+        domain = context.chat_data.get("src_del_pending", "")
+        if not domain:
+            await query.edit_message_text("No hay borrado pendiente.")
+            return
+        ok = await asyncio.to_thread(_delete_source, domain)
+        if ok:
+            await query.edit_message_text(
+                f"✅ Fuente *{md_escape(domain)}* borrada del repositorio.",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Error al borrar *{md_escape(domain)}*.",
+                parse_mode="Markdown",
+            )
+        context.chat_data.pop("src_del_pending", None)
+        return
 
 
 CAT_NAMES = {
@@ -3430,6 +3630,53 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Vista previa actualizada:\n\n`{md_escape(tweet_preview)}`",
             parse_mode="Markdown",
             reply_markup=kb_tweet,
+        )
+        return
+
+    # ── Si el bot espera la descripción de una fuente nueva ──
+    if context.user_data.get("waiting_for_new_source"):
+        context.user_data["waiting_for_new_source"] = False
+        if not OPENAI_API_KEY:
+            await update.message.reply_text(
+                "❌ Necesito OPENAI_API_KEY configurada para parsear fuentes nuevas."
+            )
+            return
+        msg = await update.message.reply_text("🤖 Parseando descripción con GPT…")
+        try:
+            source_data = await asyncio.to_thread(_parse_source_with_gpt, text_in)
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {e}")
+            return
+        if not source_data:
+            await msg.edit_text(
+                "❌ No pude parsear. Intentá de nuevo con más info "
+                "(empezá por el dominio, ej. `lanueva.com.ar`).",
+                parse_mode="Markdown",
+            )
+            return
+        domain = source_data.pop("_domain", "")
+        if not domain:
+            await msg.edit_text("❌ No detecté el dominio. Empezá el mensaje con el dominio.")
+            return
+        ok = await asyncio.to_thread(_add_source, domain, source_data)
+        if not ok:
+            await msg.edit_text("❌ Error al guardar en el feedback store.")
+            return
+        # Mostrar resumen de lo guardado
+        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}.get(
+            source_data.get("hilo_tipico", 2), "?"
+        )
+        await msg.edit_text(
+            f"✅ *Fuente agregada al repositorio*\n\n"
+            f"*{md_escape(source_data.get('name', domain))}* `({md_escape(domain)})`\n\n"
+            f"*Tipo:* {md_escape(source_data.get('tipo', '?'))}\n"
+            f"*Hilo típico:* {source_data.get('hilo_tipico', '?')} — {hilo_name}\n"
+            f"*Distancia editorial:* {source_data.get('distancia_editorial', '?')}/10\n"
+            f"*Confiabilidad:* {source_data.get('confiabilidad', '?')}/10\n\n"
+            f"*Orientación:*\n_{md_escape(source_data.get('orientacion', '?'))}_\n\n"
+            f"_Para ajustar: borrala con /fuentes y agregala de nuevo, "
+            f"o editá `sources.json` directo._",
+            parse_mode="Markdown",
         )
         return
 
@@ -5821,6 +6068,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^cf_"))
+    app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
