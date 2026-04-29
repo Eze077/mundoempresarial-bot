@@ -3504,21 +3504,62 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
 
 
 def build_schedule_kb() -> InlineKeyboardMarkup:
-    """Sub-menú de programación con los 3 slots: mañana 8, mediodía 12, tarde 18."""
+    """Sub-menú de programación: 3 turnos fijos + Fijar hora."""
     from datetime import datetime, timezone, timedelta
     tz_arg = timezone(timedelta(hours=-3))
     now = datetime.now(tz_arg)
 
-    # Mañana 8:00 siempre es mañana (salvo que sean antes de las 7am, pero redondeamos a mañana siempre)
-    morning_day = "Mañana"
-    # 12:00 y 18:00: si ya pasó la hora hoy, es mañana
-    noon_day = "Hoy" if now.hour < 11 else "Mañana"
-    evening_day = "Hoy" if now.hour < 17 else "Mañana"
+    morning_day = "mañana"
+    noon_day = "hoy" if now.hour < 11 else "mañana"
+    evening_day = "hoy" if now.hour < 17 else "mañana"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🌅 {morning_day} 08:00", callback_data="sched_morning")],
-        [InlineKeyboardButton(f"☀️ {noon_day} 12:00", callback_data="sched_noon")],
-        [InlineKeyboardButton(f"🌇 {evening_day} 18:00", callback_data="sched_evening")],
+        [InlineKeyboardButton(f"🌅 Turno mañana — 08:00 ({morning_day})", callback_data="sched_morning")],
+        [InlineKeyboardButton(f"☀️ Mediodía — 12:00 ({noon_day})", callback_data="sched_noon")],
+        [InlineKeyboardButton(f"🌇 Tarde — 18:00 ({evening_day})", callback_data="sched_evening")],
+        [InlineKeyboardButton("🕐 Fijar hora", callback_data="sched_custom")],
+        [InlineKeyboardButton("↩️ Volver", callback_data="sched_to_ht")],
+    ])
+
+
+def build_sched_day_kb() -> InlineKeyboardMarkup:
+    """Picker de día para programación personalizada."""
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+    labels = [
+        (f"Hoy {now.strftime('%d/%m')}", "sched_day_0"),
+        (f"Mañana {(now + timedelta(days=1)).strftime('%d/%m')}", "sched_day_1"),
+        (f"Pasado {(now + timedelta(days=2)).strftime('%d/%m')}", "sched_day_2"),
+    ]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=cd) for label, cd in labels],
+        [InlineKeyboardButton("↩️ Volver", callback_data="sched_confirm_ht")],
+    ])
+
+
+def build_sched_hour_kb() -> InlineKeyboardMarkup:
+    """Picker de hora para programación personalizada."""
+    hours = ["06", "08", "10", "12", "14", "16", "18", "20", "22"]
+    rows = []
+    for i in range(0, len(hours), 3):
+        rows.append([
+            InlineKeyboardButton(f"{h}:00", callback_data=f"sched_h_{h}")
+            for h in hours[i:i+3]
+        ])
+    rows.append([
+        InlineKeyboardButton("✏️ Escribir hora", callback_data="sched_hour_write"),
+        InlineKeyboardButton("↩️ Volver", callback_data="sched_custom"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_sched_pre_ht_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirmar HT", callback_data="sched_confirm_ht"),
+            InlineKeyboardButton("✏️ Cambiar HT", callback_data="sched_change_ht_pre"),
+        ],
         [InlineKeyboardButton("↩️ Volver", callback_data="sched_back")],
     ])
 
@@ -3742,6 +3783,69 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # ── Si el bot espera hashtags pre-programación ──
+    if context.user_data.get("waiting_for_pre_sched_ht"):
+        context.user_data["waiting_for_pre_sched_ht"] = False
+        data = context.user_data.get("article")
+        if not data:
+            await update.message.reply_text("No hay nota activa.")
+            return
+        words = text_in.split()
+        hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        context.user_data["pre_sched_hashtags"] = hashtags
+        await update.message.reply_text(
+            build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(hashtags)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
+            parse_mode="Markdown",
+            reply_markup=_build_sched_pre_ht_kb(),
+        )
+        return
+
+    # ── Si el bot espera hora personalizada para programación ──
+    if context.user_data.get("waiting_for_custom_hour"):
+        import re as _re
+        data = context.user_data.get("article")
+        if not data:
+            context.user_data["waiting_for_custom_hour"] = False
+            await update.message.reply_text("No hay nota activa.")
+            return
+        m = _re.match(r"^(\d{1,2}):(\d{2})$", text_in.strip())
+        if not m:
+            await update.message.reply_text(
+                "No entendí la hora. Usá el formato HH:MM (ej: 14:30)."
+            )
+            return
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            await update.message.reply_text("Hora inválida. Usá HH:MM entre 00:00 y 23:59.")
+            return
+        context.user_data["waiting_for_custom_hour"] = False
+        from datetime import datetime, timezone, timedelta
+        tz_arg = timezone(timedelta(hours=-3))
+        now_arg = datetime.now(tz_arg)
+        day_offset = context.user_data.get("sched_custom_day", 0)
+        target = (now_arg + timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if target <= now_arg + timedelta(minutes=5):
+            target += timedelta(days=1)
+        context.user_data["sched_custom_target"] = target.isoformat()
+        day_label = target.strftime("%A %d/%m")
+        kb_confirm = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"✅ Programar para el {day_label} {hour:02d}:{minute:02d}",
+                    callback_data="sched_confirm_custom",
+                ),
+            ],
+            [InlineKeyboardButton("↩️ Cancelar", callback_data="sched_custom")],
+        ])
+        await update.message.reply_text(
+            f"📅 Confirmás programar para el *{day_label} a las {hour:02d}:{minute:02d}*?",
+            parse_mode="Markdown",
+            reply_markup=kb_confirm,
+        )
+        return
+
     # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
     url = extract_url_from_text(text_in)
     if not url:
@@ -3864,6 +3968,82 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def _do_schedule(query, context, data, target):
+    """Factoriza el flujo completo de programar una nota: colisión → WP → job_queue."""
+    await query.edit_message_text("🔍 Verificando colisiones con otras notas programadas…")
+    adjusted = await asyncio.to_thread(find_scheduled_collision, target)
+
+    offset_msg = ""
+    if adjusted != target:
+        delta_min = int((adjusted - target).total_seconds() / 60)
+        offset_msg = f" (ajustado +{delta_min} min para evitar colisión)"
+
+    await query.edit_message_text(
+        f"📤 Programando para *{adjusted.strftime('%A %d/%m %H:%M')}*{offset_msg}…",
+        parse_mode="Markdown",
+    )
+
+    image_id = None
+    if data.get("image_url"):
+        kw = focus_keyword(data["title"])
+        alt = f"{kw} - {get_title(data)}"
+        image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
+
+    destacado = context.user_data.get("dest_on", False)
+    published = await asyncio.to_thread(publish_post, data, image_id, destacado, adjusted)
+
+    if not published:
+        await query.edit_message_text("❌ Error al programar la nota. Revisá los logs.")
+        return
+
+    post_url = published["link"]
+    post_id = published["id"]
+    post_content = published["content"]
+    custom_hashtags = context.user_data.get("pre_sched_hashtags")
+
+    try:
+        await asyncio.to_thread(
+            _add_scheduled_job,
+            post_id, post_url, adjusted, data, context.user_data, post_content,
+        )
+    except Exception as e:
+        logger.warning(f"No pude persistir scheduled job: {e}")
+
+    job_data = {
+        "post_id":         post_id,
+        "post_url":        post_url,
+        "post_content":    post_content,
+        "data":            data,
+        "tw_on":           context.user_data.get("tw_on", True),
+        "tg_on":           context.user_data.get("tg_on", True),
+        "wa_on":           context.user_data.get("wa_on", False),
+        "chat_id":         query.message.chat_id,
+        "custom_hashtags": custom_hashtags,
+    }
+    try:
+        context.application.job_queue.run_once(
+            _fire_scheduled_social,
+            when=adjusted,
+            data=job_data,
+            name=f"sched_social_{post_id}",
+        )
+    except Exception as e:
+        logger.error(f"run_once falló: {e}")
+
+    stat_publish(data["title"], data.get("source_url", ""))
+    context.user_data.pop("article", None)
+    context.user_data.pop("pre_sched_hashtags", None)
+    context.user_data.pop("sched_custom_day", None)
+    context.user_data.pop("sched_custom_target", None)
+
+    await query.edit_message_text(
+        f"✅ *Programado* para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
+        f"📝 WP: {post_url}\n"
+        f"🔔 A esa hora se disparan los posteos en canal TG y el preview de Twitter.",
+        parse_mode="Markdown",
+    )
+
+
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3955,12 +4135,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error: no hay nota pendiente.")
         return
 
-    # ── Programar publicación ──
+    # ── Programar publicación: primero verificar hashtags de Twitter ──
     if query.data == "pub_schedule":
+        raw_tags = extract_tags(data["title"])[:3]
+        auto_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
+        context.user_data["pre_sched_hashtags"] = ht_now
         await query.edit_message_text(
-            build_preview(data) + "\n\n⏰ *Elegí cuándo publicar:*",
+            build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
             parse_mode="Markdown",
-            reply_markup=build_schedule_kb(),
+            reply_markup=_build_sched_pre_ht_kb(),
         )
         return
 
@@ -3971,83 +4155,110 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Volver desde menú de slots al paso de HT ──
+    if query.data == "sched_to_ht":
+        raw_tags = extract_tags(data["title"])[:3]
+        auto_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
+        context.user_data["pre_sched_hashtags"] = ht_now
+        await query.edit_message_text(
+            build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
+            parse_mode="Markdown",
+            reply_markup=_build_sched_pre_ht_kb(),
+        )
+        return
+
+    # ── HT confirmados → mostrar menú de slots ──
+    if query.data == "sched_confirm_ht":
+        await query.edit_message_text(
+            build_preview(data) + "\n\n⏰ *Elegí cuándo publicar:*",
+            parse_mode="Markdown",
+            reply_markup=build_schedule_kb(),
+        )
+        return
+
+    # ── Cambiar HT antes de programar ──
+    if query.data == "sched_change_ht_pre":
+        raw_tags = extract_tags(data["title"])[:3]
+        current_ht = context.user_data.get("pre_sched_hashtags") or " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        context.user_data["waiting_for_pre_sched_ht"] = True
+        await query.edit_message_text(
+            f"Hashtags actuales: `{md_escape(current_ht)}`\n\n"
+            "Escribí los nuevos hashtags (con o sin #, separados por espacios):",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Turnos fijos ──
     if query.data in ("sched_morning", "sched_noon", "sched_evening"):
         slot = query.data.replace("sched_", "")
         target = _target_datetime_for_slot(slot)
+        await _do_schedule(query, context, data, target)
+        return
 
-        await query.edit_message_text("🔍 Verificando colisiones con otras notas programadas…")
-        adjusted = await asyncio.to_thread(find_scheduled_collision, target)
-
-        offset_msg = ""
-        if adjusted != target:
-            delta_min = int((adjusted - target).total_seconds() / 60)
-            offset_msg = f" (ajustado +{delta_min} min para evitar colisión)"
-
+    # ── Fijar hora: mostrar picker de día ──
+    if query.data == "sched_custom":
         await query.edit_message_text(
-            f"📤 Programando para *{adjusted.strftime('%A %d/%m %H:%M')}*{offset_msg}…",
+            "📅 *Elegí el día:*",
             parse_mode="Markdown",
+            reply_markup=build_sched_day_kb(),
         )
+        return
 
-        # Subir imagen
-        image_id = None
-        if data.get("image_url"):
-            kw = focus_keyword(data["title"])
-            alt = f"{kw} - {get_title(data)}"
-            image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
-
-        destacado = context.user_data.get("dest_on", False)
-        published = await asyncio.to_thread(
-            publish_post, data, image_id, destacado, adjusted
+    # ── Día seleccionado → mostrar picker de hora ──
+    if query.data in ("sched_day_0", "sched_day_1", "sched_day_2"):
+        from datetime import datetime, timezone, timedelta
+        day_offset = int(query.data[-1])
+        context.user_data["sched_custom_day"] = day_offset
+        tz_arg = timezone(timedelta(hours=-3))
+        day_dt = datetime.now(tz_arg) + timedelta(days=day_offset)
+        day_label = day_dt.strftime("%A %d/%m")
+        await query.edit_message_text(
+            f"🕐 *Elegí la hora para el {day_label}:*",
+            parse_mode="Markdown",
+            reply_markup=build_sched_hour_kb(),
         )
+        return
 
-        if not published:
-            await query.edit_message_text("❌ Error al programar la nota. Revisá los logs.")
+    # ── Hora seleccionada (botón) → programar ──
+    if query.data.startswith("sched_h_"):
+        from datetime import datetime, timezone, timedelta
+        hour = int(query.data.split("_")[-1])
+        day_offset = context.user_data.get("sched_custom_day", 0)
+        tz_arg = timezone(timedelta(hours=-3))
+        now_arg = datetime.now(tz_arg)
+        target = (now_arg + timedelta(days=day_offset)).replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
+        if target <= now_arg + timedelta(minutes=5):
+            target += timedelta(days=1)
+        await _do_schedule(query, context, data, target)
+        return
+
+    # ── Escribir hora personalizada ──
+    if query.data == "sched_hour_write":
+        from datetime import datetime, timezone, timedelta
+        day_offset = context.user_data.get("sched_custom_day", 0)
+        tz_arg = timezone(timedelta(hours=-3))
+        day_label = (datetime.now(tz_arg) + timedelta(days=day_offset)).strftime("%A %d/%m")
+        context.user_data["waiting_for_custom_hour"] = True
+        await query.edit_message_text(
+            f"Escribí la hora para el {day_label} (formato HH:MM, ej: 14:30):"
+        )
+        return
+
+    # ── Confirmar hora personalizada escrita ──
+    if query.data == "sched_confirm_custom":
+        from datetime import datetime, timezone, timedelta
+        iso = context.user_data.get("sched_custom_target")
+        if not iso:
+            await query.edit_message_text("No hay hora guardada. Volvé a empezar.")
             return
-
-        post_url = published["link"]
-        post_id = published["id"]
-        post_content = published["content"]
-
-        # Persistir job en feedback store para recovery en redeploys
-        try:
-            await asyncio.to_thread(
-                _add_scheduled_job,
-                post_id, post_url, adjusted,
-                data, context.user_data, post_content,
-            )
-        except Exception as e:
-            logger.warning(f"No pude persistir scheduled job: {e}")
-
-        # Programar social via job_queue
-        job_data = {
-            "post_id":     post_id,
-            "post_url":    post_url,
-            "post_content": post_content,
-            "data":        data,
-            "tw_on":       context.user_data.get("tw_on", True),
-            "tg_on":       context.user_data.get("tg_on", True),
-            "wa_on":       context.user_data.get("wa_on", False),
-            "chat_id":     query.message.chat_id,
-        }
-        try:
-            context.application.job_queue.run_once(
-                _fire_scheduled_social,
-                when=adjusted,
-                data=job_data,
-                name=f"sched_social_{post_id}",
-            )
-        except Exception as e:
-            logger.error(f"run_once falló: {e}")
-
-        stat_publish(data["title"], data.get("source_url", ""))
-        context.user_data.pop("article", None)
-
-        await query.edit_message_text(
-            f"✅ *Programado* para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
-            f"📝 WP: {post_url}\n"
-            f"🔔 A esa hora se disparan los posteos en canal TG y el preview de Twitter.",
-            parse_mode="Markdown",
-        )
+        tz_arg = timezone(timedelta(hours=-3))
+        target = datetime.fromisoformat(iso)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=tz_arg)
+        await _do_schedule(query, context, data, target)
         return
 
     if query.data == "change_ht":
@@ -5095,10 +5306,11 @@ def _add_scheduled_job(post_id: int, post_url: str, run_at,
             "orig_title_on":     user_data.get("orig_title_on", False),
             "orig_excerpt_on":   user_data.get("orig_excerpt_on", False),
         },
-        "tw_on":        user_data.get("tw_on", True),
-        "tg_on":        user_data.get("tg_on", True),
-        "wa_on":        user_data.get("wa_on", False),
-        "post_content": post_content[:500],  # truncado para no engrosar el store
+        "tw_on":           user_data.get("tw_on", True),
+        "tg_on":           user_data.get("tg_on", True),
+        "wa_on":           user_data.get("wa_on", False),
+        "custom_hashtags": user_data.get("pre_sched_hashtags"),
+        "post_content":    post_content[:500],
     })
     _save_feedback(fb)
 
@@ -5139,7 +5351,8 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
 
     # Twitter: mandar preview con botones al admin
     if tw_on and chat_id:
-        tweet_preview = build_tweet(data, post_url)
+        custom_ht = job_data.get("custom_hashtags")
+        tweet_preview = build_tweet(data, post_url, hashtags_override=custom_ht)
         kb_tweet = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Twittear", callback_data="tweet"),
@@ -5207,14 +5420,15 @@ def _restore_scheduled_jobs(app):
                 _fire_scheduled_social,
                 when=run_at,
                 data={
-                    "post_id":      job["post_id"],
-                    "post_url":     job["post_url"],
-                    "post_content": job.get("post_content", ""),
-                    "data":         job["data"],
-                    "tw_on":        job.get("tw_on", True),
-                    "tg_on":        job.get("tg_on", True),
-                    "wa_on":        job.get("wa_on", False),
-                    "chat_id":      int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None,
+                    "post_id":         job["post_id"],
+                    "post_url":        job["post_url"],
+                    "post_content":    job.get("post_content", ""),
+                    "data":            job["data"],
+                    "tw_on":           job.get("tw_on", True),
+                    "tg_on":           job.get("tg_on", True),
+                    "wa_on":           job.get("wa_on", False),
+                    "custom_hashtags": job.get("custom_hashtags"),
+                    "chat_id":         int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None,
                 },
                 name=f"sched_social_{job['post_id']}",
             )
