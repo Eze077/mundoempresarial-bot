@@ -6288,7 +6288,7 @@ def _wp_publish_frase(frase: str, img_bytes: bytes) -> dict:
 
     # 2. Crear post
     slug = url_slug(frase)[:80]
-    content = f'<figure class="wp-block-image"><img src="{img_resp.json().get("source_url","")}" alt="{frase}"/></figure>' if img_id else ""
+    content = ""
     payload = {
         "title":          frase,
         "content":        content,
