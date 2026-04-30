@@ -6259,6 +6259,18 @@ def _wait_for_lock_release(max_wait: int = 20):
     return False
 
 
+async def cmd_set_frases_base(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda la foto recibida como plantilla base para /frases."""
+    photo = update.message.photo[-1] if update.message.photo else None
+    if not photo:
+        await update.message.reply_text("Mandame la imagen base como foto junto con el comando /set_frases_base.")
+        return
+    os.makedirs("/opt/mundoempresarial-bot/assets", exist_ok=True)
+    file = await context.bot.get_file(photo.file_id)
+    await file.download_to_drive("/opt/mundoempresarial-bot/assets/frases_base.png")
+    await update.message.reply_text("✅ Plantilla base guardada. Ya podés usar /frases.")
+
+
 async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Genera imagen con frase motivacional y la publica en canal TG y Twitter."""
     frase = " ".join(context.args).strip() if context.args else ""
@@ -6343,6 +6355,7 @@ def main():
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("frases", cmd_frases))
+    app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
