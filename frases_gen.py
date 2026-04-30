@@ -4,19 +4,36 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 BASE_PATH = "/opt/mundoempresarial-bot/assets/frases_base.png"
-_FONT_DIR = "/usr/share/fonts/truetype/liberation/"
 
-# Área donde va la frase (coordenadas dentro de la imagen base 1080x1080)
-# Centro vertical del bloque de contenido, entre la línea roja y el footer
-FRASE_AREA = {"x": 55, "y_center": 650, "max_w": 970}
-FONT_SIZE   = 62   # ~doble del placeholder original (~30px)
+# Área del placeholder en la imagen base (1080x1080)
+# Rectángulo a borrar (cubre "[ Insertá aquí tu frase motivacional ]")
+PLACEHOLDER_RECT = (40, 425, 1040, 520)
+# Color de fondo del área de contenido
+BG_COLOR = "#f0f0f0"
+
+# Área donde va la frase (centro vertical del bloque de contenido)
+FRASE_X_PAD = 60       # padding horizontal
+FRASE_Y_TOP = 430      # inicio del área de contenido disponible
+FRASE_Y_BOT = 970      # fin del área de contenido
+FONT_SIZE   = 62       # ~doble del placeholder original
+
+# Rutas de fuente en orden de preferencia
+_FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+]
 
 
-def _font(name: str, size: int) -> ImageFont.FreeTypeFont:
-    try:
-        return ImageFont.truetype(_FONT_DIR + name, size)
-    except Exception:
-        return ImageFont.load_default()
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in _FONT_PATHS:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 
 def _wrap(draw, text: str, font, max_w: int) -> list[str]:
@@ -37,17 +54,24 @@ def _wrap(draw, text: str, font, max_w: int) -> list[str]:
 def generate_frase_image(frase: str) -> bytes:
     if not os.path.exists(BASE_PATH):
         raise FileNotFoundError(
-            f"No hay imagen base. Mandá la plantilla con /set_frases_base"
+            "No hay imagen base. Mandá la plantilla con /set_frases_base"
         )
 
     img  = Image.open(BASE_PATH).convert("RGB")
     draw = ImageDraw.Draw(img)
-    font = _font("LiberationSans-Regular.ttf", FONT_SIZE)
+    font = _load_font(FONT_SIZE)
 
-    lines  = _wrap(draw, frase, font, FRASE_AREA["max_w"])
-    line_h = int(FONT_SIZE * 1.25)
+    # 1. Borrar el área del placeholder
+    draw.rectangle(PLACEHOLDER_RECT, fill=BG_COLOR)
+
+    # 2. Calcular área disponible y centrar el texto
+    max_w  = img.width - FRASE_X_PAD * 2
+    lines  = _wrap(draw, frase, font, max_w)
+    line_h = int(FONT_SIZE * 1.3)
     block_h = len(lines) * line_h
-    y0 = FRASE_AREA["y_center"] - block_h // 2
+
+    area_cy = (FRASE_Y_TOP + FRASE_Y_BOT) // 2
+    y0 = area_cy - block_h // 2
 
     for i, line in enumerate(lines):
         lw = int(draw.textlength(line, font=font))

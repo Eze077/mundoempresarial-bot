@@ -6271,8 +6271,41 @@ async def cmd_set_frases_base(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("✅ Plantilla base guardada. Ya podés usar /frases.")
 
 
+CAT_FRASES = 1838  # Categoría "Frases" en WordPress
+
+
+def _wp_publish_frase(frase: str, img_bytes: bytes) -> dict:
+    """Sube imagen y crea post en WordPress. Devuelve {link, id}."""
+    h = wp_auth()
+    # 1. Subir imagen
+    img_resp = requests.post(
+        f"{WP_URL}/wp-json/wp/v2/media",
+        headers={**h, "Content-Disposition": 'attachment; filename="frase.png"',
+                 "Content-Type": "image/png"},
+        data=img_bytes, timeout=30,
+    )
+    img_id = img_resp.json().get("id") if img_resp.status_code == 201 else None
+
+    # 2. Crear post
+    slug = url_slug(frase)[:80]
+    content = f'<figure class="wp-block-image"><img src="{img_resp.json().get("source_url","")}" alt="{frase}"/></figure>' if img_id else ""
+    payload = {
+        "title":          frase,
+        "content":        content,
+        "status":         "publish",
+        "slug":           slug,
+        "categories":     [CAT_FRASES],
+        "featured_media": img_id or 0,
+    }
+    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
+    if r.status_code == 201:
+        body = r.json()
+        return {"link": body["link"], "id": body["id"]}
+    raise RuntimeError(f"WP {r.status_code}: {r.text[:200]}")
+
+
 async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera imagen con frase motivacional y la publica en canal TG y Twitter."""
+    """Genera imagen con frase y la publica en WP + canal TG + Twitter."""
     frase = " ".join(context.args).strip() if context.args else ""
     if not frase:
         await update.message.reply_text(
@@ -6292,33 +6325,47 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     results = []
 
-    # Canal Telegram
+    # ── WordPress ──
+    await msg.edit_text("📤 Publicando en WordPress…")
     try:
+        wp_data = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
+        post_url = wp_data["link"]
+        results.append(f"✅ WP: {post_url}")
+    except Exception as e:
+        post_url = ""
+        results.append(f"❌ WP: {e}")
+
+    # ── Canal Telegram ──
+    try:
+        caption = f"💬 *{md_escape(frase)}*"
+        if post_url:
+            caption += f"\n\n🔗 [Ver en web]({utm_url(post_url, 'telegram')})"
         bio = io.BytesIO(img_bytes)
         bio.name = "frase.png"
         await context.bot.send_photo(
             chat_id=TELEGRAM_CHANNEL,
             photo=bio,
-            caption=f"💬 *{md_escape(frase)}*\n\n#Frases #MundoEmpresarial #Pymes",
+            caption=caption + "\n\n#Frases #MundoEmpresarial #Pymes",
             parse_mode="Markdown",
         )
         results.append("✅ Canal TG")
     except Exception as e:
         results.append(f"❌ Canal TG: {e}")
 
-    # Twitter
+    # ── Twitter ──
     try:
         auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
         r_media = requests.post(
             "https://upload.twitter.com/1.1/media/upload.json",
-            files={"media": img_bytes},
-            auth=auth,
-            timeout=30,
+            files={"media": img_bytes}, auth=auth, timeout=30,
         )
         media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
-        tweet_text = f"{frase}\n\n#Frases #MundoEmpresarial #Pymes"
+        tweet_text = f"{frase}"
+        if post_url:
+            tweet_text += f"\n\n{utm_url(post_url, 'twitter')}"
+        tweet_text += "\n\n#Frases #MundoEmpresarial #Pymes"
         if len(tweet_text) > 280:
-            tweet_text = frase[:230] + "…\n\n#Frases #Pymes"
+            tweet_text = frase[:200] + "…\n\n#Frases #Pymes"
         payload = {"text": tweet_text}
         if media_id:
             payload["media"] = {"media_ids": [media_id]}
@@ -6326,10 +6373,7 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "https://api.twitter.com/2/tweets",
             json=payload, auth=auth, timeout=30,
         )
-        if r_tw.status_code in (200, 201):
-            results.append("✅ Twitter")
-        else:
-            results.append(f"❌ Twitter {r_tw.status_code}: {r_tw.text[:100]}")
+        results.append("✅ Twitter" if r_tw.status_code in (200, 201) else f"❌ Twitter {r_tw.status_code}")
     except Exception as e:
         results.append(f"❌ Twitter: {e}")
 
