@@ -1,5 +1,6 @@
 import os
 import re
+import io
 import json
 import logging
 import asyncio
@@ -6258,6 +6259,71 @@ def _wait_for_lock_release(max_wait: int = 20):
     return False
 
 
+async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Genera imagen con frase motivacional y la publica en canal TG y Twitter."""
+    frase = " ".join(context.args).strip() if context.args else ""
+    if not frase:
+        await update.message.reply_text(
+            "Usá: `/frases <texto>`\n\nEjemplo:\n`/frases La innovación distingue a los líderes.`",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("🎨 Generando imagen...")
+
+    try:
+        from frases_gen import generate_frase_image
+        img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error generando imagen: {e}")
+        return
+
+    results = []
+
+    # Canal Telegram
+    try:
+        bio = io.BytesIO(img_bytes)
+        bio.name = "frase.png"
+        await context.bot.send_photo(
+            chat_id=TELEGRAM_CHANNEL,
+            photo=bio,
+            caption=f"💬 *{md_escape(frase)}*\n\n#Frases #MundoEmpresarial #Pymes",
+            parse_mode="Markdown",
+        )
+        results.append("✅ Canal TG")
+    except Exception as e:
+        results.append(f"❌ Canal TG: {e}")
+
+    # Twitter
+    try:
+        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+        r_media = requests.post(
+            "https://upload.twitter.com/1.1/media/upload.json",
+            files={"media": img_bytes},
+            auth=auth,
+            timeout=30,
+        )
+        media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
+        tweet_text = f"{frase}\n\n#Frases #MundoEmpresarial #Pymes"
+        if len(tweet_text) > 280:
+            tweet_text = frase[:230] + "…\n\n#Frases #Pymes"
+        payload = {"text": tweet_text}
+        if media_id:
+            payload["media"] = {"media_ids": [media_id]}
+        r_tw = requests.post(
+            "https://api.twitter.com/2/tweets",
+            json=payload, auth=auth, timeout=30,
+        )
+        if r_tw.status_code in (200, 201):
+            results.append("✅ Twitter")
+        else:
+            results.append(f"❌ Twitter {r_tw.status_code}: {r_tw.text[:100]}")
+    except Exception as e:
+        results.append(f"❌ Twitter: {e}")
+
+    await msg.edit_text("\n".join(results))
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -6276,6 +6342,7 @@ def main():
     app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("frases", cmd_frases))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
