@@ -2488,6 +2488,61 @@ def scrape(url: str) -> dict:
                     extraction_method = f"css-selector '{sel}' ({len(text)} chars)"
                     break
 
+    # 4) Si el texto sigue vacío, intentar Wayback y Google Cache como último recurso
+    if not text or len(text) < 150:
+        for label, fallback_html in [
+            ("wayback", _fetch_wayback(url, session)),
+            ("gcache",  _fetch_google_cache(url, session)),
+        ]:
+            if not fallback_html:
+                continue
+            fb_soup = BeautifulSoup(fallback_html, "html.parser")
+            fb_traf = trafilatura.extract(fallback_html) or ""
+            fb_text = clean_text(fb_traf)
+            if not fb_text or len(fb_text) < 150:
+                for sel in ["article", ".article-body", ".entry-content", '[itemprop="articleBody"]']:
+                    el = fb_soup.select_one(sel)
+                    if el and len(el.get_text(strip=True)) > 200:
+                        paras = [p.get_text(strip=True) for p in el.find_all("p") if len(p.get_text(strip=True)) > 20]
+                        if paras:
+                            fb_text = clean_text("\n".join(paras))
+                            break
+            if fb_text and len(fb_text) >= 150:
+                text = fb_text
+                extraction_method = f"{label} ({len(text)} chars)"
+                logger.info(f"Texto recuperado via {label} para {url[:60]}")
+                break
+
+    # 5) Detectar muro de pago si el texto sigue vacío
+    paywall = False
+    if not text or len(text) < 150:
+        paywall_signals = [
+            "muro de pago", "suscripción", "suscribite", "contenido exclusivo",
+            "para suscriptores", "acceso exclusivo", "solo para socios",
+            "registrate para leer", "iniciar sesión para", "paywall",
+            "subscriber", "subscription", "premium content", "members only",
+            "p12-paywall", "paywall-container", "article--locked", "article-locked",
+        ]
+        html_lower = html.lower()
+        if any(sig in html_lower for sig in paywall_signals):
+            paywall = True
+        # Señal adicional: hay título pero el body tiene menos de 300 chars de texto visible
+        body_text = soup.get_text(separator=" ", strip=True)
+        if not paywall and title and len(body_text) < 400:
+            paywall = True
+
+    if paywall and (not text or len(text) < 150):
+        raise ValueError(
+            f"🔒 Artículo detrás de muro de pago: no se puede leer el contenido.\n"
+            f"Título: {title}"
+        )
+
+    if not text or len(text) < 50:
+        raise ValueError(
+            f"No se pudo extraer texto de la nota (method={extraction_method or 'none'}).\n"
+            f"Título: {title}"
+        )
+
     excerpt = excerpt or (text[:200] + "..." if text else "")
 
     # Log del método de extracción (útil para debug en Railway)
