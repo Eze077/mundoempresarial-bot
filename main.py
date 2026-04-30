@@ -6357,6 +6357,7 @@ def main():
     app.add_handler(CommandHandler("frases", cmd_frases))
     app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
