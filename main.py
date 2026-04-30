@@ -78,6 +78,58 @@ STOP_WORDS = {
     "cómo", "qué", "será", "sido", "están", "están",
 }
 
+# Sufijos de verbos conjugados en español — se usan como etiquetas por error
+_VERB_ENDINGS = (
+    "ó", "ió", "aron", "ieron", "aba", "ían", "ará", "arán", "ería",
+    "ando", "iendo", "aste", "imos", "aron",
+)
+
+# Adjetivos y palabras genéricas que no aportan valor como etiqueta
+_GENERIC_TAGS = {
+    "nuevo", "nueva", "nuevos", "nuevas", "gran", "grande", "grandes",
+    "primer", "primera", "primero", "último", "última", "últimos",
+    "porteño", "porteña", "porteños", "nacional", "federal", "oficial",
+    "propio", "propia", "mayor", "menor", "mismo", "misma",
+    "total", "pleno", "plena", "clave", "real", "alto", "alta", "baja", "bajo",
+    "durante", "parte", "caso", "nivel", "tipo", "vez", "año", "años",
+    "millones", "miles", "pesos", "dólares", "dolar", "más", "menos",
+    "medida", "sector", "ámbito", "campo", "marco",
+}
+
+# Mapeo de términos → hashtag normalizado (entidades y temas argentinos)
+_HT_NORMALIZE = {
+    "afip":         "ARCA",
+    "arca":         "ARCA",
+    "bcra":         "BCRA",
+    "bancocentral": "BCRA",
+    "gcba":         "GCBA",
+    "caba":         "CABA",
+    "indec":        "INDEC",
+    "anses":        "ANSES",
+    "vtv":          "VTV",
+    "smvm":         "SMVM",
+    "conicet":      "CONICET",
+    "ypf":          "YPF",
+    "inflación":    "inflacion",
+    "inflacion":    "inflacion",
+    "dólar":        "dolar",
+    "dolar":        "dolar",
+    "merval":       "Merval",
+    "monotributo":  "Monotributo",
+    "facturación":  "facturacion",
+    "facturacion":  "facturacion",
+    "empleo":       "Empleo",
+    "salario":      "Salarios",
+    "salarios":     "Salarios",
+    "exportación":  "Exportaciones",
+    "exportaciones":"Exportaciones",
+    "importación":  "Importaciones",
+    "pyme":         "Pymes",
+    "pymes":        "Pymes",
+    "autónomos":    "Autonomos",
+    "autonomos":    "Autonomos",
+}
+
 # ID de la categoría Destacados
 CAT_DESTACADOS = 337
 
@@ -402,12 +454,54 @@ def url_slug(title: str) -> str:
 
 
 def extract_tags(title: str) -> list:
-    words = [
-        w.strip('.,;:!?()[]"\'«»—').capitalize()
-        for w in title.split()
-        if w.lower().strip('.,;:!?()[]"\'«»—') not in STOP_WORDS and len(w) > 3
-    ]
-    return list(dict.fromkeys(words))[:6]
+    """Extrae actores, entidades y temas del título. Filtra verbos, adjetivos y genéricos."""
+    tags = []
+    for w in title.split():
+        clean = w.strip('.,;:!?()[]"\'«»—%$')
+        lower = clean.lower()
+        if not clean or len(clean) <= 3:
+            continue
+        if lower in STOP_WORDS:
+            continue
+        if lower in _GENERIC_TAGS:
+            continue
+        # Filtrar verbos conjugados por sufijo
+        if any(lower.endswith(suf) for suf in _VERB_ENDINGS):
+            continue
+        # Preservar siglas (todo mayúsculas), capitalizar el resto
+        tag = clean if clean.isupper() and len(clean) >= 2 else clean.capitalize()
+        # Normalizar entidades conocidas
+        tag = _HT_NORMALIZE.get(lower, tag)
+        tags.append(tag)
+    return list(dict.fromkeys(tags))[:6]
+
+
+def _build_hashtags(data: dict) -> str:
+    """Genera hashtags relevantes para Twitter: entidades mapeadas + tags del título + #Pymes."""
+    title   = (data.get("title") or "").lower()
+    excerpt = (data.get("excerpt") or data.get("text") or "")[:400].lower()
+    combined = title + " " + excerpt
+
+    tags = []
+
+    # 1. Entidades conocidas que aparecen en el texto
+    for term, ht in _HT_NORMALIZE.items():
+        if term in combined:
+            candidate = f"#{ht}"
+            if candidate not in tags:
+                tags.append(candidate)
+
+    # 2. Tags extraídos del título (ya filtrados)
+    for t in extract_tags(data.get("title", ""))[:4]:
+        candidate = f"#{t}"
+        if candidate not in tags:
+            tags.append(candidate)
+
+    # 3. Siempre cerrar con #Pymes
+    if "#Pymes" not in tags:
+        tags.append("#Pymes")
+
+    return " ".join(tags[:5])
 
 
 def pyme_summary(text: str, excerpt: str) -> str:
@@ -974,8 +1068,7 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
     if hashtags_override is not None:
         hashtags = hashtags_override
     else:
-        raw_tags = extract_tags(data["title"])[:3]
-        hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        hashtags = _build_hashtags(data)
 
     tracked_url = utm_url(wp_url, "twitter")
     tweet = f"{title}\n\n{tracked_url}\n\n{hashtags}"
@@ -4598,8 +4691,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Programar publicación: primero verificar hashtags de Twitter ──
     if query.data == "pub_schedule":
-        raw_tags = extract_tags(data["title"])[:3]
-        auto_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        auto_ht = _build_hashtags(data)
         ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
         context.user_data["pre_sched_hashtags"] = ht_now
         await query.edit_message_text(
@@ -4618,8 +4710,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Volver desde menú de slots al paso de HT ──
     if query.data == "sched_to_ht":
-        raw_tags = extract_tags(data["title"])[:3]
-        auto_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        auto_ht = _build_hashtags(data)
         ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
         context.user_data["pre_sched_hashtags"] = ht_now
         await query.edit_message_text(
@@ -4640,8 +4731,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Cambiar HT antes de programar ──
     if query.data == "sched_change_ht_pre":
-        raw_tags = extract_tags(data["title"])[:3]
-        current_ht = context.user_data.get("pre_sched_hashtags") or " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        current_ht = context.user_data.get("pre_sched_hashtags") or _build_hashtags(data)
         context.user_data["waiting_for_pre_sched_ht"] = True
         await query.edit_message_text(
             f"Hashtags actuales: `{md_escape(current_ht)}`\n\n"
@@ -4726,8 +4816,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stored = context.user_data.get("published")
         current_ht = context.user_data.get("custom_hashtags")
         if not current_ht and stored:
-            raw_tags = extract_tags(stored["data"]["title"])[:3]
-            current_ht = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+            current_ht = _build_hashtags(stored["data"])
         context.user_data["waiting_for_hashtags"] = True
         await query.edit_message_text(
             f"Hashtags actuales: {current_ht}\n\n"
@@ -4953,8 +5042,7 @@ async def cmd_hilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = BeautifulSoup(post["title"], "html.parser").get_text()
     wp_url = utm_url(post["link"], "twitter")
 
-    raw_tags = extract_tags(title)[:2]
-    hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+    hashtags = _build_hashtags({"title": title, "excerpt": body_text[:400]})
 
     try:
         tweets = await asyncio.to_thread(
@@ -5041,8 +5129,7 @@ async def handle_thread_button(update: Update, context: ContextTypes.DEFAULT_TYP
 
         title = BeautifulSoup(post["title"], "html.parser").get_text()
         wp_url = utm_url(post["link"], "twitter")
-        raw_tags = extract_tags(title)[:2]
-        hashtags = " ".join(f"#{t}" for t in raw_tags) + " #Pymes"
+        hashtags = _build_hashtags({"title": title, "excerpt": body_text[:400]})
 
         try:
             tweets = await asyncio.to_thread(
