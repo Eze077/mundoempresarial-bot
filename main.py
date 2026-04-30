@@ -4216,7 +4216,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ─── Frases flow ─────────────────────────────────────────────────────────────
     if query.data in (
-        "frase_toggle_tw", "frase_toggle_tg", "frase_cancel",
+        "frase_toggle_tw", "frase_toggle_tg", "frase_toggle_wp", "frase_cancel",
         "frase_pub", "frase_schedule", "fs_back_to_preview",
         "fs_to_ht", "fs_confirm_ht", "fs_change_ht_pre",
         "fs_morning", "fs_noon", "fs_evening",
@@ -4233,7 +4233,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fp["tw_on"] = not fp.get("tw_on", True)
             context.user_data["frase_pending"] = fp
             await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp["tw_on"], fp.get("tg_on", True))
+                reply_markup=_build_frase_kb(fp["tw_on"], fp.get("tg_on", True), fp.get("wp_on", True))
             )
             return
 
@@ -4244,7 +4244,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fp["tg_on"] = not fp.get("tg_on", True)
             context.user_data["frase_pending"] = fp
             await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp["tg_on"])
+                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp["tg_on"], fp.get("wp_on", True))
+            )
+            return
+
+        if query.data == "frase_toggle_wp":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            fp["wp_on"] = not fp.get("wp_on", True)
+            context.user_data["frase_pending"] = fp
+            await query.edit_message_reply_markup(
+                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp["wp_on"])
             )
             return
 
@@ -4260,7 +4271,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(
                 caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
                 parse_mode="Markdown",
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True)),
+                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp.get("wp_on", True)),
             )
             return
 
@@ -4272,18 +4283,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             img_bytes = fp.get("img_bytes")
             tw_on     = fp.get("tw_on", True)
             tg_on     = fp.get("tg_on", True)
+            wp_on     = fp.get("wp_on", True)
             custom_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
 
-            await query.edit_message_caption(caption="📤 Publicando en WordPress…")
             post_url = ""
             post_id  = None
-            try:
-                wp_data  = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
-                post_url = wp_data["link"]
-                post_id  = wp_data["id"]
-                res_lines = [f"✅ WP: {post_url}"]
-            except Exception as e:
-                res_lines = [f"❌ WP: {e}"]
+            res_lines = []
+
+            if wp_on:
+                await query.edit_message_caption(caption="📤 Publicando en WordPress…")
+                try:
+                    wp_data  = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
+                    post_url = wp_data["link"]
+                    post_id  = wp_data["id"]
+                    res_lines.append(f"✅ WP: {post_url}")
+                except Exception as e:
+                    res_lines.append(f"❌ WP: {e}")
 
             await query.edit_message_caption(caption="📲 Publicando en redes…")
 
@@ -6651,14 +6666,16 @@ def _wait_for_lock_release(max_wait: int = 20):
 
 # ─── Frases: keyboards ────────────────────────────────────────────────────────
 
-def _build_frase_kb(tw_on: bool, tg_on: bool) -> InlineKeyboardMarkup:
+def _build_frase_kb(tw_on: bool, tg_on: bool, wp_on: bool = True) -> InlineKeyboardMarkup:
     tw_label = "✅ Twitter" if tw_on else "☐ Twitter"
     tg_label = "✅ Canal TG" if tg_on else "☐ Canal TG"
+    wp_label = "✅ WordPress" if wp_on else "☐ WordPress"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="frase_toggle_tw"),
             InlineKeyboardButton(tg_label, callback_data="frase_toggle_tg"),
         ],
+        [InlineKeyboardButton(wp_label, callback_data="frase_toggle_wp")],
         [
             InlineKeyboardButton("🚀 Publicar ahora", callback_data="frase_pub"),
             InlineKeyboardButton("⏰ Programar", callback_data="frase_schedule"),
@@ -6796,6 +6813,7 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "img_bytes": img_bytes,
         "tw_on":    True,
         "tg_on":    True,
+        "wp_on":    True,
     }
     context.user_data.pop("frase_custom_ht", None)
     context.user_data.pop("frase_sched_ht", None)
@@ -6807,7 +6825,7 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=bio,
         caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
         parse_mode="Markdown",
-        reply_markup=_build_frase_kb(tw_on=True, tg_on=True),
+        reply_markup=_build_frase_kb(tw_on=True, tg_on=True, wp_on=True),
     )
 
 
