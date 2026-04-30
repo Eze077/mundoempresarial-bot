@@ -3847,6 +3847,89 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Frase: cambiar hashtags para tweet inmediato ──
+    if context.user_data.get("waiting_for_frase_ht"):
+        context.user_data["waiting_for_frase_ht"] = False
+        words = text_in.split()
+        hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        context.user_data["frase_custom_ht"] = hashtags
+        ft = context.user_data.get("frase_tweeting", {})
+        frase    = ft.get("frase", "")
+        post_url = ft.get("post_url", "")
+        tweet_text = frase
+        if post_url:
+            tweet_text += f"\n\n{utm_url(post_url, 'twitter')}"
+        tweet_text += f"\n\n{hashtags}"
+        if len(tweet_text) > 280:
+            tweet_text = frase[:200] + "…\n\n" + hashtags
+        kb_tweet = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Twittear", callback_data="frase_tweet"),
+                InlineKeyboardButton("No twittear", callback_data="frase_no_tweet"),
+            ],
+            [InlineKeyboardButton("Cambiar HT", callback_data="frase_change_ht")],
+        ])
+        await update.message.reply_text(
+            f"— Preview del tweet —\n`{md_escape(tweet_text)}`",
+            parse_mode="Markdown",
+            reply_markup=kb_tweet,
+        )
+        return
+
+    # ── Frase programada: cambiar hashtags pre-programación ──
+    if context.user_data.get("waiting_for_frase_sched_ht"):
+        context.user_data["waiting_for_frase_sched_ht"] = False
+        words = text_in.split()
+        hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        context.user_data["frase_sched_ht"] = hashtags
+        fp    = context.user_data.get("frase_pending")
+        frase = fp["texto"] if fp else ""
+        await update.message.reply_text(
+            f"💬 *{md_escape(frase)}*\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(hashtags)}`\n\nConfirmá los hashtags antes de elegir cuándo publicar:",
+            parse_mode="Markdown",
+            reply_markup=_build_frase_sched_pre_ht_kb(),
+        )
+        return
+
+    # ── Frase programada: hora personalizada ──
+    if context.user_data.get("waiting_for_frase_custom_hour"):
+        import re as _re
+        m = _re.match(r"^(\d{1,2}):(\d{2})$", text_in.strip())
+        if not m:
+            await update.message.reply_text("No entendí la hora. Usá HH:MM (ej: 14:30).")
+            return
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            await update.message.reply_text("Hora inválida. Usá HH:MM entre 00:00 y 23:59.")
+            return
+        context.user_data["waiting_for_frase_custom_hour"] = False
+        from datetime import datetime, timezone, timedelta
+        tz_arg  = timezone(timedelta(hours=-3))
+        now_arg = datetime.now(tz_arg)
+        day_offset = context.user_data.get("frase_sched_day", 0)
+        target = (now_arg + timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if target <= now_arg + timedelta(minutes=5):
+            target += timedelta(days=1)
+        context.user_data["frase_sched_target"] = target.isoformat()
+        day_label = target.strftime("%A %d/%m")
+        kb_confirm = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"✅ Programar para el {day_label} {hour:02d}:{minute:02d}",
+                    callback_data="fs_confirm_custom",
+                ),
+            ],
+            [InlineKeyboardButton("↩️ Cancelar", callback_data="fs_custom")],
+        ])
+        await update.message.reply_text(
+            f"📅 Confirmás programar para el *{day_label} a las {hour:02d}:{minute:02d}*?",
+            parse_mode="Markdown",
+            reply_markup=kb_confirm,
+        )
+        return
+
     # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
     url = extract_url_from_text(text_in)
     if not url:
@@ -4131,6 +4214,313 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
+    # ─── Frases flow ─────────────────────────────────────────────────────────────
+    if query.data in (
+        "frase_toggle_tw", "frase_toggle_tg", "frase_cancel",
+        "frase_pub", "frase_schedule", "fs_back_to_preview",
+        "fs_to_ht", "fs_confirm_ht", "fs_change_ht_pre",
+        "fs_morning", "fs_noon", "fs_evening",
+        "fs_custom", "fs_hour_write", "fs_confirm_custom",
+        "frase_tweet", "frase_no_tweet", "frase_change_ht",
+    ) or query.data.startswith("fs_day_") or query.data.startswith("fs_h_"):
+
+        fp = context.user_data.get("frase_pending")
+
+        if query.data == "frase_toggle_tw":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            fp["tw_on"] = not fp.get("tw_on", True)
+            context.user_data["frase_pending"] = fp
+            await query.edit_message_reply_markup(
+                reply_markup=_build_frase_kb(fp["tw_on"], fp.get("tg_on", True))
+            )
+            return
+
+        if query.data == "frase_toggle_tg":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            fp["tg_on"] = not fp.get("tg_on", True)
+            context.user_data["frase_pending"] = fp
+            await query.edit_message_reply_markup(
+                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp["tg_on"])
+            )
+            return
+
+        if query.data == "frase_cancel":
+            context.user_data.pop("frase_pending", None)
+            await query.edit_message_caption(caption="Cancelado.")
+            return
+
+        if query.data == "fs_back_to_preview":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            await query.edit_message_caption(
+                caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
+                parse_mode="Markdown",
+                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True)),
+            )
+            return
+
+        if query.data == "frase_pub":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            frase     = fp["texto"]
+            img_bytes = fp.get("img_bytes")
+            tw_on     = fp.get("tw_on", True)
+            tg_on     = fp.get("tg_on", True)
+            custom_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
+
+            await query.edit_message_caption(caption="📤 Publicando en WordPress…")
+            post_url = ""
+            post_id  = None
+            try:
+                wp_data  = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
+                post_url = wp_data["link"]
+                post_id  = wp_data["id"]
+                res_lines = [f"✅ WP: {post_url}"]
+            except Exception as e:
+                res_lines = [f"❌ WP: {e}"]
+
+            await query.edit_message_caption(caption="📲 Publicando en redes…")
+
+            if tg_on:
+                try:
+                    cap_tg = f"💬 *{md_escape(frase)}*"
+                    if post_url:
+                        cap_tg += f"\n\n🔗 [Ver en web]({utm_url(post_url, 'telegram')})"
+                    cap_tg += f"\n\n{custom_ht}"
+                    bio = io.BytesIO(img_bytes)
+                    bio.name = "frase.png"
+                    await context.bot.send_photo(
+                        chat_id=TELEGRAM_CHANNEL, photo=bio,
+                        caption=cap_tg, parse_mode="Markdown",
+                    )
+                    res_lines.append("✅ Canal TG")
+                except Exception as e:
+                    res_lines.append(f"❌ Canal TG: {e}")
+
+            res_text = "\n".join(res_lines)
+            await query.edit_message_caption(caption=res_text)
+
+            if tw_on:
+                tweet_text = frase
+                if post_url:
+                    tweet_text += f"\n\n{utm_url(post_url, 'twitter')}"
+                tweet_text += f"\n\n{custom_ht}"
+                if len(tweet_text) > 280:
+                    tweet_text = frase[:200] + "…\n\n" + custom_ht
+                context.user_data["frase_tweeting"] = {
+                    "frase":     frase,
+                    "img_bytes": img_bytes,
+                    "post_url":  post_url,
+                    "post_id":   post_id,
+                }
+                kb_tweet = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Twittear", callback_data="frase_tweet"),
+                        InlineKeyboardButton("No twittear", callback_data="frase_no_tweet"),
+                    ],
+                    [InlineKeyboardButton("Cambiar HT", callback_data="frase_change_ht")],
+                ])
+                await query.message.reply_text(
+                    res_text + f"\n\n— Preview del tweet —\n`{md_escape(tweet_text)}`",
+                    parse_mode="Markdown",
+                    reply_markup=kb_tweet,
+                )
+            context.user_data.pop("frase_pending", None)
+            return
+
+        if query.data == "frase_schedule":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            ht_now = context.user_data.get("frase_sched_ht", "#Frases #MundoEmpresarial #Pymes")
+            await query.edit_message_caption(
+                caption=(
+                    f"💬 *{md_escape(fp['texto'])}*\n\n"
+                    f"*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\n"
+                    f"Confirmá los hashtags antes de elegir cuándo publicar:"
+                ),
+                parse_mode="Markdown",
+                reply_markup=_build_frase_sched_pre_ht_kb(),
+            )
+            return
+
+        if query.data == "fs_to_ht":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            ht_now = context.user_data.get("frase_sched_ht", "#Frases #MundoEmpresarial #Pymes")
+            await query.edit_message_caption(
+                caption=(
+                    f"💬 *{md_escape(fp['texto'])}*\n\n"
+                    f"*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\n"
+                    f"Confirmá los hashtags antes de elegir cuándo publicar:"
+                ),
+                parse_mode="Markdown",
+                reply_markup=_build_frase_sched_pre_ht_kb(),
+            )
+            return
+
+        if query.data == "fs_confirm_ht":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            await query.edit_message_caption(
+                caption=f"💬 *{md_escape(fp['texto'])}*\n\n⏰ *Elegí cuándo publicar:*",
+                parse_mode="Markdown",
+                reply_markup=_build_frase_schedule_kb(),
+            )
+            return
+
+        if query.data == "fs_change_ht_pre":
+            current_ht = context.user_data.get("frase_sched_ht", "#Frases #MundoEmpresarial #Pymes")
+            context.user_data["waiting_for_frase_sched_ht"] = True
+            await query.edit_message_caption(
+                caption=f"Hashtags actuales: `{md_escape(current_ht)}`\n\nEscribí los nuevos hashtags:",
+                parse_mode="Markdown",
+            )
+            return
+
+        if query.data in ("fs_morning", "fs_noon", "fs_evening"):
+            slot = query.data.replace("fs_", "")
+            target = _target_datetime_for_slot(slot)
+            await _do_frase_schedule(query, context, target)
+            return
+
+        if query.data == "fs_custom":
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            await query.edit_message_caption(
+                caption="📅 *Elegí el día:*",
+                parse_mode="Markdown",
+                reply_markup=_build_frase_sched_day_kb(),
+            )
+            return
+
+        if query.data.startswith("fs_day_"):
+            from datetime import datetime, timezone, timedelta
+            day_offset = int(query.data[-1])
+            context.user_data["frase_sched_day"] = day_offset
+            tz_arg    = timezone(timedelta(hours=-3))
+            day_dt    = datetime.now(tz_arg) + timedelta(days=day_offset)
+            day_label = day_dt.strftime("%A %d/%m")
+            await query.edit_message_caption(
+                caption=f"🕐 *Elegí la hora para el {day_label}:*",
+                parse_mode="Markdown",
+                reply_markup=_build_frase_sched_hour_kb(),
+            )
+            return
+
+        if query.data.startswith("fs_h_"):
+            from datetime import datetime, timezone, timedelta
+            hour      = int(query.data.split("_")[-1])
+            day_offset = context.user_data.get("frase_sched_day", 0)
+            tz_arg    = timezone(timedelta(hours=-3))
+            now_arg   = datetime.now(tz_arg)
+            target = (now_arg + timedelta(days=day_offset)).replace(
+                hour=hour, minute=0, second=0, microsecond=0
+            )
+            if target <= now_arg + timedelta(minutes=5):
+                target += timedelta(days=1)
+            await _do_frase_schedule(query, context, target)
+            return
+
+        if query.data == "fs_hour_write":
+            from datetime import datetime, timezone, timedelta
+            day_offset = context.user_data.get("frase_sched_day", 0)
+            tz_arg    = timezone(timedelta(hours=-3))
+            day_label = (datetime.now(tz_arg) + timedelta(days=day_offset)).strftime("%A %d/%m")
+            context.user_data["waiting_for_frase_custom_hour"] = True
+            await query.edit_message_caption(
+                caption=f"Escribí la hora para el {day_label} (formato HH:MM, ej: 14:30):"
+            )
+            return
+
+        if query.data == "fs_confirm_custom":
+            from datetime import datetime, timezone, timedelta
+            iso = context.user_data.get("frase_sched_target")
+            if not iso:
+                await query.edit_message_caption(caption="No hay hora guardada. Volvé a empezar.")
+                return
+            tz_arg = timezone(timedelta(hours=-3))
+            target = datetime.fromisoformat(iso)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=tz_arg)
+            await _do_frase_schedule(query, context, target)
+            return
+
+        if query.data == "frase_tweet":
+            ft = context.user_data.get("frase_tweeting")
+            if not ft:
+                await query.edit_message_text("No hay frase pendiente de twittear.")
+                return
+            await query.edit_message_text("Publicando en Twitter/X…")
+            try:
+                auth      = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
+                img_bytes = ft.get("img_bytes") or b""
+                media_id  = None
+                if img_bytes:
+                    r_media  = requests.post(
+                        "https://upload.twitter.com/1.1/media/upload.json",
+                        files={"media": img_bytes}, auth=auth, timeout=30,
+                    )
+                    media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
+                frase     = ft["frase"]
+                post_url  = ft.get("post_url", "")
+                custom_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
+                tweet_text = frase
+                if post_url:
+                    tweet_text += f"\n\n{utm_url(post_url, 'twitter')}"
+                tweet_text += f"\n\n{custom_ht}"
+                if len(tweet_text) > 280:
+                    tweet_text = frase[:200] + "…\n\n" + custom_ht
+                payload = {"text": tweet_text}
+                if media_id:
+                    payload["media"] = {"media_ids": [media_id]}
+                r_tw = requests.post(
+                    "https://api.twitter.com/2/tweets",
+                    json=payload, auth=auth, timeout=30,
+                )
+                if r_tw.status_code in (200, 201):
+                    await query.edit_message_text(
+                        f"✅ Twitteado!{chr(10) + 'WP: ' + post_url if post_url else ''}"
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"❌ Twitter {r_tw.status_code}: {r_tw.text[:200]}"
+                        + (f"\n\nWP: {post_url}" if post_url else "")
+                    )
+            except Exception as e:
+                await query.edit_message_text(f"❌ Error en Twitter: {e}")
+            context.user_data.pop("frase_tweeting", None)
+            return
+
+        if query.data == "frase_no_tweet":
+            ft       = context.user_data.pop("frase_tweeting", {})
+            post_url = ft.get("post_url", "")
+            await query.edit_message_text(
+                f"✅ Publicado!" + (f"\n\nWP: {post_url}" if post_url else "")
+            )
+            return
+
+        if query.data == "frase_change_ht":
+            current_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
+            context.user_data["waiting_for_frase_ht"] = True
+            await query.edit_message_text(
+                f"Hashtags actuales: `{md_escape(current_ht)}`\n\nEscribí los nuevos hashtags:",
+                parse_mode="Markdown",
+            )
+            return
+
+        return  # catch-all frase/fs no manejado
+
+    # ─── Article flow ─────────────────────────────────────────────────────────────
     data = context.user_data.get("article")
     if not data:
         await query.edit_message_text("Error: no hay nota pendiente.")
@@ -6259,6 +6649,79 @@ def _wait_for_lock_release(max_wait: int = 20):
     return False
 
 
+# ─── Frases: keyboards ────────────────────────────────────────────────────────
+
+def _build_frase_kb(tw_on: bool, tg_on: bool) -> InlineKeyboardMarkup:
+    tw_label = "✅ Twitter" if tw_on else "☐ Twitter"
+    tg_label = "✅ Canal TG" if tg_on else "☐ Canal TG"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(tw_label, callback_data="frase_toggle_tw"),
+            InlineKeyboardButton(tg_label, callback_data="frase_toggle_tg"),
+        ],
+        [
+            InlineKeyboardButton("🚀 Publicar ahora", callback_data="frase_pub"),
+            InlineKeyboardButton("⏰ Programar", callback_data="frase_schedule"),
+        ],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="frase_cancel")],
+    ])
+
+
+def _build_frase_sched_pre_ht_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirmar HT", callback_data="fs_confirm_ht"),
+            InlineKeyboardButton("✏️ Cambiar HT", callback_data="fs_change_ht_pre"),
+        ],
+        [InlineKeyboardButton("↩️ Volver", callback_data="fs_back_to_preview")],
+    ])
+
+
+def _build_frase_schedule_kb() -> InlineKeyboardMarkup:
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+    noon_day = "hoy" if now.hour < 11 else "mañana"
+    evening_day = "hoy" if now.hour < 17 else "mañana"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌅 Turno mañana — 08:00 (mañana)", callback_data="fs_morning")],
+        [InlineKeyboardButton(f"☀️ Mediodía — 12:00 ({noon_day})", callback_data="fs_noon")],
+        [InlineKeyboardButton(f"🌇 Tarde — 18:00 ({evening_day})", callback_data="fs_evening")],
+        [InlineKeyboardButton("🕐 Fijar hora", callback_data="fs_custom")],
+        [InlineKeyboardButton("↩️ Volver", callback_data="fs_to_ht")],
+    ])
+
+
+def _build_frase_sched_day_kb() -> InlineKeyboardMarkup:
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+    labels = [
+        (f"Hoy {now.strftime('%d/%m')}", "fs_day_0"),
+        (f"Mañana {(now + timedelta(days=1)).strftime('%d/%m')}", "fs_day_1"),
+        (f"Pasado {(now + timedelta(days=2)).strftime('%d/%m')}", "fs_day_2"),
+    ]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=cd) for label, cd in labels],
+        [InlineKeyboardButton("↩️ Volver", callback_data="fs_confirm_ht")],
+    ])
+
+
+def _build_frase_sched_hour_kb() -> InlineKeyboardMarkup:
+    hours = ["06", "08", "10", "12", "14", "16", "18", "20", "22"]
+    rows = []
+    for i in range(0, len(hours), 3):
+        rows.append([
+            InlineKeyboardButton(f"{h}:00", callback_data=f"fs_h_{h}")
+            for h in hours[i:i+3]
+        ])
+    rows.append([
+        InlineKeyboardButton("✏️ Escribir hora", callback_data="fs_hour_write"),
+        InlineKeyboardButton("↩️ Volver", callback_data="fs_custom"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 async def cmd_set_frases_base(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guarda la foto recibida como plantilla base para /frases."""
     photo = update.message.photo[-1] if update.message.photo else None
@@ -6274,10 +6737,9 @@ async def cmd_set_frases_base(update: Update, context: ContextTypes.DEFAULT_TYPE
 CAT_FRASES = 1838  # Categoría "Frases" en WordPress
 
 
-def _wp_publish_frase(frase: str, img_bytes: bytes) -> dict:
-    """Sube imagen y crea post en WordPress. Devuelve {link, id}."""
+def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
+    """Sube imagen y crea post en WordPress. Si scheduled_for es datetime, crea status=future."""
     h = wp_auth()
-    # 1. Subir imagen
     img_resp = requests.post(
         f"{WP_URL}/wp-json/wp/v2/media",
         headers={**h, "Content-Disposition": 'attachment; filename="frase.png"',
@@ -6286,17 +6748,24 @@ def _wp_publish_frase(frase: str, img_bytes: bytes) -> dict:
     )
     img_id = img_resp.json().get("id") if img_resp.status_code == 201 else None
 
-    # 2. Crear post
     slug = url_slug(frase)[:80]
-    content = ""
     payload = {
         "title":          frase,
-        "content":        content,
-        "status":         "publish",
+        "content":        "",
         "slug":           slug,
         "categories":     [CAT_FRASES],
         "featured_media": img_id or 0,
     }
+    if scheduled_for is not None:
+        from datetime import timezone, timedelta
+        tz_arg = timezone(timedelta(hours=-3))
+        if scheduled_for.tzinfo is None:
+            scheduled_for = scheduled_for.replace(tzinfo=tz_arg)
+        payload["status"] = "future"
+        payload["date"] = scheduled_for.strftime("%Y-%m-%dT%H:%M:%S")
+    else:
+        payload["status"] = "publish"
+
     r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
     if r.status_code == 201:
         body = r.json()
@@ -6305,7 +6774,7 @@ def _wp_publish_frase(frase: str, img_bytes: bytes) -> dict:
 
 
 async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera imagen con frase y la publica en WP + canal TG + Twitter."""
+    """Genera imagen con frase y muestra preview con opciones de publicación."""
     frase = " ".join(context.args).strip() if context.args else ""
     if not frase:
         await update.message.reply_text(
@@ -6315,7 +6784,6 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("🎨 Generando imagen...")
-
     try:
         from frases_gen import generate_frase_image
         img_bytes = await asyncio.to_thread(generate_frase_image, frase)
@@ -6323,61 +6791,169 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error generando imagen: {e}")
         return
 
-    results = []
+    context.user_data["frase_pending"] = {
+        "texto":    frase,
+        "img_bytes": img_bytes,
+        "tw_on":    True,
+        "tg_on":    True,
+    }
+    context.user_data.pop("frase_custom_ht", None)
+    context.user_data.pop("frase_sched_ht", None)
 
-    # ── WordPress ──
-    await msg.edit_text("📤 Publicando en WordPress…")
+    await msg.delete()
+    bio = io.BytesIO(img_bytes)
+    bio.name = "frase.png"
+    await update.message.reply_photo(
+        photo=bio,
+        caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
+        parse_mode="Markdown",
+        reply_markup=_build_frase_kb(tw_on=True, tg_on=True),
+    )
+
+
+async def _do_frase_schedule(query, context, target):
+    """Programa publicación de una frase: WP (future) + job para TG/Twitter."""
+    fp = context.user_data.get("frase_pending")
+    if not fp:
+        await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+        return
+
+    frase     = fp["texto"]
+    img_bytes = fp.get("img_bytes")
+    tw_on     = fp.get("tw_on", True)
+    tg_on     = fp.get("tg_on", True)
+    custom_ht = context.user_data.get("frase_sched_ht", "#Frases #MundoEmpresarial #Pymes")
+
+    await query.edit_message_caption(caption="🔍 Verificando colisiones…")
+    adjusted = await asyncio.to_thread(find_scheduled_collision, target)
+
+    offset_msg = ""
+    if adjusted != target:
+        delta_min = int((adjusted - target).total_seconds() / 60)
+        offset_msg = f" (ajustado +{delta_min} min)"
+
+    await query.edit_message_caption(
+        caption=f"📤 Programando para {adjusted.strftime('%A %d/%m %H:%M')}{offset_msg}…"
+    )
+
+    if not img_bytes:
+        try:
+            from frases_gen import generate_frase_image
+            img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+        except Exception as e:
+            await query.edit_message_caption(caption=f"❌ Error generando imagen: {e}")
+            return
+
     try:
-        wp_data = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
-        post_url = wp_data["link"]
-        results.append(f"✅ WP: {post_url}")
+        wp_data = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes, adjusted)
     except Exception as e:
-        post_url = ""
-        results.append(f"❌ WP: {e}")
+        await query.edit_message_caption(caption=f"❌ Error en WordPress: {e}")
+        return
 
-    # ── Canal Telegram ──
+    post_url = wp_data["link"]
+    post_id  = wp_data["id"]
+
+    job_data = {
+        "frase":     frase,
+        "post_url":  post_url,
+        "post_id":   post_id,
+        "tw_on":     tw_on,
+        "tg_on":     tg_on,
+        "chat_id":   query.message.chat_id,
+        "custom_ht": custom_ht,
+    }
     try:
-        caption = f"💬 *{md_escape(frase)}*"
-        if post_url:
-            caption += f"\n\n🔗 [Ver en web]({utm_url(post_url, 'telegram')})"
-        bio = io.BytesIO(img_bytes)
-        bio.name = "frase.png"
-        await context.bot.send_photo(
-            chat_id=TELEGRAM_CHANNEL,
-            photo=bio,
-            caption=caption + "\n\n#Frases #MundoEmpresarial #Pymes",
-            parse_mode="Markdown",
+        context.application.job_queue.run_once(
+            _fire_frase_social,
+            when=adjusted,
+            data=job_data,
+            name=f"sched_frase_{post_id}",
         )
-        results.append("✅ Canal TG")
     except Exception as e:
-        results.append(f"❌ Canal TG: {e}")
+        logger.error(f"run_once frase falló: {e}")
 
-    # ── Twitter ──
-    try:
-        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
-        r_media = requests.post(
-            "https://upload.twitter.com/1.1/media/upload.json",
-            files={"media": img_bytes}, auth=auth, timeout=30,
+    context.user_data.pop("frase_pending", None)
+    context.user_data.pop("frase_sched_ht", None)
+    context.user_data.pop("frase_sched_day", None)
+    context.user_data.pop("frase_sched_target", None)
+
+    await query.edit_message_caption(
+        caption=(
+            f"✅ Frase programada para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
+            f"📝 WP: {post_url}\n"
+            f"🔔 A esa hora se postea en canal TG y preview de Twitter."
         )
-        media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
-        tweet_text = f"{frase}"
+    )
+
+
+async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
+    """Job programado: publica frase en canal TG y envía preview de tweet al admin."""
+    job_data  = context.job.data
+    frase     = job_data.get("frase", "")
+    post_url  = job_data.get("post_url", "")
+    post_id   = job_data.get("post_id")
+    chat_id   = job_data.get("chat_id")
+    tg_on     = job_data.get("tg_on", True)
+    tw_on     = job_data.get("tw_on", True)
+    custom_ht = job_data.get("custom_ht", "#Frases #MundoEmpresarial #Pymes")
+
+    results = [f"🔔 Frase programada publicada: {post_url}"]
+
+    try:
+        from frases_gen import generate_frase_image
+        img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+    except Exception as e:
+        img_bytes = None
+        results.append(f"❌ Error generando imagen: {e}")
+
+    if tg_on and img_bytes:
+        try:
+            cap = f"💬 *{md_escape(frase)}*"
+            if post_url:
+                cap += f"\n\n🔗 [Ver en web]({utm_url(post_url, 'telegram')})"
+            cap += f"\n\n{custom_ht}"
+            bio = io.BytesIO(img_bytes)
+            bio.name = "frase.png"
+            await context.bot.send_photo(
+                chat_id=TELEGRAM_CHANNEL, photo=bio, caption=cap, parse_mode="Markdown",
+            )
+            results.append("✅ Canal TG")
+        except Exception as e:
+            results.append(f"❌ Canal TG: {e}")
+
+    if tw_on and chat_id and img_bytes:
+        tweet_text = frase
         if post_url:
             tweet_text += f"\n\n{utm_url(post_url, 'twitter')}"
-        tweet_text += "\n\n#Frases #MundoEmpresarial #Pymes"
+        tweet_text += f"\n\n{custom_ht}"
         if len(tweet_text) > 280:
-            tweet_text = frase[:200] + "…\n\n#Frases #Pymes"
-        payload = {"text": tweet_text}
-        if media_id:
-            payload["media"] = {"media_ids": [media_id]}
-        r_tw = requests.post(
-            "https://api.twitter.com/2/tweets",
-            json=payload, auth=auth, timeout=30,
+            tweet_text = frase[:200] + "…\n\n" + custom_ht
+        try:
+            user_data = context.application.user_data[int(chat_id)]
+            user_data["frase_tweeting"] = {
+                "frase":     frase,
+                "img_bytes": img_bytes,
+                "post_url":  post_url,
+                "post_id":   post_id,
+            }
+            user_data["frase_custom_ht"] = custom_ht
+        except Exception:
+            pass
+        kb_tweet = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Twittear", callback_data="frase_tweet"),
+                InlineKeyboardButton("No twittear", callback_data="frase_no_tweet"),
+            ],
+            [InlineKeyboardButton("Cambiar HT", callback_data="frase_change_ht")],
+        ])
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text="\n".join(results) + f"\n\n— Preview del tweet —\n`{md_escape(tweet_text)}`",
+            parse_mode="Markdown",
+            reply_markup=kb_tweet,
         )
-        results.append("✅ Twitter" if r_tw.status_code in (200, 201) else f"❌ Twitter {r_tw.status_code}")
-    except Exception as e:
-        results.append(f"❌ Twitter: {e}")
-
-    await msg.edit_text("\n".join(results))
+    elif chat_id:
+        await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
 
 
 def main():
