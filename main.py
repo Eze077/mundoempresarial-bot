@@ -998,10 +998,27 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
     Agrega un HTML comment al final del post con los IDs de Twitter y Telegram
     para poder borrarlos después desde /editar.
     Format: <!-- mebot:tweet_id=X;tg_msg=Y -->
+    IMPORTANTE: siempre lee el contenido actual desde WP en vez de usar el
+    parámetro content — en notas programadas ese parámetro llega truncado a
+    500 chars (ver _add_scheduled_job) y sobreescribiría el post entero.
     """
     try:
+        # Leer contenido actual desde WP para no depender del parámetro
+        # (que en jobs programados viene truncado a 500 chars)
+        r_get = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+            headers=wp_auth(),
+            params={"context": "edit"},
+            timeout=15,
+        )
+        if r_get.status_code == 200:
+            current_content = r_get.json().get("content", {}).get("raw", content)
+        else:
+            logger.warning(f"append_social_meta: GET post {post_id} → {r_get.status_code}, usando content pasado")
+            current_content = content
+
         # Remover comentarios previos si existen
-        clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
+        clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', current_content)
         meta_parts = []
         if tweet_id:
             meta_parts.append(f"tweet_id={tweet_id}")
