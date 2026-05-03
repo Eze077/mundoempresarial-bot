@@ -998,27 +998,10 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
     Agrega un HTML comment al final del post con los IDs de Twitter y Telegram
     para poder borrarlos después desde /editar.
     Format: <!-- mebot:tweet_id=X;tg_msg=Y -->
-    IMPORTANTE: siempre lee el contenido actual desde WP en vez de usar el
-    parámetro content — en notas programadas ese parámetro llega truncado a
-    500 chars (ver _add_scheduled_job) y sobreescribiría el post entero.
     """
     try:
-        # Leer contenido actual desde WP para no depender del parámetro
-        # (que en jobs programados viene truncado a 500 chars)
-        r_get = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
-            headers=wp_auth(),
-            params={"context": "edit"},
-            timeout=15,
-        )
-        if r_get.status_code == 200:
-            current_content = r_get.json().get("content", {}).get("raw", content)
-        else:
-            logger.warning(f"append_social_meta: GET post {post_id} → {r_get.status_code}, usando content pasado")
-            current_content = content
-
         # Remover comentarios previos si existen
-        clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', current_content)
+        clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
         meta_parts = []
         if tweet_id:
             meta_parts.append(f"tweet_id={tweet_id}")
@@ -4706,16 +4689,26 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Error: no hay nota pendiente.")
         return
 
-    # ── Programar publicación: primero verificar hashtags de Twitter ──
+    # ── Programar publicación ──
     if query.data == "pub_schedule":
-        auto_ht = _build_hashtags(data)
-        ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
-        context.user_data["pre_sched_hashtags"] = ht_now
-        await query.edit_message_text(
-            build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
-            parse_mode="Markdown",
-            reply_markup=_build_sched_pre_ht_kb(),
-        )
+        tw_on = context.user_data.get("tw_on", True)
+        if tw_on:
+            # Confirmar / cambiar HT antes de elegir hora
+            auto_ht = _build_hashtags(data)
+            ht_now = context.user_data.get("pre_sched_hashtags") or auto_ht
+            context.user_data["pre_sched_hashtags"] = ht_now
+            await query.edit_message_text(
+                build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(ht_now)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
+                parse_mode="Markdown",
+                reply_markup=_build_sched_pre_ht_kb(),
+            )
+        else:
+            # Twitter apagado: ir directo al picker de hora
+            await query.edit_message_text(
+                build_preview(data) + "\n\n⏰ *Elegí cuándo publicar:*",
+                parse_mode="Markdown",
+                reply_markup=build_schedule_kb(),
+            )
         return
 
     if query.data == "sched_back":
@@ -5890,7 +5883,7 @@ def _remove_scheduled_job(post_id: int):
 
 
 async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
-    """Callback de job_queue.run_once: dispara canal TG + preview de Twitter."""
+    """Callback de job_queue.run_once: dispara canal TG + tweet automático."""
     job_data = context.job.data
     data = job_data.get("data", {})
     post_url = job_data.get("post_url", "")
@@ -5907,42 +5900,26 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
         tg_msg_id = await publish_to_channel(context.bot, data, post_url)
         results.append("✅ Canal TG" if tg_msg_id else "❌ Canal TG falló")
 
-    # Guardar tg_msg_id
-    if tg_msg_id and post_id:
+    # Twitter: auto-tweet con los HT ya confirmados al programar
+    tweet_id = ""
+    if tw_on:
+        custom_ht = job_data.get("custom_hashtags")
+        tweet_url = await asyncio.to_thread(post_tweet, data, post_url, custom_ht)
+        if tweet_url:
+            tweet_id = tweet_url.split("/")[-1]
+            results.append(f"✅ Twitter: {tweet_url}")
+        else:
+            err = _LAST_TWITTER_ERROR or "error desconocido"
+            results.append(f"❌ Twitter falló: {err[:120]}")
+
+    # Persistir tweet_id y tg_msg_id en el post
+    if (tweet_id or tg_msg_id) and post_id:
         await asyncio.to_thread(
             append_social_meta, post_id, job_data.get("post_content", ""),
-            "", tg_msg_id,
+            tweet_id, tg_msg_id,
         )
 
-    # Twitter: mandar preview con botones al admin
-    if tw_on and chat_id:
-        custom_ht = job_data.get("custom_hashtags")
-        tweet_preview = build_tweet(data, post_url, hashtags_override=custom_ht)
-        kb_tweet = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Twittear", callback_data="tweet"),
-                InlineKeyboardButton("No twittear", callback_data="no_tweet"),
-            ],
-            [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
-        ])
-        # Re-popular user_data para que los botones funcionen
-        try:
-            user_data = context.application.user_data[int(chat_id)]
-            user_data["published"] = {
-                "url": post_url, "data": data,
-                "id": post_id, "content": job_data.get("post_content", ""),
-                "tg_msg_id": tg_msg_id,
-            }
-        except Exception:
-            pass
-
-        await context.bot.send_message(
-            chat_id=int(chat_id),
-            text="\n".join(results) + f"\n\n— Preview del tweet —\n`{md_escape(tweet_preview)}`",
-            parse_mode="Markdown",
-            reply_markup=kb_tweet,
-        )
-    elif chat_id:
+    if chat_id:
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
 
     # Remover del store
