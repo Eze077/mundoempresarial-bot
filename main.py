@@ -3658,7 +3658,6 @@ def _build_eco_kb(eco: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton(tg_label, callback_data="eco_toggle_tg"),
         ],
         [
-            InlineKeyboardButton("🚀 Publicar eco ahora", callback_data="eco_pub_now"),
             InlineKeyboardButton("⏰ Programar eco", callback_data="eco_schedule"),
         ],
         [
