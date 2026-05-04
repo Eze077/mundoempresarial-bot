@@ -3615,6 +3615,101 @@ CAT_NAMES = {
     102: "Provincias", 92: "Servicios", 93: "Sindicatos",
 }
 
+# ── ECO helpers ───────────────────────────────────────────────────────────────
+
+def _eco_data_with_alt(eco: dict) -> dict:
+    """Copia de data con alt_title/alt_bajada del ECO aplicados."""
+    d = dict(eco["data"])
+    if eco.get("alt_title"):
+        d["title"] = eco["alt_title"]
+        d["title_edited"] = True
+    if eco.get("alt_bajada"):
+        d["excerpt"] = eco["alt_bajada"]
+        d["excerpt_edited"] = True
+    return d
+
+
+def _eco_preview_text(eco: dict) -> str:
+    d = _eco_data_with_alt(eco)
+    title  = get_title(d)
+    bajada = get_excerpt(d)[:180]
+    tw = "✅" if eco.get("tw_on", True) else "❌"
+    tg = "✅" if eco.get("tg_on", True) else "❌"
+    alt_note = " _(editado)_" if eco.get("alt_title") else ""
+    ex_note  = " _(editada)_" if eco.get("alt_bajada") else ""
+    return (
+        f"📣 *ECO — Configuración*\n\n"
+        f"*Título:* {md_escape(title)}{alt_note}\n"
+        f"*Bajada:* {md_escape(bajada)}{ex_note}\n\n"
+        f"{tw} Twitter  {tg} Canal TG"
+    )
+
+
+def _build_eco_kb(eco: dict) -> InlineKeyboardMarkup:
+    tw_label = "✅ Twitter" if eco.get("tw_on", True) else "❌ Twitter"
+    tg_label = "✅ Canal TG" if eco.get("tg_on", True) else "❌ Canal TG"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ Título alt.", callback_data="eco_edit_title"),
+            InlineKeyboardButton("✏️ Bajada alt.", callback_data="eco_edit_bajada"),
+        ],
+        [
+            InlineKeyboardButton(tw_label, callback_data="eco_toggle_tw"),
+            InlineKeyboardButton(tg_label, callback_data="eco_toggle_tg"),
+        ],
+        [
+            InlineKeyboardButton("🚀 Publicar eco ahora", callback_data="eco_pub_now"),
+            InlineKeyboardButton("⏰ Programar eco", callback_data="eco_schedule"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Restaurar originales", callback_data="eco_restore"),
+            InlineKeyboardButton("❌ Cancelar eco", callback_data="eco_cancel"),
+        ],
+    ])
+
+
+def _build_eco_schedule_kb() -> InlineKeyboardMarkup:
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+    noon_day    = "hoy" if now.hour < 11 else "mañana"
+    evening_day = "hoy" if now.hour < 17 else "mañana"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🌅 Mañana — 08:00 (mañana)", callback_data="ecosch_morning")],
+        [InlineKeyboardButton(f"☀️ Mediodía — 12:00 ({noon_day})", callback_data="ecosch_noon")],
+        [InlineKeyboardButton(f"🌇 Tarde — 18:00 ({evening_day})", callback_data="ecosch_evening")],
+        [InlineKeyboardButton("🕐 Fijar hora", callback_data="ecosch_custom")],
+        [InlineKeyboardButton("↩️ Volver", callback_data="eco_schedule_back")],
+    ])
+
+
+def _build_eco_sched_day_kb() -> InlineKeyboardMarkup:
+    from datetime import datetime, timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_arg)
+    labels = [
+        (f"Hoy {now.strftime('%d/%m')}", "ecosch_day_0"),
+        (f"Mañana {(now + timedelta(days=1)).strftime('%d/%m')}", "ecosch_day_1"),
+        (f"Pasado {(now + timedelta(days=2)).strftime('%d/%m')}", "ecosch_day_2"),
+    ]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=cd) for label, cd in labels],
+        [InlineKeyboardButton("↩️ Volver", callback_data="eco_schedule")],
+    ])
+
+
+def _build_eco_sched_hour_kb() -> InlineKeyboardMarkup:
+    hours = ["06", "08", "10", "12", "14", "16", "18", "20", "22"]
+    rows = []
+    for i in range(0, len(hours), 3):
+        rows.append([
+            InlineKeyboardButton(f"{h}:00", callback_data=f"ecosch_h_{h}")
+            for h in hours[i:i+3]
+        ])
+    rows.append([InlineKeyboardButton("↩️ Volver", callback_data="ecosch_custom")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
     ud = context.user_data
     return build_preview_kb(
@@ -3624,16 +3719,18 @@ def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
         dest_on = ud.get("dest_on", False),
         orig_on = ud.get("orig_title_on", False),
         orig_excerpt_on = ud.get("orig_excerpt_on", False),
+        eco_on  = ud.get("eco_on", False),
     )
 
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False) -> InlineKeyboardMarkup:
-    tw_label = "✅ Twitter" if tw_on else "❌ Twitter"
-    tg_label = "✅ Canal TG" if tg_on else "❌ Canal TG"
-    wa_label = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
-    dest_label = "⭐ Destacado" if dest_on else "☆ Destacado"
-    orig_label = "✅ Titulo original" if orig_on else "❌ Titulo original"
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False, eco_on: bool = False) -> InlineKeyboardMarkup:
+    tw_label     = "✅ Twitter" if tw_on else "❌ Twitter"
+    tg_label     = "✅ Canal TG" if tg_on else "❌ Canal TG"
+    wa_label     = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
+    dest_label   = "⭐ Destacado" if dest_on else "☆ Destacado"
+    orig_label   = "✅ Titulo original" if orig_on else "❌ Titulo original"
     orig_ex_label = "✅ Bajada original" if orig_excerpt_on else "❌ Bajada original"
+    eco_label    = "📣 ECO ON" if eco_on else "📣 ECO OFF"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
@@ -3646,6 +3743,9 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
         [
             InlineKeyboardButton(orig_label, callback_data="toggle_orig_title"),
             InlineKeyboardButton(orig_ex_label, callback_data="toggle_orig_excerpt"),
+        ],
+        [
+            InlineKeyboardButton(eco_label, callback_data="toggle_eco"),
         ],
         [
             InlineKeyboardButton("🚀 Publicar ahora", callback_data="pub"),
@@ -3827,6 +3927,30 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=kb_tweet,
         )
+        return
+
+    # ── ECO: título alternativo ──
+    if context.user_data.get("waiting_eco_title"):
+        context.user_data["waiting_eco_title"] = False
+        eco = context.user_data.get("eco")
+        if eco:
+            eco["alt_title"] = text_in
+            context.user_data["eco"] = eco
+            await update.message.reply_text(
+                _eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco)
+            )
+        return
+
+    # ── ECO: bajada alternativa ──
+    if context.user_data.get("waiting_eco_bajada"):
+        context.user_data["waiting_eco_bajada"] = False
+        eco = context.user_data.get("eco")
+        if eco:
+            eco["alt_bajada"] = text_in
+            context.user_data["eco"] = eco
+            await update.message.reply_text(
+                _eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco)
+            )
         return
 
     # ── Si el bot espera la descripción de una fuente nueva ──
@@ -4159,6 +4283,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("dest_on", False)
     context.user_data.setdefault("orig_title_on", False)
     context.user_data.setdefault("orig_excerpt_on", False)
+    context.user_data.setdefault("eco_on", False)
     data["orig_title_on"] = context.user_data["orig_title_on"]
     data["orig_excerpt_on"] = context.user_data["orig_excerpt_on"]
 
@@ -4265,6 +4390,7 @@ async def _do_schedule(query, context, data, target):
         logger.error(f"run_once falló: {e}")
 
     stat_publish(data["title"], data.get("source_url", ""))
+    eco_on = context.user_data.get("eco_on", False)
     context.user_data.pop("article", None)
     context.user_data.pop("pre_sched_hashtags", None)
     context.user_data.pop("sched_custom_day", None)
@@ -4276,6 +4402,24 @@ async def _do_schedule(query, context, data, target):
         f"🔔 A esa hora se disparan los posteos en canal TG y el preview de Twitter.",
         parse_mode="Markdown",
     )
+
+    # ECO: si está activado, abrir menú de configuración del eco
+    if eco_on:
+        eco = {
+            "post_id":    post_id,
+            "wp_url":     post_url,
+            "data":       dict(data),
+            "alt_title":  None,
+            "alt_bajada": None,
+            "tw_on":      True,
+            "tg_on":      True,
+        }
+        context.user_data["eco"] = eco
+        await query.message.reply_text(
+            _eco_preview_text(eco),
+            parse_mode="Markdown",
+            reply_markup=_build_eco_kb(eco),
+        )
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4362,6 +4506,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
+        return
+
+    if query.data == "toggle_eco":
+        context.user_data["eco_on"] = not context.user_data.get("eco_on", False)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     # ─── Frases flow ─────────────────────────────────────────────────────────────
@@ -4685,6 +4834,126 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return  # catch-all frase/fs no manejado
 
+    # ─── ECO flow ─────────────────────────────────────────────────────────────────
+    if query.data.startswith("eco_") or query.data.startswith("ecosch_"):
+        eco = context.user_data.get("eco")
+        if not eco:
+            await query.answer("No hay ECO activo.", show_alert=True)
+            return
+
+        if query.data == "eco_edit_title":
+            context.user_data["waiting_eco_title"] = True
+            await query.edit_message_text(
+                f"Título actual: `{md_escape(get_title(_eco_data_with_alt(eco)))}`\n\n"
+                "Escribí el título alternativo para el ECO:",
+                parse_mode="Markdown",
+            )
+            return
+
+        if query.data == "eco_edit_bajada":
+            context.user_data["waiting_eco_bajada"] = True
+            d = _eco_data_with_alt(eco)
+            await query.edit_message_text(
+                f"Bajada actual: _{md_escape(get_excerpt(d)[:120])}_\n\n"
+                "Escribí la bajada alternativa para el ECO:",
+                parse_mode="Markdown",
+            )
+            return
+
+        if query.data == "eco_toggle_tw":
+            eco["tw_on"] = not eco.get("tw_on", True)
+            context.user_data["eco"] = eco
+            await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
+            return
+
+        if query.data == "eco_toggle_tg":
+            eco["tg_on"] = not eco.get("tg_on", True)
+            context.user_data["eco"] = eco
+            await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
+            return
+
+        if query.data == "eco_restore":
+            eco["alt_title"] = None
+            eco["alt_bajada"] = None
+            context.user_data["eco"] = eco
+            await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
+            return
+
+        if query.data == "eco_cancel":
+            context.user_data.pop("eco", None)
+            await query.edit_message_text("📣 ECO cancelado.")
+            return
+
+        if query.data == "eco_pub_now":
+            await query.edit_message_text("📣 Publicando ECO en redes…")
+            eco_d = _eco_data_with_alt(eco)
+            results = [f"📣 *ECO publicado*\n🔗 {eco['wp_url']}"]
+            if eco.get("tg_on", True):
+                tg_id = await publish_to_channel(context.bot, eco_d, eco["wp_url"])
+                results.append("✅ Canal TG" if tg_id else "❌ Canal TG falló")
+            if eco.get("tw_on", True):
+                tw_url = await asyncio.to_thread(post_tweet, eco_d, eco["wp_url"])
+                if tw_url:
+                    results.append(f"✅ Twitter: {tw_url}")
+                else:
+                    err = _LAST_TWITTER_ERROR or "error desconocido"
+                    results.append(f"❌ Twitter: {err[:100]}")
+            context.user_data.pop("eco", None)
+            await query.edit_message_text("\n".join(results), parse_mode="Markdown")
+            return
+
+        if query.data == "eco_schedule":
+            await query.edit_message_text(
+                _eco_preview_text(eco) + "\n\n⏰ *Elegí cuándo publicar el ECO:*",
+                parse_mode="Markdown",
+                reply_markup=_build_eco_schedule_kb(),
+            )
+            return
+
+        if query.data == "eco_schedule_back":
+            await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
+            return
+
+        if query.data in ("ecosch_morning", "ecosch_noon", "ecosch_evening"):
+            slot = query.data.replace("ecosch_", "")
+            target = _target_datetime_for_slot(slot)
+            await _do_eco_schedule(query, context, eco, target)
+            return
+
+        if query.data == "ecosch_custom":
+            await query.edit_message_text("📅 *Elegí el día para el ECO:*", parse_mode="Markdown", reply_markup=_build_eco_sched_day_kb())
+            return
+
+        if query.data in ("ecosch_day_0", "ecosch_day_1", "ecosch_day_2"):
+            from datetime import datetime, timezone, timedelta
+            day_offset = int(query.data[-1])
+            context.user_data["eco_sched_day"] = day_offset
+            tz_arg = timezone(timedelta(hours=-3))
+            day_dt = datetime.now(tz_arg) + timedelta(days=day_offset)
+            day_label = day_dt.strftime("%A %d/%m")
+            await query.edit_message_text(
+                f"🕐 *Elegí la hora para el ECO el {day_label}:*",
+                parse_mode="Markdown",
+                reply_markup=_build_eco_sched_hour_kb(),
+            )
+            return
+
+        if query.data.startswith("ecosch_h_"):
+            from datetime import datetime, timezone, timedelta
+            hour = int(query.data.split("_")[-1])
+            day_offset = context.user_data.get("eco_sched_day", 0)
+            tz_arg = timezone(timedelta(hours=-3))
+            now_arg = datetime.now(tz_arg)
+            target = (now_arg + timedelta(days=day_offset)).replace(
+                hour=hour, minute=0, second=0, microsecond=0
+            )
+            if target <= now_arg + timedelta(minutes=5):
+                target += timedelta(days=1)
+            await _do_eco_schedule(query, context, eco, target)
+            return
+
+        return  # catch-all eco no manejado
+
     # ─── Article flow ─────────────────────────────────────────────────────────────
     data = context.user_data.get("article")
     if not data:
@@ -4950,6 +5219,24 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             wa_text = f"📰 {s_title}\n\n{s_excerpt_wa[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(
                 f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
+            )
+
+        # ECO: si está activado, abrir menú de configuración del eco
+        if context.user_data.get("eco_on"):
+            eco = {
+                "post_id":   post_id,
+                "wp_url":    post_url,
+                "data":      dict(data),
+                "alt_title": None,
+                "alt_bajada": None,
+                "tw_on":     True,
+                "tg_on":     True,
+            }
+            context.user_data["eco"] = eco
+            await query.message.reply_text(
+                _eco_preview_text(eco),
+                parse_mode="Markdown",
+                reply_markup=_build_eco_kb(eco),
             )
     else:
         await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
@@ -5932,6 +6219,53 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
     # Remover del store
     if post_id:
         await asyncio.to_thread(_remove_scheduled_job, post_id)
+
+
+async def _do_eco_schedule(query, context, eco: dict, target):
+    """Programa el ECO social en job_queue."""
+    eco_d = _eco_data_with_alt(eco)
+    job_data = {
+        "eco":     eco,
+        "eco_d":   eco_d,
+        "chat_id": query.message.chat_id,
+    }
+    try:
+        context.application.job_queue.run_once(
+            _fire_eco_social,
+            when=target,
+            data=job_data,
+            name=f"eco_social_{eco.get('post_id', 'x')}_{int(target.timestamp())}",
+        )
+    except Exception as e:
+        logger.error(f"eco run_once falló: {e}")
+    context.user_data.pop("eco", None)
+    context.user_data.pop("eco_sched_day", None)
+    await query.edit_message_text(
+        f"📣 *ECO programado* para {target.strftime('%A %d/%m a las %H:%M')} ARG\n\n"
+        f"🔗 {eco['wp_url']}",
+        parse_mode="Markdown",
+    )
+
+
+async def _fire_eco_social(context: ContextTypes.DEFAULT_TYPE):
+    """Dispara el ECO: publica en redes con alt_title/alt_bajada."""
+    job_data = context.job.data
+    eco  = job_data.get("eco", {})
+    eco_d = job_data.get("eco_d", {})
+    chat_id = job_data.get("chat_id")
+    results = [f"📣 *ECO publicado*\n🔗 {eco.get('wp_url', '')}"]
+    if eco.get("tg_on", True):
+        tg_id = await publish_to_channel(context.bot, eco_d, eco.get("wp_url", ""))
+        results.append("✅ Canal TG" if tg_id else "❌ Canal TG falló")
+    if eco.get("tw_on", True):
+        tw_url = await asyncio.to_thread(post_tweet, eco_d, eco.get("wp_url", ""))
+        if tw_url:
+            results.append(f"✅ Twitter: {tw_url}")
+        else:
+            err = _LAST_TWITTER_ERROR or "error desconocido"
+            results.append(f"❌ Twitter: {err[:100]}")
+    if chat_id:
+        await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results), parse_mode="Markdown")
 
 
 def _restore_scheduled_jobs(app):
