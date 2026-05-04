@@ -6451,7 +6451,7 @@ def curar_noticias(max_results: int = 15, lookback_hours: int = 24) -> list:
             link = (entry.get("link") or "").strip()
             # Categorías/tags del RSS (feedparser las devuelve en entry.tags)
             rss_cats = " ".join(
-                t.get("term", "") for t in (entry.get("tags") or [])
+                (t.get("term") or "") for t in (entry.get("tags") or [])
             ).strip()
 
             if not title or not link:
