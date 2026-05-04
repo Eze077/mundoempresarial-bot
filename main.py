@@ -7217,14 +7217,12 @@ def _reschedule_curador_jobs(job_queue, slots: list[dict]):
 def _horarios_text(slots: list[dict]) -> str:
     slots_sorted = sorted(slots, key=lambda s: (s["hh"], s["mm"]))
     if not slots_sorted:
-        return (
-            "⏰ *Horarios del curador*\n\n"
-            "_Sin horarios activos\\. El curador solo responde a /curador manual\\._"
-        )
+        return "⏰ *Horarios del curador*\n\n_Sin horarios activos. El curador solo responde a /curador manual._"
     lines = ["⏰ *Horarios del curador automático*\n"]
     for i, s in enumerate(slots_sorted, 1):
-        lines.append(f"  {i}\\. `{s['hh']:02d}:{s['mm']:02d}` ARG")
-    lines.append(f"\n_{len(slots_sorted)} envío(s) diario(s)\\. Tocá ❌ para quitar o ➕ para agregar\\._")
+        lines.append(f"  {i}. `{s['hh']:02d}:{s['mm']:02d}` ARG")
+    n = len(slots_sorted)
+    lines.append(f"\n_{n} envio(s) diario(s). Toca ❌ para quitar o ➕ para agregar._")
     return "\n".join(lines)
 
 
@@ -7247,7 +7245,7 @@ async def cmd_horarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     slots = config.get("slots", [])
     await update.message.reply_text(
         _horarios_text(slots),
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=_horarios_keyboard(slots),
     )
 
@@ -7272,8 +7270,8 @@ async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_T
             rows.append(row)
         rows.append([InlineKeyboardButton("↩ Volver", callback_data="ch_show")])
         await query.edit_message_text(
-            "⏰ *Elegí la hora* \\(ARG\\):",
-            parse_mode="MarkdownV2",
+            "⏰ *Elegí la hora* (ARG):",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(rows),
         )
 
@@ -7288,7 +7286,7 @@ async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_T
         ]
         await query.edit_message_text(
             f"⏰ *{hh:02d}h — elegí el minuto:*",
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -7302,7 +7300,7 @@ async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_T
             _reschedule_curador_jobs(context.application.job_queue, slots)
         await query.edit_message_text(
             _horarios_text(slots),
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=_horarios_keyboard(slots),
         )
 
@@ -7315,14 +7313,14 @@ async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_T
         _reschedule_curador_jobs(context.application.job_queue, slots)
         await query.edit_message_text(
             _horarios_text(slots),
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=_horarios_keyboard(slots),
         )
 
     elif data == "ch_show":
         await query.edit_message_text(
             _horarios_text(slots),
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=_horarios_keyboard(slots),
         )
 
