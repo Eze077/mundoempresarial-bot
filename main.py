@@ -2714,7 +2714,7 @@ def _build_commands_text() -> str:
         "\n"
         "📰 *Curaduría diaria*\n"
         "• `/curador` → briefing on-demand de las noticias top de las últimas 24h.\n"
-        "  (Auto: 7:30 / 11:30 / 17:30 ARG, 5 notas por hilo)\n"
+        "• `/horarios` → ver y configurar cuántas veces por día y a qué hora se envía el curador.\n"
         "• `/feedback_ver` → ver qué dominios y keywords aprendió el curador a "
         "favorecer/penalizar en base a tus 👍👎 sobre las notas.\n"
         "\n"
@@ -5784,6 +5784,11 @@ _FEEDBACK_CACHE: dict | None = None
 _FEEDBACK_POST_ID: int | None = None
 _FEEDBACK_POST_SLUG = "mebot-feedback-store"
 
+_CURADOR_CONFIG_CACHE: dict | None = None
+_CURADOR_CONFIG_POST_ID: int | None = None
+_CURADOR_CONFIG_POST_SLUG = "mebot-curador-config"
+_DEFAULT_CURADOR_SLOTS = [{"hh": 7, "mm": 30}, {"hh": 11, "mm": 30}, {"hh": 17, "mm": 30}]
+
 
 def _find_or_create_feedback_post() -> int | None:
     """Busca el post privado donde vive el feedback store. Si no existe, lo crea."""
@@ -6047,6 +6052,87 @@ def _save_feedback(data: dict) -> bool:
         return r.status_code in (200, 201)
     except Exception as e:
         logger.error(f"Save feedback: {e}")
+        return False
+
+
+def _find_or_create_curador_config_post() -> int | None:
+    global _CURADOR_CONFIG_POST_ID
+    if _CURADOR_CONFIG_POST_ID:
+        return _CURADOR_CONFIG_POST_ID
+    h = wp_auth()
+    try:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts?slug={_CURADOR_CONFIG_POST_SLUG}&status=private,draft",
+            headers=h, timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            _CURADOR_CONFIG_POST_ID = r.json()[0]["id"]
+            return _CURADOR_CONFIG_POST_ID
+    except Exception as e:
+        logger.warning(f"Buscando curador config post: {e}")
+    try:
+        payload = {
+            "title": "MEBot Curador Config",
+            "slug": _CURADOR_CONFIG_POST_SLUG,
+            "status": "private",
+            "content": "{}",
+            "excerpt": "Config de horarios del curador. No tocar manualmente.",
+        }
+        r = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts",
+            headers={**h, "Content-Type": "application/json"},
+            json=payload, timeout=10,
+        )
+        if r.status_code in (200, 201):
+            _CURADOR_CONFIG_POST_ID = r.json()["id"]
+            logger.info(f"Curador config post creado: ID {_CURADOR_CONFIG_POST_ID}")
+            return _CURADOR_CONFIG_POST_ID
+    except Exception as e:
+        logger.error(f"Creando curador config post: {e}")
+    return None
+
+
+def _load_curador_config() -> dict:
+    global _CURADOR_CONFIG_CACHE
+    if _CURADOR_CONFIG_CACHE is not None:
+        return _CURADOR_CONFIG_CACHE
+    post_id = _find_or_create_curador_config_post()
+    if not post_id:
+        _CURADOR_CONFIG_CACHE = {"slots": list(_DEFAULT_CURADOR_SLOTS)}
+        return _CURADOR_CONFIG_CACHE
+    try:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit",
+            headers=wp_auth(), timeout=10,
+        )
+        if r.status_code == 200:
+            raw = r.json().get("content", {}).get("raw", "") or ""
+            clean = re.sub(r'<[^>]+>', '', raw).strip()
+            if clean and clean != "{}":
+                _CURADOR_CONFIG_CACHE = json.loads(clean)
+                return _CURADOR_CONFIG_CACHE
+    except Exception as e:
+        logger.warning(f"Load curador config: {e}")
+    _CURADOR_CONFIG_CACHE = {"slots": list(_DEFAULT_CURADOR_SLOTS)}
+    return _CURADOR_CONFIG_CACHE
+
+
+def _save_curador_config(data: dict) -> bool:
+    global _CURADOR_CONFIG_CACHE
+    _CURADOR_CONFIG_CACHE = data
+    post_id = _find_or_create_curador_config_post()
+    if not post_id:
+        return False
+    try:
+        r = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+            headers={**wp_auth(), "Content-Type": "application/json"},
+            json={"content": json.dumps(data, ensure_ascii=False)},
+            timeout=15,
+        )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.error(f"Save curador config: {e}")
         return False
 
 
@@ -7110,11 +7196,159 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
 
 
+def _reschedule_curador_jobs(job_queue, slots: list[dict]):
+    """Cancela los jobs del curador y los vuelve a crear con los slots dados."""
+    from datetime import timezone, timedelta
+    tz_arg = timezone(timedelta(hours=-3))
+    for job in job_queue.jobs():
+        if job.name and job.name.startswith("curador_"):
+            job.schedule_removal()
+    for slot in slots:
+        hh, mm = slot["hh"], slot["mm"]
+        job_queue.run_daily(
+            send_daily_curador,
+            time=dtime(hour=hh, minute=mm, tzinfo=tz_arg),
+            name=f"curador_{hh:02d}_{mm:02d}",
+        )
+    logger.info(f"Curador rescheduled: {[f'{s[\"hh\"]:02d}:{s[\"mm\"]:02d}' for s in slots]} ARG")
+
+
+def _horarios_text(slots: list[dict]) -> str:
+    slots_sorted = sorted(slots, key=lambda s: (s["hh"], s["mm"]))
+    if not slots_sorted:
+        return (
+            "⏰ *Horarios del curador*\n\n"
+            "_Sin horarios activos\\. El curador solo responde a /curador manual\\._"
+        )
+    lines = ["⏰ *Horarios del curador automático*\n"]
+    for i, s in enumerate(slots_sorted, 1):
+        lines.append(f"  {i}\\. `{s['hh']:02d}:{s['mm']:02d}` ARG")
+    lines.append(f"\n_{len(slots_sorted)} envío(s) diario(s)\\. Tocá ❌ para quitar o ➕ para agregar\\._")
+    return "\n".join(lines)
+
+
+def _horarios_keyboard(slots: list[dict]) -> InlineKeyboardMarkup:
+    slots_sorted = sorted(slots, key=lambda s: (s["hh"], s["mm"]))
+    buttons = []
+    for s in slots_sorted:
+        buttons.append([InlineKeyboardButton(
+            f"❌ {s['hh']:02d}:{s['mm']:02d} ARG",
+            callback_data=f"ch_del_{s['hh']:02d}_{s['mm']:02d}",
+        )])
+    if len(slots) < 6:
+        buttons.append([InlineKeyboardButton("➕ Agregar horario", callback_data="ch_add")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def cmd_horarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra y permite configurar los horarios del curador automático."""
+    config = await asyncio.to_thread(_load_curador_config)
+    slots = config.get("slots", [])
+    await update.message.reply_text(
+        _horarios_text(slots),
+        parse_mode="MarkdownV2",
+        reply_markup=_horarios_keyboard(slots),
+    )
+
+
+async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    config = await asyncio.to_thread(_load_curador_config)
+    slots = config.get("slots", [])
+
+    if data == "ch_add":
+        rows = []
+        row = []
+        for hh in range(6, 22):
+            row.append(InlineKeyboardButton(f"{hh:02d}h", callback_data=f"ch_hour_{hh:02d}"))
+            if len(row) == 4:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton("↩ Volver", callback_data="ch_show")])
+        await query.edit_message_text(
+            "⏰ *Elegí la hora* \\(ARG\\):",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif data.startswith("ch_hour_"):
+        hh = int(data.split("_")[2])
+        buttons = [
+            [
+                InlineKeyboardButton(f"{hh:02d}:00", callback_data=f"ch_min_{hh:02d}_00"),
+                InlineKeyboardButton(f"{hh:02d}:30", callback_data=f"ch_min_{hh:02d}_30"),
+            ],
+            [InlineKeyboardButton("↩ Volver", callback_data="ch_add")],
+        ]
+        await query.edit_message_text(
+            f"⏰ *{hh:02d}h — elegí el minuto:*",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif data.startswith("ch_min_"):
+        parts = data.split("_")
+        hh, mm = int(parts[2]), int(parts[3])
+        if not any(s["hh"] == hh and s["mm"] == mm for s in slots):
+            slots.append({"hh": hh, "mm": mm})
+            config["slots"] = slots
+            await asyncio.to_thread(_save_curador_config, config)
+            _reschedule_curador_jobs(context.application.job_queue, slots)
+        await query.edit_message_text(
+            _horarios_text(slots),
+            parse_mode="MarkdownV2",
+            reply_markup=_horarios_keyboard(slots),
+        )
+
+    elif data.startswith("ch_del_"):
+        parts = data.split("_")
+        hh, mm = int(parts[2]), int(parts[3])
+        slots = [s for s in slots if not (s["hh"] == hh and s["mm"] == mm)]
+        config["slots"] = slots
+        await asyncio.to_thread(_save_curador_config, config)
+        _reschedule_curador_jobs(context.application.job_queue, slots)
+        await query.edit_message_text(
+            _horarios_text(slots),
+            parse_mode="MarkdownV2",
+            reply_markup=_horarios_keyboard(slots),
+        )
+
+    elif data == "ch_show":
+        await query.edit_message_text(
+            _horarios_text(slots),
+            parse_mode="MarkdownV2",
+            reply_markup=_horarios_keyboard(slots),
+        )
+
+
+async def _post_init(application: Application) -> None:
+    from telegram import BotCommand
+    await application.bot.set_my_commands([
+        BotCommand("curador", "Briefing on-demand de las últimas 24h"),
+        BotCommand("horarios", "Ver y configurar horarios del curador"),
+        BotCommand("fuentes", "Gestionar fuentes RSS"),
+        BotCommand("cola", "Notas programadas pendientes"),
+        BotCommand("stats", "Estadísticas del día"),
+        BotCommand("creditos", "Estado de servicios y créditos"),
+        BotCommand("frases", "Crear y publicar frases con imagen"),
+        BotCommand("feedback_ver", "Ver lo que aprendió el curador"),
+        BotCommand("borrar", "Eliminar una nota publicada"),
+        BotCommand("editar", "Editar una nota publicada"),
+        BotCommand("comandos", "Ver todos los comandos"),
+    ])
+    logger.info("BotCommands registrados en Telegram")
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("comandos", cmd_comandos))
     app.add_handler(CommandHandler("help", cmd_comandos))
@@ -7123,6 +7357,7 @@ def main():
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("curador", cmd_curador))
+    app.add_handler(CommandHandler("horarios", cmd_horarios))
     app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
     app.add_handler(CommandHandler("cola", cmd_cola))
     app.add_handler(CommandHandler("creditos", cmd_creditos))
@@ -7137,6 +7372,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^cf_"))
+    app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
@@ -7146,14 +7382,10 @@ def main():
     tz_arg = timezone(timedelta(hours=-3))
     job_queue = app.job_queue
 
-    # Curador: 3 briefings diarios en Argentina
-    for hh, mm, name in [(7, 30, "curador_07_30"), (11, 30, "curador_11_30"), (17, 30, "curador_17_30")]:
-        job_queue.run_daily(
-            send_daily_curador,
-            time=dtime(hour=hh, minute=mm, tzinfo=tz_arg),
-            name=name,
-        )
-    logger.info("Curador programado 3x por día: 07:30, 11:30 y 17:30 ARG")
+    # Curador: cargar horarios desde config persistida (o defaults si no existe)
+    curador_cfg = _load_curador_config()
+    curador_slots = curador_cfg.get("slots", _DEFAULT_CURADOR_SLOTS)
+    _reschedule_curador_jobs(job_queue, curador_slots)
 
     # Reporte de stats a las 23:00 ARG
     job_queue.run_daily(
