@@ -3448,16 +3448,12 @@ async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         domain, d = found
-        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}.get(
-            d.get("hilo_tipico", 2), "?"
-        )
         msg = (
             f"📡 *{md_escape(d.get('name', domain))}* "
             f"`({md_escape(domain)})`\n\n"
             f"*Tipo:* {md_escape(d.get('tipo', '?'))}\n"
-            f"*Hilo típico:* {d.get('hilo_tipico', '?')} — {hilo_name}\n"
             f"*Distancia editorial:* {d.get('distancia_editorial', '?')}/10 "
-            f"(1=alineado, 10=opuesto)\n"
+            f"(1=alineado ENAC, 10=opuesto)\n"
             f"*Confiabilidad:* {d.get('confiabilidad', '?')}/10\n\n"
             f"*Orientación:*\n_{md_escape(d.get('orientacion', '?'))}_\n\n"
             f"*Notas:*\n{md_escape(d.get('notas', '-'))}\n"
@@ -3468,37 +3464,25 @@ async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # Lista completa, agrupada por hilo típico
+    # Lista completa, ordenada por distancia editorial (más afines primero)
     if not sources:
         await update.message.reply_text("No hay fuentes registradas.")
         return
 
-    grouped = {1: [], 2: [], 3: []}
-    for domain, d in sources.items():
-        h = d.get("hilo_tipico", 2)
-        grouped.setdefault(h, []).append((domain, d))
-
-    hilo_labels = {
-        1: "1 — 📋 Informarse es respetarse",
-        2: "2 — 🗣️ La voz de las pymes",
-        3: "3 — 💭 Opinión / Análisis",
-    }
+    entries = sorted(
+        sources.items(),
+        key=lambda x: x[1].get("distancia_editorial", 99)
+    )
 
     parts = [f"📡 *Repositorio de fuentes* ({len(sources)} medios)\n"]
-    for hilo in (1, 2, 3):
-        entries = grouped.get(hilo, [])
-        if not entries:
-            continue
-        parts.append(f"\n*Hilo {hilo_labels[hilo]}*")
-        # Ordenar por distancia editorial (más afines primero)
-        entries.sort(key=lambda x: x[1].get("distancia_editorial", 99))
-        for domain, d in entries:
-            dist = d.get("distancia_editorial", "?")
-            stars = "⭐" * (11 - dist) if isinstance(dist, int) else ""
-            parts.append(
-                f"• *{md_escape(d.get('name', domain))}* "
-                f"`{md_escape(domain)}` — dist {dist}/10 {stars[:5]}"
-            )
+    for domain, d in entries:
+        dist = d.get("distancia_editorial", "?")
+        tipo = d.get("tipo", "")
+        tipo_str = f" · {md_escape(tipo)}" if tipo else ""
+        parts.append(
+            f"• *{md_escape(d.get('name', domain))}* "
+            f"`{md_escape(domain)}`{tipo_str} — dist {dist}/10"
+        )
 
     parts.append("\n_Usá_ `/fuentes <dominio>` _para ver detalle._")
     kb = InlineKeyboardMarkup([[
@@ -3853,14 +3837,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ Error al guardar en el feedback store.")
             return
         # Mostrar resumen de lo guardado
-        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}.get(
-            source_data.get("hilo_tipico", 2), "?"
-        )
         await msg.edit_text(
             f"✅ *Fuente agregada al repositorio*\n\n"
             f"*{md_escape(source_data.get('name', domain))}* `({md_escape(domain)})`\n\n"
             f"*Tipo:* {md_escape(source_data.get('tipo', '?'))}\n"
-            f"*Hilo típico:* {source_data.get('hilo_tipico', '?')} — {hilo_name}\n"
             f"*Distancia editorial:* {source_data.get('distancia_editorial', '?')}/10\n"
             f"*Confiabilidad:* {source_data.get('confiabilidad', '?')}/10\n\n"
             f"*Orientación:*\n_{md_escape(source_data.get('orientacion', '?'))}_\n\n"
@@ -6447,6 +6427,10 @@ def curar_noticias(max_results: int = 15, lookback_hours: int = 24) -> list:
                 (entry.get("summary") or entry.get("description") or "")
             ).strip()
             link = (entry.get("link") or "").strip()
+            # Categorías/tags del RSS (feedparser las devuelve en entry.tags)
+            rss_cats = " ".join(
+                t.get("term", "") for t in (entry.get("tags") or [])
+            ).strip()
 
             if not title or not link:
                 continue
@@ -6462,25 +6446,25 @@ def curar_noticias(max_results: int = 15, lookback_hours: int = 24) -> list:
             results.append({
                 "title":       title,
                 "summary":     summary[:300],
+                "rss_cats":    rss_cats,
                 "link":        link,
                 "published":   pub_dt,
                 "score":       score,
                 "source_name": meta.get("name", domain),
                 "domain":      domain,
                 "distancia":   meta.get("distancia_editorial", 5),
-                "hilo_tipico": meta.get("hilo_tipico", 2),
             })
 
     # Dedupe (Jaccard + embeddings semánticos si hay OPENAI_API_KEY)
     unique = _dedupe_articles(results)
     unique.sort(key=lambda x: -x["score"])
 
-    # Asignar hilo a cada nota (detect_hilo + feedback_hilo_hints)
+    # Asignar hilo a cada nota por contenido (título + categorías RSS + summary)
     for art in unique:
         fake_data = {
             "title":   art["title"],
-            "text":    art["summary"],
-            "excerpt": art["summary"],
+            "text":    art["rss_cats"] + " " + art["summary"],
+            "excerpt": art["rss_cats"] + " " + art["summary"],
         }
         base_hilo = detect_hilo(fake_data)
         art["hilo"] = _apply_feedback_hilo(art["title"], art["summary"], base_hilo)
