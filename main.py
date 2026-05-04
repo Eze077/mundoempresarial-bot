@@ -40,6 +40,26 @@ TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
+_ENV_FILE = "/etc/mundoempresarial-bot.env"
+
+def _persist_admin_chat_id(chat_id: str):
+    """Guarda ADMIN_CHAT_ID en el env file para sobrevivir reinicios."""
+    global ADMIN_CHAT_ID
+    ADMIN_CHAT_ID = chat_id
+    try:
+        try:
+            with open(_ENV_FILE, "r") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            lines = []
+        new_lines = [l for l in lines if not l.startswith("ADMIN_CHAT_ID=")]
+        new_lines.append(f"ADMIN_CHAT_ID={chat_id}\n")
+        with open(_ENV_FILE, "w") as f:
+            f.writelines(new_lines)
+        logger.info(f"ADMIN_CHAT_ID persistido: {chat_id}")
+    except Exception as e:
+        logger.warning(f"No se pudo persistir ADMIN_CHAT_ID: {e}")
+
 # OpenAI API key (opcional, solo para fallback de transcripción Whisper)
 OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
 
@@ -2737,6 +2757,8 @@ def _build_commands_text() -> str:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_CHAT_ID:
+        _persist_admin_chat_id(str(update.message.chat_id))
     await update.message.reply_text(_build_commands_text(), parse_mode="Markdown")
 
 
@@ -3780,7 +3802,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Guardar chat_id del operador para reportes
     if not ADMIN_CHAT_ID:
-        ADMIN_CHAT_ID = str(update.message.chat_id)
+        _persist_admin_chat_id(str(update.message.chat_id))
 
     # ── Si el bot espera hashtags nuevos ──
     if context.user_data.get("waiting_for_hashtags"):
