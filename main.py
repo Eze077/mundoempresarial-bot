@@ -7210,7 +7210,8 @@ def _reschedule_curador_jobs(job_queue, slots: list[dict]):
             time=dtime(hour=hh, minute=mm, tzinfo=tz_arg),
             name=f"curador_{hh:02d}_{mm:02d}",
         )
-    logger.info(f"Curador rescheduled: {[f'{s[\"hh\"]:02d}:{s[\"mm\"]:02d}' for s in slots]} ARG")
+    slots_str = ", ".join(f"{s['hh']:02d}:{s['mm']:02d}" for s in slots)
+    logger.info(f"Curador rescheduled: [{slots_str}] ARG")
 
 
 def _horarios_text(slots: list[dict]) -> str:
