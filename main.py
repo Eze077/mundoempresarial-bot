@@ -4234,6 +4234,24 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Check de duplicados: si el slug de la URL ya existe en WP, avisar y salir
+    try:
+        clean_url = url.split("?")[0].rstrip("/")
+        candidate_slug = clean_url.split("/")[-1]
+        if candidate_slug:
+            dup_r = requests.get(
+                f"{WP_URL}/wp-json/wp/v2/posts?slug={candidate_slug}&_fields=id,link",
+                headers=wp_auth(), timeout=8
+            )
+            if dup_r.status_code == 200 and dup_r.json():
+                dup = dup_r.json()[0]
+                await update.message.reply_text(
+                    f"⚠️ Esta nota ya está publicada:\n{dup['link']}\n\nSi querés editarla usá /editar."
+                )
+                return
+    except Exception:
+        pass  # Si falla el check, seguir normalmente
+
     msg = await update.message.reply_text(
         "🎬 Bajando transcripción de YouTube..." if kind == "youtube"
         else "Analizando la nota..."
