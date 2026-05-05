@@ -1398,17 +1398,12 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
             "Authorization": f"Bearer {LINKEDIN_TOKEN}",
             "Content-Type": "application/json",
             "LinkedIn-Version": "202503",
-            "X-Restli-Protocol-Version": "2.0.0",
         }
         payload = {
             "author": author_urn,
             "commentary": commentary,
             "visibility": "PUBLIC",
-            "distribution": {
-                "feedDistribution": "MAIN_FEED",
-                "targetEntities": [],
-                "thirdPartyDistributionChannels": [],
-            },
+            "distribution": {"feedDistribution": "MAIN_FEED"},
             "content": {
                 "article": {
                     "source": tracked_url,
