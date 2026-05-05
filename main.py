@@ -37,6 +37,13 @@ TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_A
 TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER_ACCESS_SECRET", "")
 
 TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
+
+LINKEDIN_TOKEN     = os.environ.get("LINKEDIN_TOKEN", "")
+LINKEDIN_CLIENT_ID = os.environ.get("LINKEDIN_CLIENT_ID", "77jyyt3btvsjwv")
+LINKEDIN_ORG_ID    = os.environ.get("LINKEDIN_ORG_ID", "67751917")
+LINKEDIN_MEMBER_ID = os.environ.get("LINKEDIN_MEMBER_ID", "")
+_LAST_LINKEDIN_ERROR = ""
+_LINKEDIN_MEMBER_URN_CACHE: str | None = None
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
@@ -1066,10 +1073,11 @@ def parse_social_meta(content: str) -> dict:
 # ── UTM tracking ──────────────────────────────────────────────────────────────
 
 UTM_CONFIG = {
-    "telegram":  ("social", "canal_empresarialarg"),
-    "twitter":   ("social", "organico"),
-    "whatsapp":  ("social", "compartir"),
-    "newsletter": ("email", "semanal"),
+    "telegram":   ("social", "canal_empresarialarg"),
+    "twitter":    ("social", "organico"),
+    "whatsapp":   ("social", "compartir"),
+    "newsletter": ("email",  "semanal"),
+    "linkedin":   ("social", "organico"),
 }
 
 
@@ -1343,6 +1351,86 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
     except Exception as e:
         _LAST_TWITTER_ERROR = f"{type(e).__name__}: {e}"
         logger.error(f"post_tweet exception: {e}")
+        return None
+
+
+def _get_linkedin_author_urn() -> str:
+    """Devuelve el URN del author: persona si LINKEDIN_MEMBER_ID está seteado, organización si no."""
+    global _LINKEDIN_MEMBER_URN_CACHE
+    if LINKEDIN_MEMBER_ID:
+        return f"urn:li:person:{LINKEDIN_MEMBER_ID}"
+    if _LINKEDIN_MEMBER_URN_CACHE:
+        return _LINKEDIN_MEMBER_URN_CACHE
+    # Intentar auto-detección vía /v2/me
+    if LINKEDIN_TOKEN:
+        try:
+            r = requests.get(
+                "https://api.linkedin.com/v2/me",
+                headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "LinkedIn-Version": "202503"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                mid = r.json().get("id", "")
+                if mid:
+                    _LINKEDIN_MEMBER_URN_CACHE = f"urn:li:person:{mid}"
+                    logger.info(f"LinkedIn member URN auto-detectado: {_LINKEDIN_MEMBER_URN_CACHE}")
+                    return _LINKEDIN_MEMBER_URN_CACHE
+        except Exception:
+            pass
+    return f"urn:li:organization:{LINKEDIN_ORG_ID}"
+
+
+def post_linkedin(data: dict, wp_url: str) -> str | None:
+    """Publica en LinkedIn. Usa perfil personal si LINKEDIN_MEMBER_ID está seteado, organización si no."""
+    global _LAST_LINKEDIN_ERROR
+    _LAST_LINKEDIN_ERROR = ""
+    if not LINKEDIN_TOKEN:
+        _LAST_LINKEDIN_ERROR = "LINKEDIN_TOKEN no configurado"
+        return None
+    try:
+        tracked_url = utm_url(wp_url, "linkedin")
+        title = (data.get("title") or "").strip()
+        excerpt = (data.get("excerpt") or data.get("rewritten_excerpt") or "").strip()[:300]
+        commentary = f"{title}\n\n{excerpt}\n\n🔗 {tracked_url}" if excerpt else f"{title}\n\n🔗 {tracked_url}"
+        author_urn = _get_linkedin_author_urn()
+
+        h = {
+            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+            "Content-Type": "application/json",
+            "LinkedIn-Version": "202503",
+            "X-Restli-Protocol-Version": "2.0.0",
+        }
+        payload = {
+            "author": author_urn,
+            "commentary": commentary,
+            "visibility": "PUBLIC",
+            "distribution": {
+                "feedDistribution": "MAIN_FEED",
+                "targetEntities": [],
+                "thirdPartyDistributionChannels": [],
+            },
+            "content": {
+                "article": {
+                    "source": tracked_url,
+                    "title": title,
+                    "description": excerpt,
+                }
+            },
+            "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
+        }
+        r = requests.post("https://api.linkedin.com/rest/posts", headers=h, json=payload, timeout=15)
+        if r.status_code in (200, 201):
+            post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
+            post_url_li = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else tracked_url
+            logger.info(f"LinkedIn post OK ({author_urn}): {post_url_li}")
+            return post_url_li
+        _LAST_LINKEDIN_ERROR = f"HTTP {r.status_code}: {r.text[:200]}"
+        logger.error(f"LinkedIn post_linkedin falló: {_LAST_LINKEDIN_ERROR}")
+        return None
+    except Exception as e:
+        _LAST_LINKEDIN_ERROR = f"{type(e).__name__}: {e}"
+        logger.error(f"post_linkedin exception: {e}")
         return None
 
 
@@ -3648,19 +3736,21 @@ def _eco_preview_text(eco: dict) -> str:
     bajada = get_excerpt(d)[:180]
     tw = "✅" if eco.get("tw_on", True) else "❌"
     tg = "✅" if eco.get("tg_on", True) else "❌"
+    li = "✅" if eco.get("li_on", False) else "❌"
     alt_note = " _(editado)_" if eco.get("alt_title") else ""
     ex_note  = " _(editada)_" if eco.get("alt_bajada") else ""
     return (
         f"📣 *ECO — Configuración*\n\n"
         f"*Título:* {md_escape(title)}{alt_note}\n"
         f"*Bajada:* {md_escape(bajada)}{ex_note}\n\n"
-        f"{tw} Twitter  {tg} Canal TG"
+        f"{tw} Twitter  {tg} Canal TG  {li} LinkedIn"
     )
 
 
 def _build_eco_kb(eco: dict) -> InlineKeyboardMarkup:
     tw_label = "✅ Twitter" if eco.get("tw_on", True) else "❌ Twitter"
     tg_label = "✅ Canal TG" if eco.get("tg_on", True) else "❌ Canal TG"
+    li_label = "✅ LinkedIn" if eco.get("li_on", False) else "❌ LinkedIn"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✏️ Título alt.", callback_data="eco_edit_title"),
@@ -3669,6 +3759,9 @@ def _build_eco_kb(eco: dict) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(tw_label, callback_data="eco_toggle_tw"),
             InlineKeyboardButton(tg_label, callback_data="eco_toggle_tg"),
+        ],
+        [
+            InlineKeyboardButton(li_label, callback_data="eco_toggle_li"),
         ],
         [
             InlineKeyboardButton("⏰ Programar eco", callback_data="eco_schedule"),
@@ -3728,6 +3821,7 @@ def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
         tw_on   = ud.get("tw_on", True),
         tg_on   = ud.get("tg_on", True),
         wa_on   = ud.get("wa_on", False),
+        li_on   = ud.get("li_on", False),
         dest_on = ud.get("dest_on", False),
         orig_on = ud.get("orig_title_on", False),
         orig_excerpt_on = ud.get("orig_excerpt_on", False),
@@ -3735,10 +3829,11 @@ def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
     )
 
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False, eco_on: bool = False) -> InlineKeyboardMarkup:
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, li_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False, eco_on: bool = False) -> InlineKeyboardMarkup:
     tw_label     = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label     = "✅ Canal TG" if tg_on else "❌ Canal TG"
     wa_label     = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
+    li_label     = "✅ LinkedIn" if li_on else "❌ LinkedIn"
     dest_label   = "⭐ Destacado" if dest_on else "☆ Destacado"
     orig_label   = "✅ Titulo original" if orig_on else "❌ Titulo original"
     orig_ex_label = "✅ Bajada original" if orig_excerpt_on else "❌ Bajada original"
@@ -3750,6 +3845,9 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
         ],
         [
             InlineKeyboardButton(wa_label, callback_data="toggle_wa"),
+            InlineKeyboardButton(li_label, callback_data="toggle_li"),
+        ],
+        [
             InlineKeyboardButton(dest_label, callback_data="toggle_dest"),
         ],
         [
@@ -4310,6 +4408,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("tw_on", True)
     context.user_data.setdefault("tg_on", True)
     context.user_data.setdefault("wa_on", False)
+    context.user_data.setdefault("li_on", False)
     context.user_data.setdefault("dest_on", False)
     context.user_data.setdefault("orig_title_on", False)
     context.user_data.setdefault("orig_excerpt_on", False)
@@ -4406,6 +4505,7 @@ async def _do_schedule(query, context, data, target):
         "tw_on":           context.user_data.get("tw_on", True),
         "tg_on":           context.user_data.get("tg_on", True),
         "wa_on":           context.user_data.get("wa_on", False),
+        "li_on":           context.user_data.get("li_on", False),
         "chat_id":         query.message.chat_id,
         "custom_hashtags": custom_hashtags,
     }
@@ -4443,6 +4543,7 @@ async def _do_schedule(query, context, data, target):
             "alt_bajada": None,
             "tw_on":      True,
             "tg_on":      True,
+            "li_on":      False,
         }
         context.user_data["eco"] = eco
         await query.message.reply_text(
@@ -4498,6 +4599,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_wa":
         context.user_data["wa_on"] = not context.user_data.get("wa_on", False)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
+        return
+
+    if query.data == "toggle_li":
+        context.user_data["li_on"] = not context.user_data.get("li_on", False)
         await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
@@ -4902,6 +5008,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
             return
 
+        if query.data == "eco_toggle_li":
+            eco["li_on"] = not eco.get("li_on", False)
+            context.user_data["eco"] = eco
+            await query.edit_message_text(_eco_preview_text(eco), parse_mode="Markdown", reply_markup=_build_eco_kb(eco))
+            return
+
         if query.data == "eco_restore":
             eco["alt_title"] = None
             eco["alt_bajada"] = None
@@ -4928,6 +5040,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     err = _LAST_TWITTER_ERROR or "error desconocido"
                     results.append(f"❌ Twitter: {err[:100]}")
+            if eco.get("li_on", False):
+                li_url = await asyncio.to_thread(post_linkedin, eco_d, eco["wp_url"])
+                if li_url:
+                    results.append(f"✅ LinkedIn: {li_url}")
+                else:
+                    err = _LAST_LINKEDIN_ERROR or "error desconocido"
+                    results.append(f"❌ LinkedIn: {err[:100]}")
             context.user_data.pop("eco", None)
             await query.edit_message_text("\n".join(results), parse_mode="Markdown")
             return
@@ -5203,6 +5322,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tw_on = context.user_data.get("tw_on", True)
         tg_on = context.user_data.get("tg_on", True)
         wa_on = context.user_data.get("wa_on", False)
+        li_on = context.user_data.get("li_on", False)
 
         results = [f"✅ Publicado en WordPress{suffix}!\n{md_escape(post_url)}"]
 
@@ -5251,6 +5371,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
             )
 
+        if li_on:
+            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
+            if li_url:
+                await query.message.reply_text(f"✅ LinkedIn: {li_url}")
+            else:
+                err = _LAST_LINKEDIN_ERROR or "error desconocido"
+                await query.message.reply_text(f"❌ LinkedIn: {err[:150]}")
+
         # ECO: si está activado, abrir menú de configuración del eco
         if context.user_data.get("eco_on"):
             eco = {
@@ -5261,6 +5389,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "alt_bajada": None,
                 "tw_on":     True,
                 "tg_on":     True,
+                "li_on":     False,
             }
             context.user_data["eco"] = eco
             await query.message.reply_text(
@@ -6191,6 +6320,7 @@ def _add_scheduled_job(post_id: int, post_url: str, run_at,
         "tw_on":           user_data.get("tw_on", True),
         "tg_on":           user_data.get("tg_on", True),
         "wa_on":           user_data.get("wa_on", False),
+        "li_on":           user_data.get("li_on", False),
         "custom_hashtags": user_data.get("pre_sched_hashtags"),
         "post_content":    "",
     })
@@ -6215,6 +6345,7 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
     chat_id = job_data.get("chat_id")
     tg_on = job_data.get("tg_on", True)
     tw_on = job_data.get("tw_on", True)
+    li_on = job_data.get("li_on", False)
 
     results = [f"🔔 Nota programada publicada: {post_url}"]
 
@@ -6224,7 +6355,7 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
         tg_msg_id = await publish_to_channel(context.bot, data, post_url)
         results.append("✅ Canal TG" if tg_msg_id else "❌ Canal TG falló")
 
-    # Twitter: auto-tweet con los HT ya confirmados al programar
+    # Twitter
     tweet_id = ""
     if tw_on:
         custom_ht = job_data.get("custom_hashtags")
@@ -6235,6 +6366,15 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
         else:
             err = _LAST_TWITTER_ERROR or "error desconocido"
             results.append(f"❌ Twitter falló: {err[:120]}")
+
+    # LinkedIn
+    if li_on:
+        li_url = await asyncio.to_thread(post_linkedin, data, post_url)
+        if li_url:
+            results.append(f"✅ LinkedIn: {li_url}")
+        else:
+            err = _LAST_LINKEDIN_ERROR or "error desconocido"
+            results.append(f"❌ LinkedIn: {err[:120]}")
 
     # Persistir tweet_id y tg_msg_id en el post
     if (tweet_id or tg_msg_id) and post_id:
@@ -6294,6 +6434,13 @@ async def _fire_eco_social(context: ContextTypes.DEFAULT_TYPE):
         else:
             err = _LAST_TWITTER_ERROR or "error desconocido"
             results.append(f"❌ Twitter: {err[:100]}")
+    if eco.get("li_on", False):
+        li_url = await asyncio.to_thread(post_linkedin, eco_d, eco.get("wp_url", ""))
+        if li_url:
+            results.append(f"✅ LinkedIn: {li_url}")
+        else:
+            err = _LAST_LINKEDIN_ERROR or "error desconocido"
+            results.append(f"❌ LinkedIn: {err[:100]}")
     if chat_id:
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results), parse_mode="Markdown")
 
@@ -6340,6 +6487,7 @@ def _restore_scheduled_jobs(app):
                     "tw_on":           job.get("tw_on", True),
                     "tg_on":           job.get("tg_on", True),
                     "wa_on":           job.get("wa_on", False),
+                    "li_on":           job.get("li_on", False),
                     "custom_hashtags": job.get("custom_hashtags"),
                     "chat_id":         int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None,
                 },
