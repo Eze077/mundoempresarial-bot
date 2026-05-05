@@ -1020,6 +1020,19 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
     Format: <!-- mebot:tweet_id=X;tg_msg=Y -->
     """
     try:
+        # Siempre fetchear contenido fresco de WP para no sobreescribir con versión cacheada/truncada
+        try:
+            h = wp_auth()
+            r = requests.get(
+                f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit",
+                headers=h, timeout=10
+            )
+            if r.status_code == 200:
+                p = r.json()
+                content = p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", "") or content
+        except Exception as fetch_err:
+            logger.warning(f"append_social_meta: no se pudo fetchear contenido fresco ({fetch_err}), usando el cacheado")
+
         # Remover comentarios previos si existen
         clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
         meta_parts = []
@@ -6161,7 +6174,7 @@ def _add_scheduled_job(post_id: int, post_url: str, run_at,
         "tg_on":           user_data.get("tg_on", True),
         "wa_on":           user_data.get("wa_on", False),
         "custom_hashtags": user_data.get("pre_sched_hashtags"),
-        "post_content":    post_content[:500],
+        "post_content":    "",
     })
     _save_feedback(fb)
 
