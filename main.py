@@ -1361,18 +1361,18 @@ def _get_linkedin_author_urn() -> str:
         return f"urn:li:person:{LINKEDIN_MEMBER_ID}"
     if _LINKEDIN_MEMBER_URN_CACHE:
         return _LINKEDIN_MEMBER_URN_CACHE
-    # Intentar auto-detección vía /v2/me
+    # Auto-detección vía OIDC userinfo (requiere scope openid+profile)
     if LINKEDIN_TOKEN:
         try:
             r = requests.get(
-                "https://api.linkedin.com/v2/me",
-                headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "LinkedIn-Version": "202503"},
+                "https://api.linkedin.com/v2/userinfo",
+                headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}"},
                 timeout=8,
             )
             if r.status_code == 200:
-                mid = r.json().get("id", "")
-                if mid:
-                    _LINKEDIN_MEMBER_URN_CACHE = f"urn:li:person:{mid}"
+                sub = r.json().get("sub", "")
+                if sub:
+                    _LINKEDIN_MEMBER_URN_CACHE = f"urn:li:person:{sub}"
                     logger.info(f"LinkedIn member URN auto-detectado: {_LINKEDIN_MEMBER_URN_CACHE}")
                     return _LINKEDIN_MEMBER_URN_CACHE
         except Exception:
