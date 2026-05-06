@@ -44,6 +44,7 @@ LINKEDIN_ORG_ID    = os.environ.get("LINKEDIN_ORG_ID", "67751917")
 LINKEDIN_MEMBER_ID = os.environ.get("LINKEDIN_MEMBER_ID", "")
 _LAST_LINKEDIN_ERROR = ""
 _LINKEDIN_MEMBER_URN_CACHE: str | None = None
+_LAST_WP_ERROR = ""
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
@@ -1012,11 +1013,14 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
         payload["featured_media"] = image_id
 
     h = {**wp_auth(), "Content-Type": "application/json"}
+    global _LAST_WP_ERROR
+    _LAST_WP_ERROR = ""
     r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
     if r.status_code == 201:
         body = r.json()
         return {"link": body.get("link"), "id": body.get("id"), "content": content}
-    logger.error(f"WP {r.status_code}: {r.text[:400]}")
+    _LAST_WP_ERROR = f"HTTP {r.status_code}: {r.text[:300]}"
+    logger.error(f"WP publish falló: {_LAST_WP_ERROR}")
     return None
 
 
@@ -5412,7 +5416,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=_build_eco_kb(eco),
             )
     else:
-        await query.edit_message_text("Error al publicar. Revisa los logs en Railway.")
+        err_detail = _LAST_WP_ERROR or "sin detalle"
+        await query.edit_message_text(f"❌ Error al publicar en WordPress.\n`{err_detail[:300]}`", parse_mode="Markdown")
 
 
 # ── Borrar nota ───────────────────────────────────────────────────────────────
@@ -5698,7 +5703,7 @@ async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown",
         )
     else:
-        await query.edit_message_text("Error al borrar. Revisa los logs en Railway.")
+        await query.edit_message_text("Error al borrar. Revisa los logs del VPS.")
 
 
 # ── Editar nota ───────────────────────────────────────────────────────────────
