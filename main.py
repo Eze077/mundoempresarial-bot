@@ -1921,7 +1921,7 @@ def _transcript_via_whisper(video_id: str) -> str:
     return ""
 
 
-def _transcript_via_ytdlp(video_id: str) -> str:
+def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
     """
     Fallback cuando youtube-transcript-api falla. yt-dlp accede a la API
     interna de YouTube (innertube) y suele conseguir subs auto-generados
@@ -2003,7 +2003,7 @@ def _transcript_via_ytdlp(video_id: str) -> str:
             if r.status_code != 200:
                 continue
             text = _parse_vtt(r.text)
-            if text and len(text) > 200:
+            if text and len(text) >= min_len:
                 logger.info(f"yt-dlp transcript OK via {source} ({lang}): {len(text)} chars")
                 if source.endswith("-en"):
                     text += "\n[Nota: transcripción en inglés, revisar traducción]"
@@ -2013,9 +2013,9 @@ def _transcript_via_ytdlp(video_id: str) -> str:
             logger.warning(f"fetch VTT {lang}/{source}: {type(e).__name__}: {e}")
             continue
     logger.warning("yt-dlp: ningún candidato devolvió texto válido")
-    # Tier 4 interno: descripción del video (suele tener el contenido clave)
+    # Fallback interno: descripción del video (suele tener el contenido clave)
     desc = (info.get("description") or "").strip()
-    if desc and len(desc) >= 200:
+    if desc and len(desc) >= min_len:
         logger.info(f"yt-dlp: usando descripción del video ({len(desc)} chars) como fallback")
         return f"[Descripción del canal]\n{desc}"
     return ""
@@ -2047,6 +2047,10 @@ def scrape_youtube(url: str) -> dict:
             thumbnail = meta.get("thumbnail_url", thumbnail)
     except Exception as e:
         logger.warning(f"YouTube oEmbed falló: {e}")
+
+    # Shorts tienen mucho menos texto — umbral más bajo
+    is_short = "/shorts/" in url.lower()
+    min_len = 30 if is_short else 200
 
     # Transcripción: 1) youtube-transcript-api  2) yt-dlp fallback  3) Whisper
     transcript_text = ""
@@ -2081,33 +2085,33 @@ def scrape_youtube(url: str) -> dict:
         logger.warning("youtube-transcript-api no está instalado")
 
     tier_status = {"t1_api": "no_text", "t2_ytdlp": "skipped", "t3_whisper": "skipped"}
-    if transcript_text and len(transcript_text) >= 200:
+    if transcript_text and len(transcript_text) >= min_len:
         tier_status["t1_api"] = "ok"
 
     # Fallback 2: yt-dlp (subs oficiales / auto-generados via innertube)
-    if not transcript_text or len(transcript_text) < 200:
+    if not transcript_text or len(transcript_text) < min_len:
         logger.info("Intentando fallback con yt-dlp...")
         try:
-            transcript_text = _transcript_via_ytdlp(video_id)
-            tier_status["t2_ytdlp"] = "ok" if transcript_text and len(transcript_text) >= 200 else "no_text"
+            transcript_text = _transcript_via_ytdlp(video_id, min_len=min_len)
+            tier_status["t2_ytdlp"] = "ok" if transcript_text and len(transcript_text) >= min_len else "no_text"
         except Exception as e:
             tier_status["t2_ytdlp"] = f"err: {type(e).__name__}"
             logger.error(f"yt-dlp tier 2 falló: {e}")
 
     # Fallback 3: Whisper (baja audio y transcribe, $0.006/min)
-    if not transcript_text or len(transcript_text) < 200:
+    if not transcript_text or len(transcript_text) < min_len:
         if not OPENAI_API_KEY:
             tier_status["t3_whisper"] = "no_api_key"
         else:
             logger.info("Intentando fallback con Whisper API...")
             try:
                 transcript_text = _transcript_via_whisper(video_id)
-                tier_status["t3_whisper"] = "ok" if transcript_text and len(transcript_text) >= 200 else "no_text"
+                tier_status["t3_whisper"] = "ok" if transcript_text and len(transcript_text) >= min_len else "no_text"
             except Exception as e:
                 tier_status["t3_whisper"] = f"err: {type(e).__name__}"
                 logger.error(f"Whisper tier 3 falló: {e}")
 
-    if not transcript_text or len(transcript_text) < 200:
+    if not transcript_text or len(transcript_text) < min_len:
         status_str = ", ".join(f"{k}={v}" for k, v in tier_status.items())
         logger.error(f"Todos los fallbacks YouTube fallaron: {status_str}")
         raise RuntimeError(
