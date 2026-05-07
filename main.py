@@ -7588,8 +7588,66 @@ async def cmd_set_frases_base(update: Update, context: ContextTypes.DEFAULT_TYPE
 CAT_FRASES = 1838  # Categoría "Frases" en WordPress
 
 
+def _gpt_frase_body(frase: str) -> str:
+    """Genera 4 párrafos de reflexión empresarial para una frase inspiradora via GPT."""
+    if not OPENAI_API_KEY:
+        return ""
+    prompt = (
+        "Sos el editor de MundoEmpresarial.ar, medio de noticias económicas para pymes y "
+        "empresarios argentinos. Esta nota pertenece a la sección de frases inspiradoras.\n\n"
+        f'La frase a desarrollar es: "{frase}"\n\n'
+        "Escribí exactamente 4 párrafos de 80-100 palabras cada uno:\n"
+        "1. Significado de la frase en el contexto empresarial argentino actual.\n"
+        "2. Cómo aplica en la práctica para pymes, con ejemplos concretos.\n"
+        "3. Relación con los desafíos actuales de los empresarios (inflación, mercado, competencia).\n"
+        "4. Reflexión final con llamado a la acción para el lector empresario.\n\n"
+        "Reglas: español rioplatense (vos/ustedes). Sin citar la frase textualmente más de una vez. "
+        "Sin encabezados ni HTML. Párrafos separados por línea en blanco. "
+        "Máximo 120 palabras por párrafo. Solo el texto, sin explicaciones previas."
+    )
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5},
+            timeout=60,
+        )
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"_gpt_frase_body: {e}")
+    return ""
+
+
+def _format_frase_content(frase: str, kw: str, body_text: str = "") -> str:
+    """Genera el HTML completo de una nota de frase respetando los criterios SEO del manual."""
+    parts = []
+    # Lead en negrita con keyword
+    parts.append(f"<p><strong>{frase}</strong></p>")
+    # H2 con keyword
+    parts.append(f"<h2>{kw.capitalize()}: reflexión para empresarios y pymes</h2>")
+    # Cuerpo: párrafos generados por GPT o fallback genérico
+    if body_text:
+        for para in body_text.split("\n\n"):
+            para = para.strip()
+            if para:
+                parts.append(f"<p>{para}</p>")
+    else:
+        parts.append(
+            f"<p>Esta frase invita a los empresarios y dueños de pymes a reflexionar sobre "
+            f"el rol del {kw} en el crecimiento de sus negocios. En el contexto económico argentino, "
+            f"donde la incertidumbre y la inflación marcan el día a día, las palabras que orientan "
+            f"la acción tienen un valor especial.</p>"
+        )
+    # Segundo H2 (Rank Math: keyword en subheadings)
+    parts.append(f"<h2>Por qué el {kw} importa en tu empresa</h2>")
+    # Pyme box
+    parts.append(pyme_box(frase, frase))
+    return "\n".join(parts)
+
+
 def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
-    """Sube imagen y crea post en WordPress. Si scheduled_for es datetime, crea status=future."""
+    """Sube imagen y crea post en WordPress con SEO completo (Rank Math)."""
     h = wp_auth()
     img_resp = requests.post(
         f"{WP_URL}/wp-json/wp/v2/media",
@@ -7597,15 +7655,47 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
                  "Content-Type": "image/png"},
         data=img_bytes, timeout=30,
     )
-    img_id = img_resp.json().get("id") if img_resp.status_code == 201 else None
+    img_id  = None
+    img_url = ""
+    if img_resp.status_code == 201:
+        img_id  = img_resp.json().get("id")
+        img_url = img_resp.json().get("source_url", "")
 
-    slug = url_slug(frase)[:80]
+    kw        = focus_keyword(frase)
+    seo_title = seo_title(frase)   # max 60 chars, corte inteligente
+    desc      = frase[:155] if len(frase) <= 155 else frase[:152] + "..."
+    slug      = url_slug(frase)[:75]
+    alt_text  = f"{kw} - {seo_title}"
+
+    # Actualizar alt de la imagen con el keyword
+    if img_id and kw:
+        try:
+            requests.post(
+                f"{WP_URL}/wp-json/wp/v2/media/{img_id}",
+                headers={**h, "Content-Type": "application/json"},
+                json={"alt_text": alt_text, "title": seo_title},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    body_text = _gpt_frase_body(frase)
+    content   = _format_frase_content(frase, kw, body_text)
+
     payload = {
-        "title":          frase,
-        "content":        "",
+        "title":          seo_title,
+        "content":        content,
+        "excerpt":        desc,
         "slug":           slug,
         "categories":     [CAT_FRASES],
         "featured_media": img_id or 0,
+        "meta": {
+            "rank_math_title":            seo_title,
+            "rank_math_description":      desc,
+            "rank_math_focus_keyword":    kw,
+            "rank_math_robots":           ["index", "follow"],
+            "rank_math_og_content_image": img_url,
+        },
     }
     if scheduled_for is not None:
         from datetime import timezone, timedelta
