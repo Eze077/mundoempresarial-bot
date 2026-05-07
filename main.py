@@ -2057,28 +2057,29 @@ def scrape_youtube(url: str) -> dict:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         try:
-            for langs in (["es", "es-AR", "es-419", "es-MX", "es-ES"], ["en", "en-US", "en-GB"]):
+            # API 1.x: instanciar + list() + fetch(); seg.text en vez de seg["text"]
+            _yapi = YouTubeTranscriptApi()
+            _tlist = _yapi.list(video_id)
+            # Preferir español, luego inglés
+            _preferred = None
+            _fallback = None
+            for _t in _tlist:
+                lc = _t.language_code.lower()
+                if lc.startswith("es") and _preferred is None:
+                    _preferred = _t
+                elif lc.startswith("en") and _fallback is None:
+                    _fallback = _t
+            for _t in ([_preferred] if _preferred else []) + ([_fallback] if _fallback else []):
                 try:
-                    segments = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-                    transcript_text = " ".join(seg["text"] for seg in segments)
-                    if "en" in langs[0]:
+                    segs = _t.fetch()
+                    transcript_text = " ".join(
+                        (s.text if hasattr(s, "text") else s["text"]) for s in segs
+                    )
+                    if _t.language_code.lower().startswith("en"):
                         transcript_text += "\n[Nota: transcripción en inglés, revisar traducción]"
                     break
                 except Exception:
                     continue
-            if not transcript_text:
-                try:
-                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                    for t in transcript_list:
-                        try:
-                            segments = t.fetch()
-                            transcript_text = " ".join(seg["text"] for seg in segments)
-                            transcript_text += f"\n[Nota: transcripción en {t.language_code}]"
-                            break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
         except Exception as e:
             logger.info(f"youtube-transcript-api no disponible ({type(e).__name__}: {e}), probando fallbacks")
     except ImportError:
