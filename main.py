@@ -43,6 +43,7 @@ LINKEDIN_CLIENT_ID = os.environ.get("LINKEDIN_CLIENT_ID", "77jyyt3btvsjwv")
 LINKEDIN_ORG_ID    = os.environ.get("LINKEDIN_ORG_ID", "67751917")
 LINKEDIN_MEMBER_ID = os.environ.get("LINKEDIN_MEMBER_ID", "")
 _LAST_LINKEDIN_ERROR = ""
+_LAST_LINKEDIN_URN = ""
 _LINKEDIN_MEMBER_URN_CACHE: str | None = None
 _LAST_WP_ERROR = ""
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
@@ -1024,11 +1025,11 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     return None
 
 
-def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id: int = 0) -> bool:
+def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id: int = 0, li_urn: str = "") -> bool:
     """
-    Agrega un HTML comment al final del post con los IDs de Twitter y Telegram
+    Agrega un HTML comment al final del post con los IDs de Twitter, Telegram y LinkedIn
     para poder borrarlos después desde /editar.
-    Format: <!-- mebot:tweet_id=X;tg_msg=Y -->
+    Format: <!-- mebot:tweet_id=X;tg_msg=Y;li_urn=Z -->
     """
     try:
         # Siempre fetchear contenido fresco de WP para no sobreescribir con versión cacheada/truncada
@@ -1051,6 +1052,8 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
             meta_parts.append(f"tweet_id={tweet_id}")
         if tg_msg_id:
             meta_parts.append(f"tg_msg={tg_msg_id}")
+        if li_urn:
+            meta_parts.append(f"li_urn={li_urn}")
         if not meta_parts:
             return True
         meta_comment = f"\n<!-- mebot:{';'.join(meta_parts)} -->"
@@ -1386,8 +1389,9 @@ def _get_linkedin_author_urn() -> str:
 
 def post_linkedin(data: dict, wp_url: str) -> str | None:
     """Publica en LinkedIn. Usa perfil personal si LINKEDIN_MEMBER_ID está seteado, organización si no."""
-    global _LAST_LINKEDIN_ERROR
+    global _LAST_LINKEDIN_ERROR, _LAST_LINKEDIN_URN
     _LAST_LINKEDIN_ERROR = ""
+    _LAST_LINKEDIN_URN = ""
     if not LINKEDIN_TOKEN:
         _LAST_LINKEDIN_ERROR = "LINKEDIN_TOKEN no configurado"
         return None
@@ -1421,6 +1425,7 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
         r = requests.post("https://api.linkedin.com/rest/posts", headers=h, json=payload, timeout=15)
         if r.status_code in (200, 201):
             post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
+            _LAST_LINKEDIN_URN = post_urn
             post_url_li = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else tracked_url
             logger.info(f"LinkedIn post OK ({author_urn}): {post_url_li}")
             return post_url_li
@@ -1431,6 +1436,24 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
         _LAST_LINKEDIN_ERROR = f"{type(e).__name__}: {e}"
         logger.error(f"post_linkedin exception: {e}")
         return None
+
+
+def delete_linkedin_post(urn: str) -> bool:
+    """Borra un post de LinkedIn por su URN (ej: urn:li:share:xxx)."""
+    if not LINKEDIN_TOKEN or not urn:
+        return False
+    try:
+        encoded = requests.utils.quote(urn, safe="")
+        h = {"Authorization": f"Bearer {LINKEDIN_TOKEN}", "LinkedIn-Version": "202503"}
+        r = requests.delete(f"https://api.linkedin.com/rest/posts/{encoded}", headers=h, timeout=15)
+        if r.status_code in (200, 204):
+            logger.info(f"LinkedIn delete OK: {urn}")
+            return True
+        logger.error(f"LinkedIn delete falló {r.status_code}: {r.text[:200]}")
+        return False
+    except Exception as e:
+        logger.error(f"delete_linkedin_post: {e}")
+        return False
 
 
 def _fit_tweet(text: str, limit: int = 280) -> str:
@@ -5422,6 +5445,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             li_url = await asyncio.to_thread(post_linkedin, data, post_url)
             if li_url:
                 await query.message.reply_text(f"✅ LinkedIn: {li_url}")
+                if _LAST_LINKEDIN_URN:
+                    await asyncio.to_thread(
+                        append_social_meta, post_id, post_content, li_urn=_LAST_LINKEDIN_URN
+                    )
             else:
                 err = _LAST_LINKEDIN_ERROR or "error desconocido"
                 await query.message.reply_text(f"❌ LinkedIn: {err[:150]}")
@@ -5805,15 +5832,18 @@ def _post_to_data(post: dict) -> dict:
     }
 
 
-def _build_delete_kb(del_tw: bool, del_wp: bool, del_tg: bool, has_tw: bool, has_tg: bool) -> InlineKeyboardMarkup:
+def _build_delete_kb(del_tw: bool, del_wp: bool, del_tg: bool, has_tw: bool, has_tg: bool,
+                     del_li: bool = False, has_li: bool = False) -> InlineKeyboardMarkup:
     """Teclado con toggles on/off para elegir qué borrar."""
     tw_label = ("✅" if del_tw else "❌") + " Borrar de Twitter" + ("" if has_tw else " (N/A)")
     wp_label = ("✅" if del_wp else "❌") + " Borrar de WordPress"
     tg_label = ("✅" if del_tg else "❌") + " Borrar del canal TG" + ("" if has_tg else " (N/A)")
+    li_label = ("✅" if del_li else "❌") + " Borrar de LinkedIn" + ("" if has_li else " (N/A)")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(wp_label, callback_data="deltoggle_wp")],
         [InlineKeyboardButton(tw_label, callback_data="deltoggle_tw")],
         [InlineKeyboardButton(tg_label, callback_data="deltoggle_tg")],
+        [InlineKeyboardButton(li_label, callback_data="deltoggle_li")],
         [
             InlineKeyboardButton("🗑️ Ejecutar borrado", callback_data="del_execute"),
             InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
@@ -5934,20 +5964,23 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         meta = parse_social_meta(post.get("content", ""))
         has_tw = bool(meta.get("tweet_id"))
         has_tg = bool(meta.get("tg_msg"))
+        has_li = bool(meta.get("li_urn"))
 
-        # Estado inicial: WP encendido, TW y TG encendidos si tienen ID
         context.user_data["del_wp"] = True
         context.user_data["del_tw"] = has_tw
         context.user_data["del_tg"] = has_tg
+        context.user_data["del_li"] = has_li
         context.user_data["del_has_tw"] = has_tw
         context.user_data["del_has_tg"] = has_tg
+        context.user_data["del_has_li"] = has_li
 
         tw_info = f"Tweet ID: `{meta.get('tweet_id','-')}`" if has_tw else "Tweet: no registrado"
         tg_info = f"TG msg: `{meta.get('tg_msg','-')}`" if has_tg else "TG canal: no registrado"
+        li_info = f"LinkedIn URN: `{meta.get('li_urn','-')}`" if has_li else "LinkedIn: no registrado"
 
         await query.edit_message_text(
             f"🗑️ *Borrar nota*\n\n*{post['title']}*\n\n"
-            f"{tw_info}\n{tg_info}\n\n"
+            f"{tw_info}\n{tg_info}\n{li_info}\n\n"
             "Elegí qué borrar:",
             parse_mode="Markdown",
             reply_markup=_build_delete_kb(
@@ -5955,6 +5988,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data["del_wp"],
                 context.user_data["del_tg"],
                 has_tw, has_tg,
+                context.user_data["del_li"], has_li,
             ),
         )
         return
@@ -5962,53 +5996,57 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Toggles de delete
     if query.data == "deltoggle_wp":
         context.user_data["del_wp"] = not context.user_data.get("del_wp", True)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_delete_kb(
-                context.user_data.get("del_tw", False),
-                context.user_data["del_wp"],
-                context.user_data.get("del_tg", False),
-                context.user_data.get("del_has_tw", False),
-                context.user_data.get("del_has_tg", False),
-            )
-        )
+        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
+            context.user_data.get("del_tw", False), context.user_data["del_wp"],
+            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
+            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
+            context.user_data.get("del_has_li", False),
+        ))
         return
 
     if query.data == "deltoggle_tw":
         if not context.user_data.get("del_has_tw"):
-            return  # no toggleable si no hay tweet
+            return
         context.user_data["del_tw"] = not context.user_data.get("del_tw", False)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_delete_kb(
-                context.user_data["del_tw"],
-                context.user_data.get("del_wp", True),
-                context.user_data.get("del_tg", False),
-                context.user_data.get("del_has_tw", False),
-                context.user_data.get("del_has_tg", False),
-            )
-        )
+        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
+            context.user_data["del_tw"], context.user_data.get("del_wp", True),
+            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
+            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
+            context.user_data.get("del_has_li", False),
+        ))
         return
 
     if query.data == "deltoggle_tg":
         if not context.user_data.get("del_has_tg"):
             return
         context.user_data["del_tg"] = not context.user_data.get("del_tg", False)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_delete_kb(
-                context.user_data.get("del_tw", False),
-                context.user_data.get("del_wp", True),
-                context.user_data["del_tg"],
-                context.user_data.get("del_has_tw", False),
-                context.user_data.get("del_has_tg", False),
-            )
-        )
+        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
+            context.user_data.get("del_tw", False), context.user_data.get("del_wp", True),
+            context.user_data["del_tg"], context.user_data.get("del_has_tw", False),
+            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
+            context.user_data.get("del_has_li", False),
+        ))
+        return
+
+    if query.data == "deltoggle_li":
+        if not context.user_data.get("del_has_li"):
+            return
+        context.user_data["del_li"] = not context.user_data.get("del_li", False)
+        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
+            context.user_data.get("del_tw", False), context.user_data.get("del_wp", True),
+            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
+            context.user_data.get("del_has_tg", False), context.user_data["del_li"],
+            context.user_data.get("del_has_li", False),
+        ))
         return
 
     if query.data == "del_execute":
         del_wp = context.user_data.get("del_wp", False)
         del_tw = context.user_data.get("del_tw", False)
         del_tg = context.user_data.get("del_tg", False)
+        del_li = context.user_data.get("del_li", False)
 
-        if not any([del_wp, del_tw, del_tg]):
+        if not any([del_wp, del_tw, del_tg, del_li]):
             await query.edit_message_text("Nada seleccionado. Edición cancelada.")
             return
 
@@ -6032,6 +6070,11 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except ValueError:
                 results.append("❌ tg_msg inválido en el post")
 
+        # Borrar de LinkedIn
+        if del_li and meta.get("li_urn"):
+            ok = await asyncio.to_thread(delete_linkedin_post, meta["li_urn"])
+            results.append("✅ Post de LinkedIn borrado" if ok else "❌ Error borrando de LinkedIn")
+
         # Borrar de WordPress (último, porque cambia la URL)
         if del_wp:
             ok = await asyncio.to_thread(trash_post, post["id"])
@@ -6039,12 +6082,9 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                            else "❌ Error borrando de WordPress")
 
         # Limpiar estado
-        context.user_data.pop("edit_post", None)
-        context.user_data.pop("del_wp", None)
-        context.user_data.pop("del_tw", None)
-        context.user_data.pop("del_tg", None)
-        context.user_data.pop("del_has_tw", None)
-        context.user_data.pop("del_has_tg", None)
+        for k in ("edit_post", "del_wp", "del_tw", "del_tg", "del_li",
+                  "del_has_tw", "del_has_tg", "del_has_li"):
+            context.user_data.pop(k, None)
 
         await query.edit_message_text("\n".join(results) or "Nada que borrar.")
         return
@@ -6416,19 +6456,21 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
             results.append(f"❌ Twitter falló: {err[:120]}")
 
     # LinkedIn
+    li_urn_sched = ""
     if li_on:
         li_url = await asyncio.to_thread(post_linkedin, data, post_url)
         if li_url:
             results.append(f"✅ LinkedIn: {li_url}")
+            li_urn_sched = _LAST_LINKEDIN_URN
         else:
             err = _LAST_LINKEDIN_ERROR or "error desconocido"
             results.append(f"❌ LinkedIn: {err[:120]}")
 
-    # Persistir tweet_id y tg_msg_id en el post
-    if (tweet_id or tg_msg_id) and post_id:
+    # Persistir tweet_id, tg_msg_id y li_urn en el post
+    if (tweet_id or tg_msg_id or li_urn_sched) and post_id:
         await asyncio.to_thread(
             append_social_meta, post_id, job_data.get("post_content", ""),
-            tweet_id, tg_msg_id,
+            tweet_id, tg_msg_id, li_urn_sched,
         )
 
     if chat_id:
