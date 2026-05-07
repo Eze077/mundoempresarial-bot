@@ -2013,6 +2013,11 @@ def _transcript_via_ytdlp(video_id: str) -> str:
             logger.warning(f"fetch VTT {lang}/{source}: {type(e).__name__}: {e}")
             continue
     logger.warning("yt-dlp: ningún candidato devolvió texto válido")
+    # Tier 4 interno: descripción del video (suele tener el contenido clave)
+    desc = (info.get("description") or "").strip()
+    if desc and len(desc) >= 200:
+        logger.info(f"yt-dlp: usando descripción del video ({len(desc)} chars) como fallback")
+        return f"[Descripción del canal]\n{desc}"
     return ""
 
 
@@ -2171,9 +2176,11 @@ def _summarize_with_gpt(transcript: str, speaker: str = "", title: str = "") -> 
         return ""
 
     speaker_hint = speaker or "el hablante principal"
+    is_desc = transcript.startswith("[Descripción del canal]")
+    source_label = "la descripción" if is_desc else "la transcripción"
     prompt = (
         "Sos el editor periodístico de MundoEmpresarial.ar, medio de noticias económicas "
-        "argentinas para pymes y empresarios. Te paso la transcripción de un video de YouTube "
+        f"argentinas para pymes y empresarios. Te paso {source_label} de un video de YouTube "
         "y tu tarea es convertirla en un resumen periodístico publicable.\n\n"
         "REGLAS OBLIGATORIAS:\n"
         "1. Escribí en TERCERA PERSONA. Nunca uses primera persona del hablante "
@@ -2189,7 +2196,7 @@ def _summarize_with_gpt(transcript: str, speaker: str = "", title: str = "") -> 
         "8. Ningún H2 ni formato HTML: devolvé texto plano con párrafos separados por doble "
         "salto de línea. El HTML lo agrego yo después.\n\n"
         f"Título del video: {title}\n\n"
-        "Transcripción original:\n"
+        f"{source_label.capitalize()} original:\n"
         "---\n"
         f"{transcript[:12000]}\n"
         "---\n\n"
