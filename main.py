@@ -4411,6 +4411,23 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Check de duplicados por slug generado (más confiable que slug de URL fuente)
+    try:
+        generated_slug = url_slug(data.get("title", ""))
+        if generated_slug:
+            dup_r2 = requests.get(
+                f"{WP_URL}/wp-json/wp/v2/posts?slug={generated_slug}&_fields=id,link",
+                headers=wp_auth(), timeout=8
+            )
+            if dup_r2.status_code == 200 and dup_r2.json():
+                dup2 = dup_r2.json()[0]
+                await msg.edit_text(
+                    f"⚠️ Esta nota ya está publicada (mismo slug):\n{dup2['link']}\n\nUsá /editar si querés modificarla."
+                )
+                return
+    except Exception:
+        pass
+
     # Determinar hilo (hint del operador o auto-detect)
     hilo = hilo_hint or detect_hilo(data)
     data["hilo"] = hilo
