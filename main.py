@@ -71,6 +71,8 @@ def _persist_admin_chat_id(chat_id: str):
 
 # OpenAI API key (opcional, solo para fallback de transcripción Whisper)
 OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
+GA4_PROPERTY_ID    = os.environ.get("GA4_PROPERTY_ID", "")
+GA4_SA_PATH        = os.environ.get("GA4_SA_PATH", "")
 
 HEADERS_BROWSER = {
     "User-Agent": (
@@ -7528,6 +7530,215 @@ async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Reporte diario programado ────────────────────────────────────────────────
 
+def _ga4_fetch_data() -> dict:
+    """Consulta GA4 y devuelve métricas de la última semana. Requiere GA4_SA_PATH y GA4_PROPERTY_ID."""
+    from google.analytics.data_v1beta import BetaAnalyticsDataClient
+    from google.analytics.data_v1beta.types import (
+        RunReportRequest, Dimension, Metric, DateRange, OrderBy,
+    )
+    import os as _os
+    _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GA4_SA_PATH
+    client = BetaAnalyticsDataClient()
+    prop = f"properties/{GA4_PROPERTY_ID}"
+
+    # 1. Usuarios por día (últimos 7 días)
+    r_daily = client.run_report(RunReportRequest(
+        property=prop,
+        dimensions=[Dimension(name="date")],
+        metrics=[Metric(name="totalUsers"), Metric(name="sessions")],
+        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+    ))
+    daily = [
+        {"date": row.dimension_values[0].value,
+         "users": int(row.metric_values[0].value),
+         "sessions": int(row.metric_values[1].value)}
+        for row in r_daily.rows
+    ]
+
+    # 2. Tráfico por hora (últimos 7 días)
+    r_hourly = client.run_report(RunReportRequest(
+        property=prop,
+        dimensions=[Dimension(name="hour")],
+        metrics=[Metric(name="sessions")],
+        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+    ))
+    hourly = [
+        {"hour": int(row.dimension_values[0].value),
+         "sessions": int(row.metric_values[0].value)}
+        for row in r_hourly.rows
+    ]
+
+    # 3. Fuentes de tráfico
+    r_sources = client.run_report(RunReportRequest(
+        property=prop,
+        dimensions=[Dimension(name="sessionSource"), Dimension(name="sessionMedium")],
+        metrics=[Metric(name="sessions")],
+        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+        limit=8,
+    ))
+    sources = [
+        {"source": row.dimension_values[0].value,
+         "medium": row.dimension_values[1].value,
+         "sessions": int(row.metric_values[0].value)}
+        for row in r_sources.rows
+    ]
+
+    # 4. Top páginas
+    r_pages = client.run_report(RunReportRequest(
+        property=prop,
+        dimensions=[Dimension(name="pageTitle")],
+        metrics=[Metric(name="screenPageViews")],
+        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="screenPageViews"), desc=True)],
+        limit=5,
+    ))
+    pages = [
+        {"title": row.dimension_values[0].value[:60],
+         "views": int(row.metric_values[0].value)}
+        for row in r_pages.rows
+    ]
+
+    # 5. Dispositivos
+    r_dev = client.run_report(RunReportRequest(
+        property=prop,
+        dimensions=[Dimension(name="deviceCategory")],
+        metrics=[Metric(name="sessions")],
+        date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+    ))
+    devices = {row.dimension_values[0].value: int(row.metric_values[0].value) for row in r_dev.rows}
+
+    return {"daily": daily, "hourly": hourly, "sources": sources, "pages": pages, "devices": devices}
+
+
+def _ga4_best_slots(hourly: list) -> list[int]:
+    """Devuelve las 3 horas con más tráfico, separadas al menos 3h entre sí."""
+    sorted_hours = sorted(hourly, key=lambda x: x["sessions"], reverse=True)
+    slots = []
+    for item in sorted_hours:
+        h = item["hour"]
+        if all(abs(h - s) >= 3 for s in slots):
+            slots.append(h)
+        if len(slots) == 3:
+            break
+    return sorted(slots)
+
+
+async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
+    """Reporte GA4 los lunes a las 8:00 ARG. Actualiza slots del curador y envía análisis al admin."""
+    if not GA4_SA_PATH or not GA4_PROPERTY_ID or not ADMIN_CHAT_ID:
+        return
+    try:
+        data = await asyncio.to_thread(_ga4_fetch_data)
+    except Exception as e:
+        logger.error(f"_ga4_weekly_report fetch: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_CHAT_ID),
+                text=f"⚠️ GA4 weekly report falló al obtener datos: {e}",
+            )
+        except Exception:
+            pass
+        return
+
+    daily = data["daily"]
+    hourly = data["hourly"]
+    sources = data["sources"]
+    pages = data["pages"]
+    devices = data.get("devices", {})
+
+    # Métricas base
+    avg_users = round(sum(d["users"] for d in daily) / len(daily)) if daily else 0
+    total_sessions_week = sum(d["sessions"] for d in daily)
+    goal = 1000
+    gap = goal - avg_users
+    pct = round(avg_users / goal * 100)
+
+    # Mejores slots horarios
+    best_slots = _ga4_best_slots(hourly)
+    slots_str = " / ".join(f"{h:02d}:00" for h in best_slots)
+
+    # Actualizar slots del curador si tenemos 3
+    if len(best_slots) == 3:
+        new_slots = [f"{h:02d}:30" for h in best_slots]
+        _reschedule_curador_jobs(context.job_queue, new_slots)
+        curador_cfg = _load_curador_config()
+        curador_cfg["slots"] = new_slots
+        _save_curador_config(curador_cfg)
+        slots_updated = True
+    else:
+        slots_updated = False
+
+    # Fuentes top
+    sources_text = "\n".join(
+        f"  • {s['source']}/{s['medium']}: {s['sessions']} sesiones"
+        for s in sources[:5]
+    )
+
+    # Top páginas
+    pages_text = "\n".join(f"  • {p['title']}: {p['views']} vistas" for p in pages[:5])
+
+    # Dispositivos
+    dev_text = " | ".join(f"{k}: {v}" for k, v in devices.items())
+
+    # Pedirle 3 recomendaciones a GPT
+    gpt_recs = ""
+    if OPENAI_API_KEY:
+        prompt = (
+            f"Sos el analista digital de MundoEmpresarial.ar, medio de noticias económicas para pymes argentinas.\n"
+            f"OBJETIVO MASTER: llegar a 1000 usuarios únicos por día.\n\n"
+            f"Datos de la última semana:\n"
+            f"- Promedio usuarios/día: {avg_users} ({pct}% del objetivo)\n"
+            f"- Sesiones totales: {total_sessions_week}\n"
+            f"- Dispositivos: {dev_text}\n"
+            f"- Fuentes de tráfico:\n{sources_text}\n"
+            f"- Top páginas:\n{pages_text}\n"
+            f"- Horas pico de tráfico: {slots_str}\n\n"
+            f"Dá exactamente 3 recomendaciones concretas y accionables para acercar el sitio al objetivo de 1000 usuarios/día. "
+            f"Cada recomendación en una línea, comenzando con un emoji relevante. "
+            f"Español rioplatense, directo al punto, sin intro ni cierre."
+        )
+        try:
+            r = openai_post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5},
+                timeout=60,
+            )
+            if r.status_code == 200:
+                gpt_recs = r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"_ga4_weekly_report GPT: {e}")
+
+    # Armar mensaje
+    progress_bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    slots_notice = f"\n⏰ _Slots del curador actualizados a {slots_str}_" if slots_updated else ""
+
+    msg = (
+        f"📊 *Reporte semanal GA4 — MundoEmpresarial.ar*\n\n"
+        f"🎯 Objetivo: 1.000 usuarios/día\n"
+        f"📈 Promedio último semana: *{avg_users} usuarios/día*\n"
+        f"`{progress_bar}` {pct}%\n"
+        f"{'✅ Objetivo superado!' if avg_users >= goal else f'Faltan *{gap} usuarios/día* para el objetivo'}\n"
+        f"{slots_notice}\n\n"
+        f"⏱ *Horas pico:* {slots_str}\n\n"
+        f"🌐 *Fuentes de tráfico:*\n{sources_text}\n\n"
+        f"📄 *Top notas:*\n{pages_text}\n\n"
+    )
+    if gpt_recs:
+        msg += f"💡 *3 recomendaciones para llegar a 1.000:*\n{gpt_recs}"
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(ADMIN_CHAT_ID),
+            text=msg,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"_ga4_weekly_report send: {e}")
+
+
 async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
     """Lee correcciones de HT del día y actualiza ht_mapping.json via GPT (23:15 ARG)."""
     if not OPENAI_API_KEY:
@@ -8266,6 +8477,15 @@ def main():
         name="ht_learning",
     )
     logger.info("HT learning programado para las 23:15 ARG")
+
+    # Reporte GA4 semanal: lunes 8 AM ARG
+    job_queue.run_daily(
+        _ga4_weekly_report,
+        time=dtime(hour=8, minute=0, tzinfo=tz_arg),
+        days=(0,),
+        name="ga4_weekly",
+    )
+    logger.info("GA4 weekly report programado para los lunes 08:00 ARG")
 
     # Health check semanal de servicios pagos: lunes 9 AM ARG
     job_queue.run_daily(
