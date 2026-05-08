@@ -7815,10 +7815,10 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
         img_url = img_resp.json().get("source_url", "")
 
     kw        = focus_keyword(frase)
-    seo_title = seo_title(frase)   # max 60 chars, corte inteligente
+    wp_title  = seo_title(frase)   # max 60 chars, corte inteligente
     desc      = frase[:155] if len(frase) <= 155 else frase[:152] + "..."
     slug      = url_slug(frase)[:75]
-    alt_text  = f"{kw} - {seo_title}"
+    alt_text  = f"{kw} - {wp_title}"
 
     # Actualizar alt de la imagen con el keyword
     if img_id and kw:
@@ -7826,7 +7826,7 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
             requests.post(
                 f"{WP_URL}/wp-json/wp/v2/media/{img_id}",
                 headers={**h, "Content-Type": "application/json"},
-                json={"alt_text": alt_text, "title": seo_title},
+                json={"alt_text": alt_text, "title": wp_title},
                 timeout=10,
             )
         except Exception:
@@ -7836,14 +7836,14 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
     content   = _format_frase_content(frase, kw, body_text)
 
     payload = {
-        "title":          seo_title,
+        "title":          wp_title,
         "content":        content,
         "excerpt":        desc,
         "slug":           slug,
         "categories":     [CAT_FRASES],
         "featured_media": img_id or 0,
         "meta": {
-            "rank_math_title":            seo_title,
+            "rank_math_title":            wp_title,
             "rank_math_description":      desc,
             "rank_math_focus_keyword":    kw,
             "rank_math_robots":           ["index", "follow"],
