@@ -159,6 +159,10 @@ _HT_NORMALIZE = {
     "autonomos":    "Autonomos",
 }
 
+_HT_FEEDBACK_FILE = "/opt/mundoempresarial-bot/ht_feedback.json"
+_HT_FREQ_FILE     = "/opt/mundoempresarial-bot/ht_freq.json"
+_HT_MAPPING_FILE  = "/opt/mundoempresarial-bot/ht_mapping.json"
+
 # ID de la categoría Destacados
 CAT_DESTACADOS = 337
 
@@ -505,28 +509,107 @@ def extract_tags(title: str) -> list:
     return list(dict.fromkeys(tags))[:6]
 
 
+def _load_ht_mapping() -> dict:
+    try:
+        with open(_HT_MAPPING_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _update_ht_freq(tags: list, used_hts: str):
+    try:
+        try:
+            with open(_HT_FREQ_FILE) as f:
+                freq = json.load(f)
+        except Exception:
+            freq = {}
+        for ht in used_hts.split():
+            if not ht.startswith("#"):
+                continue
+            for tag in tags:
+                tag_l = tag.lower()
+                if tag_l not in freq:
+                    freq[tag_l] = {}
+                freq[tag_l][ht] = freq[tag_l].get(ht, 0) + 1
+        with open(_HT_FREQ_FILE, "w") as f:
+            json.dump(freq, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"_update_ht_freq: {e}")
+
+
+def _save_ht_feedback(data: dict, suggested: str, used: str):
+    """Guarda corrección de HT solo si el usuario cambió algo. Actualiza freq."""
+    if not data or suggested.strip() == used.strip():
+        return
+    import datetime as _dt
+    tags = data.get("tags") or extract_tags(data.get("title", ""))
+    entry = {
+        "ts":        _dt.datetime.now().isoformat(),
+        "tags":      tags,
+        "cats":      data.get("categories", []),
+        "title":     (data.get("title") or "")[:80],
+        "suggested": suggested,
+        "used":      used,
+    }
+    try:
+        try:
+            with open(_HT_FEEDBACK_FILE) as f:
+                records = json.load(f)
+        except Exception:
+            records = []
+        records.append(entry)
+        records = records[-500:]
+        with open(_HT_FEEDBACK_FILE, "w") as f:
+            json.dump(records, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"_save_ht_feedback: {e}")
+    _update_ht_freq(tags, used)
+
+
 def _build_hashtags(data: dict) -> str:
-    """Genera hashtags relevantes para Twitter: entidades mapeadas + tags del título + #Pymes."""
-    title   = (data.get("title") or "").lower()
-    excerpt = (data.get("excerpt") or data.get("text") or "")[:400].lower()
+    """Genera hashtags: freq aprendida > mapping GPT > entidades hardcoded > tags > #Pymes."""
+    title    = (data.get("title") or "").lower()
+    excerpt  = (data.get("excerpt") or data.get("text") or "")[:400].lower()
     combined = title + " " + excerpt
+
+    post_tags = data.get("tags") or extract_tags(data.get("title", ""))
+
+    # Freq y mapping aprendidos
+    try:
+        with open(_HT_FREQ_FILE) as _f:
+            freq = json.load(_f)
+    except Exception:
+        freq = {}
+    learned = _load_ht_mapping()
+    merged_map = {**_HT_NORMALIZE, **learned}
 
     tags = []
 
-    # 1. Entidades conocidas que aparecen en el texto
-    for term, ht in _HT_NORMALIZE.items():
+    # 1. Freq: para cada tag del post, el HT más usado (mínimo 2 ocurrencias)
+    for t in post_tags[:4]:
+        t_l = t.lower()
+        if t_l in freq and freq[t_l]:
+            best = max(freq[t_l], key=lambda h: freq[t_l][h])
+            if freq[t_l][best] >= 2:
+                candidate = best if best.startswith("#") else f"#{best}"
+                if candidate not in tags:
+                    tags.append(candidate)
+
+    # 2. Mapping (hardcoded + aprendido GPT): entidades que aparecen en el texto
+    for term, ht in merged_map.items():
         if term in combined:
             candidate = f"#{ht}"
             if candidate not in tags:
                 tags.append(candidate)
 
-    # 2. Tags extraídos del título (ya filtrados)
-    for t in extract_tags(data.get("title", ""))[:4]:
+    # 3. Tags extraídos del título como fallback
+    for t in post_tags[:4]:
         candidate = f"#{t}"
         if candidate not in tags:
             tags.append(candidate)
 
-    # 3. Siempre cerrar con #Pymes
+    # 4. Anchor #Pymes
     if "#Pymes" not in tags:
         tags.append("#Pymes")
 
@@ -4057,6 +4140,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         words = text_in.split()
         hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        suggested = context.user_data.pop("_ht_suggested_direct", None) or _build_hashtags(stored["data"])
+        _save_ht_feedback(stored["data"], suggested, hashtags)
         context.user_data["custom_hashtags"] = hashtags
         tweet_preview = build_tweet(stored["data"], stored["url"], hashtags_override=hashtags)
         kb_tweet = InlineKeyboardMarkup([
@@ -4211,6 +4296,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         words = text_in.split()
         hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
+        suggested = context.user_data.pop("_ht_suggested_sched", None) or _build_hashtags(data)
+        _save_ht_feedback(data, suggested, hashtags)
         context.user_data["pre_sched_hashtags"] = hashtags
         await update.message.reply_text(
             build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(hashtags)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
@@ -5232,6 +5319,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Cambiar HT antes de programar ──
     if query.data == "sched_change_ht_pre":
         current_ht = context.user_data.get("pre_sched_hashtags") or _build_hashtags(data)
+        context.user_data["_ht_suggested_sched"] = current_ht
         context.user_data["waiting_for_pre_sched_ht"] = True
         await query.edit_message_text(
             f"Hashtags actuales: `{md_escape(current_ht)}`\n\n"
@@ -5317,6 +5405,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_ht = context.user_data.get("custom_hashtags")
         if not current_ht and stored:
             current_ht = _build_hashtags(stored["data"])
+        context.user_data["_ht_suggested_direct"] = current_ht
         context.user_data["waiting_for_hashtags"] = True
         await query.edit_message_text(
             f"Hashtags actuales: {current_ht}\n\n"
@@ -7439,6 +7528,70 @@ async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Reporte diario programado ────────────────────────────────────────────────
 
+async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
+    """Lee correcciones de HT del día y actualiza ht_mapping.json via GPT (23:15 ARG)."""
+    if not OPENAI_API_KEY:
+        return
+    import datetime as _dt
+    try:
+        with open(_HT_FEEDBACK_FILE) as f:
+            all_records = json.load(f)
+    except Exception:
+        return
+    today = _dt.date.today().isoformat()
+    today_records = [r for r in all_records if r.get("ts", "").startswith(today)]
+    if not today_records:
+        return
+    try:
+        with open(_HT_MAPPING_FILE) as f:
+            current_mapping = json.load(f)
+    except Exception:
+        current_mapping = {}
+    corrections_text = "\n".join(
+        f"Tags: {r['tags']} | Título: {r['title']} | Sugerido: {r['suggested']} → Usado: {r['used']}"
+        for r in today_records
+    )
+    prompt = (
+        "Sos el sistema de aprendizaje de hashtags de MundoEmpresarial.ar "
+        "(noticias económicas para pymes argentinas en Twitter/X).\n\n"
+        f"Mapping actual (término → hashtag sin #):\n{json.dumps(current_mapping, ensure_ascii=False)}\n\n"
+        f"Correcciones del editor hoy ({today}):\n{corrections_text}\n\n"
+        "Actualizá el mapping incorporando los patrones que ves. "
+        "Devolvé SOLO un JSON con dos campos: "
+        "\"mapping\" (dict actualizado, misma estructura) y "
+        "\"aprendizaje\" (string 1-3 líneas explicando qué aprendiste hoy)."
+    )
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            logger.error(f"_learn_hashtags_daily GPT {r.status_code}")
+            return
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not m:
+            logger.error("_learn_hashtags_daily: no JSON en respuesta GPT")
+            return
+        result = json.loads(m.group())
+        updated_mapping = result.get("mapping", {})
+        aprendizaje = result.get("aprendizaje", "Sin cambios.")
+        if updated_mapping:
+            with open(_HT_MAPPING_FILE, "w") as f:
+                json.dump(updated_mapping, f, ensure_ascii=False, indent=2)
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_CHAT_ID),
+                text=f"🧠 *HT Learning diario*\n_{md_escape(aprendizaje)}_\n\n_{len(today_records)} corrección(es) procesadas hoy._",
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error(f"_learn_hashtags_daily: {e}")
+
+
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     """Envía el reporte diario a las 23:00 ARG."""
     chat_id = ADMIN_CHAT_ID
@@ -8105,6 +8258,14 @@ def main():
         name="daily_report",
     )
     logger.info("Reporte diario programado para las 23:00 ARG")
+
+    # Aprendizaje de hashtags a las 23:15 ARG
+    job_queue.run_daily(
+        _learn_hashtags_daily,
+        time=dtime(hour=23, minute=15, tzinfo=tz_arg),
+        name="ht_learning",
+    )
+    logger.info("HT learning programado para las 23:15 ARG")
 
     # Health check semanal de servicios pagos: lunes 9 AM ARG
     job_queue.run_daily(
