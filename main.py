@@ -5003,9 +5003,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query.data == "fs_custom":
             if not fp:
-                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                await _frase_edit(query, caption="Error: no hay frase pendiente.")
                 return
-            await query.edit_message_caption(
+            await _frase_edit(
+                query,
                 caption="📅 *Elegí el día:*",
                 parse_mode="Markdown",
                 reply_markup=_build_frase_sched_day_kb(),
@@ -8117,11 +8118,22 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _frase_edit(query, caption: str, parse_mode: str = None, reply_markup=None):
+    """edit_message_caption si el mensaje es foto, edit_message_text si es texto puro."""
+    kwargs = {"reply_markup": reply_markup} if reply_markup is not None else {}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    if query.message.photo:
+        await query.edit_message_caption(caption=caption, **kwargs)
+    else:
+        await query.edit_message_text(caption, **kwargs)
+
+
 async def _do_frase_schedule(query, context, target):
     """Programa publicación de una frase: WP (future) + job para TG/Twitter."""
     fp = context.user_data.get("frase_pending")
     if not fp:
-        await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+        await _frase_edit(query, caption="Error: no hay frase pendiente.")
         return
 
     frase     = fp["texto"]
@@ -8131,7 +8143,7 @@ async def _do_frase_schedule(query, context, target):
     li_on     = fp.get("li_on", False)
     custom_ht = context.user_data.get("frase_sched_ht", "#Frases #MundoEmpresarial #Pymes")
 
-    await query.edit_message_caption(caption="🔍 Verificando colisiones…")
+    await _frase_edit(query, caption="🔍 Verificando colisiones…")
     adjusted = await asyncio.to_thread(find_scheduled_collision, target)
 
     offset_msg = ""
@@ -8139,22 +8151,20 @@ async def _do_frase_schedule(query, context, target):
         delta_min = int((adjusted - target).total_seconds() / 60)
         offset_msg = f" (ajustado +{delta_min} min)"
 
-    await query.edit_message_caption(
-        caption=f"📤 Programando para {adjusted.strftime('%A %d/%m %H:%M')}{offset_msg}…"
-    )
+    await _frase_edit(query, caption=f"📤 Programando para {adjusted.strftime('%A %d/%m %H:%M')}{offset_msg}…")
 
     if not img_bytes:
         try:
             from frases_gen import generate_frase_image
             img_bytes = await asyncio.to_thread(generate_frase_image, frase)
         except Exception as e:
-            await query.edit_message_caption(caption=f"❌ Error generando imagen: {e}")
+            await _frase_edit(query, caption=f"❌ Error generando imagen: {e}")
             return
 
     try:
         wp_data = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes, adjusted)
     except Exception as e:
-        await query.edit_message_caption(caption=f"❌ Error en WordPress: {e}")
+        await _frase_edit(query, caption=f"❌ Error en WordPress: {e}")
         return
 
     post_url = wp_data["link"]
@@ -8185,12 +8195,13 @@ async def _do_frase_schedule(query, context, target):
     context.user_data.pop("frase_sched_day", None)
     context.user_data.pop("frase_sched_target", None)
 
-    await query.edit_message_caption(
+    await _frase_edit(
+        query,
         caption=(
             f"✅ Frase programada para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
             f"📝 WP: {post_url}\n"
             f"🔔 A esa hora se postea en canal TG y preview de Twitter."
-        )
+        ),
     )
 
 
