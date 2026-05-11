@@ -5569,6 +5569,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
         tags_str = " · ".join(extract_tags(data["title"])[:4])
         hts      = _build_hashtags(data)
+        from datetime import datetime, timezone, timedelta
+        _tz_arg = timezone(timedelta(hours=-3))
+        _now = datetime.now(_tz_arg)
+        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
         ch_tw = "✅" if tw_on else "❌"
         ch_tg = "✅" if tg_on else "❌"
         ch_li = "✅" if li_on else "❌"
@@ -5582,6 +5587,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🐦 `{md_escape(hts)}`\n\n"
             f"📢 Canal TG: {ch_tg}  |  🐦 Twitter: {ch_tw}  |  💼 LinkedIn: {ch_li}\n"
             f"⭐ Destacado: {dest_str}\n\n"
+            f"🕐 {fecha_str}\n\n"
             f"¿Publicar ahora?"
         )
         kb = InlineKeyboardMarkup([
