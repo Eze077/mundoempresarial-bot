@@ -3977,6 +3977,9 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
             InlineKeyboardButton(eco_label, callback_data="toggle_eco"),
         ],
         [
+            InlineKeyboardButton("⚡ Publicar auto", callback_data="pub_auto"),
+        ],
+        [
             InlineKeyboardButton("🚀 Publicar ahora", callback_data="pub"),
             InlineKeyboardButton("⏰ Programar", callback_data="pub_schedule"),
         ],
@@ -5452,6 +5455,143 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stored = context.user_data.get("published")
         url = stored["url"] if stored else ""
         await query.edit_message_text(f"Publicado!\n\n{url}")
+        return
+
+    # ── Publicar auto: preview unificado ──
+    if query.data == "pub_auto":
+        if not data:
+            await query.edit_message_text("No hay nota activa.")
+            return
+        tw_on   = context.user_data.get("tw_on", True)
+        tg_on   = context.user_data.get("tg_on", True)
+        li_on   = context.user_data.get("li_on", False)
+        dest_on = context.user_data.get("dest_on", False)
+        s_title = get_title(data)
+        s_slug  = url_slug(data["title"])
+        cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
+        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
+        tags_str = " · ".join(extract_tags(data["title"])[:4])
+        hts      = _build_hashtags(data)
+        ch_tw = "✅" if tw_on else "❌"
+        ch_tg = "✅" if tg_on else "❌"
+        ch_li = "✅" if li_on else "❌"
+        dest_str = "⭐ Sí" if dest_on else "No"
+        preview_text = (
+            f"⚡ *Publicar auto*\n\n"
+            f"📰 *{md_escape(s_title)}*\n"
+            f"🔗 `/{s_slug}`\n"
+            f"🗂 {cats_str}\n"
+            f"🏷 {tags_str}\n"
+            f"🐦 `{md_escape(hts)}`\n\n"
+            f"📢 Canal TG: {ch_tg}  |  🐦 Twitter: {ch_tw}  |  💼 LinkedIn: {ch_li}\n"
+            f"⭐ Destacado: {dest_str}\n\n"
+            f"¿Publicar ahora?"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
+                InlineKeyboardButton("✏️ Volver",    callback_data="pub_auto_back"),
+                InlineKeyboardButton("❌ Cancelar",  callback_data="cancel"),
+            ]
+        ])
+        await query.edit_message_text(preview_text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if query.data == "pub_auto_back":
+        if not data:
+            await query.edit_message_text("No hay nota activa.")
+            return
+        await query.edit_message_text(
+            build_preview(data),
+            parse_mode="Markdown",
+            reply_markup=_preview_kb_from_ctx(context),
+        )
+        return
+
+    if query.data == "pub_auto_confirm":
+        if not data:
+            await query.edit_message_text("No hay nota activa.")
+            return
+
+        tw_on   = context.user_data.get("tw_on", True)
+        tg_on   = context.user_data.get("tg_on", True)
+        li_on   = context.user_data.get("li_on", False)
+        dest_on = context.user_data.get("dest_on", False)
+
+        await query.edit_message_text("⚡ Publicando…")
+
+        # Imagen
+        image_id = None
+        if data.get("image_url"):
+            kw  = focus_keyword(data["title"])
+            alt = f"{kw} - {get_title(data)}"
+            image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
+
+        # WordPress
+        published = await asyncio.to_thread(publish_post, data, image_id, dest_on)
+        if not published:
+            err = _LAST_WP_ERROR or "sin detalle"
+            await query.edit_message_text(
+                f"❌ Error al publicar en WordPress.\n`{md_escape(err[:300])}`",
+                parse_mode="Markdown",
+            )
+            return
+
+        post_url     = published["link"]
+        post_id      = published["id"]
+        post_content = published["content"]
+        suffix       = " (Destacados)" if dest_on else ""
+        stat_publish(data["title"], data.get("source_url", ""))
+        context.user_data["published"] = {
+            "url": post_url, "data": data, "id": post_id, "content": post_content
+        }
+        context.user_data.pop("custom_hashtags", None)
+
+        results = [f"✅ WordPress{suffix}\n🔗 {md_escape(post_url)}"]
+        tg_msg_id  = 0
+        tweet_id   = ""
+        li_urn     = ""
+
+        # Canal TG
+        if tg_on:
+            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
+            if tg_msg_id:
+                results.append(f"📢 Canal TG: t.me/MundoEmpresarial\\_AR/{tg_msg_id}")
+                context.user_data["published"]["tg_msg_id"] = tg_msg_id
+            else:
+                results.append("❌ Canal TG: error")
+
+        # Twitter (auto, sin preguntar)
+        if tw_on:
+            custom_ht = context.user_data.get("custom_hashtags")
+            tweet_url = await asyncio.to_thread(post_tweet, data, post_url, custom_ht)
+            if tweet_url:
+                tweet_id = tweet_url.rsplit("/", 1)[-1]
+                results.append(f"🐦 Twitter: {md_escape(tweet_url)}")
+            else:
+                err_tw = get_last_twitter_error() or "(sin detalle)"
+                results.append(f"❌ Twitter: `{md_escape(err_tw[:150])}`")
+
+        # LinkedIn
+        if li_on:
+            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
+            if li_url:
+                li_urn = _LAST_LINKEDIN_URN
+                results.append(f"💼 LinkedIn: {md_escape(li_url)}")
+            else:
+                results.append(f"❌ LinkedIn: {md_escape((_LAST_LINKEDIN_ERROR or '')[:80])}")
+
+        # Persistir social meta
+        await asyncio.to_thread(
+            append_social_meta, post_id, post_content,
+            tweet_id, tg_msg_id, li_urn,
+        )
+
+        # Editar el mismo mensaje con resultado
+        await query.edit_message_text(
+            "⚡ *Publicado*\n\n" + "\n".join(results),
+            parse_mode="Markdown",
+        )
         return
 
     # ── Publicar ──
