@@ -2848,23 +2848,31 @@ def scrape(url: str) -> dict:
 
     # 5) Detectar muro de pago si el texto sigue vacío
     paywall = False
+    paywall_trigger = None
     if not text or len(text) < 150:
+        # Solo señales inequívocas — palabras genéricas como "subscription" aparecen en
+        # footers/newsletters de cualquier diario y generan falsos positivos
         paywall_signals = [
-            "muro de pago", "suscripción", "suscribite", "contenido exclusivo",
-            "para suscriptores", "acceso exclusivo", "solo para socios",
-            "registrate para leer", "iniciar sesión para", "paywall",
-            "subscriber", "subscription", "premium content", "members only",
+            "muro de pago", "contenido exclusivo", "para suscriptores",
+            "acceso exclusivo", "solo para socios", "registrate para leer",
+            "iniciar sesión para leer", "paywall",
             "p12-paywall", "paywall-container", "article--locked", "article-locked",
+            "nota-exclusiva", "nota exclusiva",
         ]
         html_lower = html.lower()
-        if any(sig in html_lower for sig in paywall_signals):
-            paywall = True
+        for sig in paywall_signals:
+            if sig in html_lower:
+                paywall = True
+                paywall_trigger = sig
+                break
         # Señal adicional: página verdaderamente vacía (solo estructura HTML, sin contenido)
         body_text = soup.get_text(separator=" ", strip=True)
         if not paywall and title and len(body_text) < 80:
             paywall = True
+            paywall_trigger = f"body_text={len(body_text)}"
 
     if paywall and (not text or len(text) < 150):
+        logger.warning(f"Paywall detectado — url={url[:80]} trigger='{paywall_trigger}' text_len={len(text) if text else 0}")
         raise ValueError(
             f"🔒 Artículo detrás de muro de pago: no se puede leer el contenido.\n"
             f"Título: {title}"
