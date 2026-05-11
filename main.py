@@ -4253,6 +4253,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Si el bot espera texto manual (scrape falló) ──
     if context.user_data.get("waiting_for_manual_text"):
+        if len(text_in) < 150:
+            await update.message.reply_text(
+                "⚠️ El texto es muy corto (mínimo 150 caracteres). Pegá el cuerpo completo del artículo."
+            )
+            return
         context.user_data["waiting_for_manual_text"] = False
         m_url   = context.user_data.pop("manual_url", "")
         m_title = context.user_data.pop("manual_title", "")
