@@ -2821,7 +2821,7 @@ def scrape(url: str) -> dict:
                     extraction_method = f"css-selector '{sel}' ({len(text)} chars)"
                     break
 
-    # 4) Si el texto sigue vacío, intentar Wayback y Google Cache como último recurso
+    # 4) Si el texto sigue vacío, intentar Wayback, Google Cache y trafilatura fetch_url
     if not text or len(text) < 150:
         for label, fallback_html in [
             ("wayback", _fetch_wayback(url, session)),
@@ -2846,6 +2846,19 @@ def scrape(url: str) -> dict:
                 logger.info(f"Texto recuperado via {label} para {url[:60]}")
                 break
 
+    # 4b) Último intento: trafilatura.fetch_url (descarga propia con mejor User-Agent)
+    if not text or len(text) < 150:
+        try:
+            traf_fetched = trafilatura.fetch_url(url)
+            if traf_fetched:
+                tf2 = clean_text(trafilatura.extract(traf_fetched) or "")
+                if tf2 and len(tf2) >= 150:
+                    text = tf2
+                    extraction_method = f"trafilatura-fetch ({len(text)} chars)"
+                    logger.info(f"Texto recuperado via trafilatura.fetch_url para {url[:60]}")
+        except Exception as e:
+            logger.debug(f"trafilatura.fetch_url falló: {e}")
+
     # 5) Detectar muro de pago si el texto sigue vacío
     paywall = False
     paywall_trigger = None
@@ -2855,7 +2868,7 @@ def scrape(url: str) -> dict:
         paywall_signals = [
             "muro de pago", "contenido exclusivo", "para suscriptores",
             "acceso exclusivo", "solo para socios", "registrate para leer",
-            "iniciar sesión para leer", "paywall",
+            "iniciar sesión para leer",
             "p12-paywall", "paywall-container", "article--locked", "article-locked",
             "nota-exclusiva", "nota exclusiva",
         ]
