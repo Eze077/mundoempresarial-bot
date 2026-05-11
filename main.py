@@ -4251,6 +4251,54 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Si el bot espera texto manual (scrape falló) ──
+    if context.user_data.get("waiting_for_manual_text"):
+        context.user_data["waiting_for_manual_text"] = False
+        m_url   = context.user_data.pop("manual_url", "")
+        m_title = context.user_data.pop("manual_title", "")
+        manual_text = text_in
+        data = {
+            "title":              m_title,
+            "original_title":     m_title,
+            "text":               manual_text,
+            "excerpt":            (manual_text[:200] + "…") if len(manual_text) > 200 else manual_text,
+            "original_excerpt":   "",
+            "image_url":          "",
+            "source_url":         m_url,
+            "media":              {},
+            "_extraction_method": "manual",
+            "_html_size":         0,
+        }
+        msg = await update.message.reply_text("Procesando texto ingresado manualmente…")
+        hilo = detect_hilo(data)
+        data["hilo"] = hilo
+        context.user_data["article"] = data
+        context.user_data.setdefault("tw_on", True)
+        context.user_data.setdefault("tg_on", True)
+        context.user_data.setdefault("wa_on", False)
+        context.user_data.setdefault("li_on", False)
+        context.user_data.setdefault("dest_on", False)
+        context.user_data.setdefault("orig_title_on", False)
+        context.user_data.setdefault("orig_excerpt_on", False)
+        context.user_data.setdefault("eco_on", False)
+        data["orig_title_on"]   = context.user_data["orig_title_on"]
+        data["orig_excerpt_on"] = context.user_data["orig_excerpt_on"]
+        kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+        try:
+            data["rewritten_excerpt"] = await asyncio.to_thread(
+                rewrite_excerpt_with_gpt,
+                get_title(data),
+                data.get("text", ""),
+                data.get("original_excerpt") or data.get("excerpt", ""),
+                kw,
+            )
+        except Exception as _e:
+            logger.warning(f"rewrite_excerpt (manual) falló: {_e}")
+            data["rewritten_excerpt"] = ""
+        kb = _preview_kb_from_ctx(context)
+        await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
+        return
+
     # ── Si el bot espera un nuevo título ──
     if context.user_data.get("waiting_for_title"):
         context.user_data["waiting_for_title"] = False
@@ -4526,7 +4574,21 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"scrape: {type(e).__name__}: {e}")
         stat_error()
-        await msg.edit_text(f"No pude leer la nota: {type(e).__name__}: {e}")
+        err_str = str(e)
+        t_match = re.search(r"Título: (.+)", err_str)
+        partial_title = t_match.group(1).strip() if t_match else ""
+        context.user_data["manual_url"]   = url
+        context.user_data["manual_title"] = partial_title
+        kb_manual = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✍️ Ingresar texto manualmente", callback_data="manual_text_start"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
+        ]])
+        await msg.edit_text(
+            f"⚠️ No pude leer el artículo:\n_{md_escape(err_str[:250])}_\n\n"
+            "Podés pegar el texto vos mismo para procesarlo igual.",
+            parse_mode="Markdown",
+            reply_markup=kb_manual,
+        )
         return
 
     # Si no se extrajo texto
@@ -4736,8 +4798,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("OK, sin video.")
         return
 
+    if query.data == "manual_text_start":
+        context.user_data["waiting_for_manual_text"] = True
+        await query.edit_message_text(
+            "✍️ *Ingresá el texto del artículo*\n\nPegá el contenido y lo proceso como una nota normal.",
+            parse_mode="Markdown",
+        )
+        return
+
     if query.data == "cancel":
         context.user_data.pop("waiting_for_title", None)
+        context.user_data.pop("waiting_for_manual_text", None)
         stat_cancel()
         await query.edit_message_text("Cancelado.")
         return
