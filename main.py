@@ -2859,9 +2859,9 @@ def scrape(url: str) -> dict:
         html_lower = html.lower()
         if any(sig in html_lower for sig in paywall_signals):
             paywall = True
-        # Señal adicional: hay título pero el body tiene menos de 300 chars de texto visible
+        # Señal adicional: página verdaderamente vacía (solo estructura HTML, sin contenido)
         body_text = soup.get_text(separator=" ", strip=True)
-        if not paywall and title and len(body_text) < 400:
+        if not paywall and title and len(body_text) < 80:
             paywall = True
 
     if paywall and (not text or len(text) < 150):
