@@ -4857,6 +4857,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "cancel":
         context.user_data.pop("waiting_for_title", None)
         context.user_data.pop("waiting_for_manual_text", None)
+        context.chat_data.pop("sug_queue", None)
         stat_cancel()
         await query.edit_message_text("Cancelado.")
         return
@@ -5738,6 +5739,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚡ *Publicado*\n\n" + "\n".join(results),
             parse_mode="Markdown",
         )
+
+        # Si hay cola de sugerencia, procesar la siguiente
+        sug_queue = context.chat_data.get("sug_queue", [])
+        if sug_queue:
+            next_url = sug_queue.pop(0)
+            context.chat_data["sug_queue"] = sug_queue
+            context.user_data["curador_auto"] = True
+            async def _next_reply(text, **kw):
+                return await context.bot.send_message(chat_id=query.message.chat_id, text=text, **kw)
+            fake_msg = type("FM", (), {"text": next_url, "chat_id": query.message.chat_id, "reply_text": _next_reply})()
+            fake_upd = type("FU", (), {"message": fake_msg})()
+            asyncio.create_task(handle_link(fake_upd, context))
         return
 
     # ── Publicar ──
@@ -7673,10 +7686,19 @@ async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: 
             )
 
     if suggestion:
+        import re as _re
+        sug_indices = [int(x) - 1 for x in _re.findall(r'#(\d+)', suggestion)]
+        sug_indices = [i for i in sug_indices if 0 <= i < len(articles)]
+        context.chat_data["sug_indices"] = sug_indices
+        sug_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📰 Publicar una a una", callback_data="sug_pub"),
+            InlineKeyboardButton("⚡ Auto todo",          callback_data="sug_auto"),
+        ]]) if sug_indices else None
         await bot.send_message(
             chat_id=chat_id,
             text=f"💡 *Mi sugerencia:* {suggestion}",
             parse_mode="Markdown",
+            reply_markup=sug_kb,
         )
 
 
@@ -7704,10 +7726,95 @@ async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _auto_publish_url(bot, context, url: str, chat_id: int):
+    """Scrape + publicación completa de una URL. Retorna (title, wp_url) o (None, error_str)."""
+    try:
+        data = await asyncio.to_thread(scrape, url)
+    except Exception as e:
+        return None, str(e)
+    hilo = detect_hilo(data)
+    data["hilo"] = hilo
+    kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+    try:
+        data["rewritten_excerpt"] = await asyncio.to_thread(
+            rewrite_excerpt_with_gpt, get_title(data), data.get("text", ""),
+            data.get("original_excerpt") or data.get("excerpt", ""), kw,
+        )
+    except Exception:
+        data["rewritten_excerpt"] = ""
+    dest_on = context.user_data.get("dest_on", False)
+    image_id = None
+    if data.get("image_url"):
+        image_id = await asyncio.to_thread(
+            upload_image, data["image_url"],
+            f"{kw} - {get_title(data)}"
+        )
+    published = await asyncio.to_thread(publish_post, data, image_id, dest_on)
+    if not published:
+        return None, _LAST_WP_ERROR or "sin detalle"
+    post_url     = published["link"]
+    post_id      = published["id"]
+    post_content = published["content"]
+    tg_msg_id = 0
+    tweet_id  = ""
+    li_urn    = ""
+    if context.user_data.get("tg_on", True):
+        tg_msg_id = await publish_to_channel(bot, data, post_url) or 0
+    if context.user_data.get("tw_on", True):
+        tw_url = await asyncio.to_thread(post_tweet, data, post_url, None)
+        if tw_url:
+            tweet_id = tw_url.rsplit("/", 1)[-1]
+    if context.user_data.get("li_on", False):
+        li_url = await asyncio.to_thread(post_linkedin, data, post_url)
+        if li_url:
+            li_urn = _LAST_LINKEDIN_URN
+    await asyncio.to_thread(append_social_meta, post_id, post_content, tweet_id, tg_msg_id, li_urn)
+    return get_title(data), post_url
+
+
 async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los callbacks cf_up / cf_down / cf_h1 / cf_h2 / cf_h3 / cf_pub."""
+    """Maneja los callbacks cf_up / cf_down / cf_h1 / cf_h2 / cf_h3 / cf_pub / cf_auto / sug_pub / sug_auto."""
     query = update.callback_query
     await query.answer()
+
+    # ── Sugerencia: publicar una a una o auto todo ──
+    if query.data in ("sug_pub", "sug_auto"):
+        indices  = context.chat_data.get("sug_indices", [])
+        articles = context.chat_data.get("curador_articles", [])
+        urls = [articles[i]["link"] for i in indices if i < len(articles) and articles[i].get("link")]
+        if not urls:
+            await query.answer("❌ No encontré artículos en la sugerencia.", show_alert=True)
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        if query.data == "sug_pub":
+            # Procesar primera URL con preview pub_auto, cola con el resto
+            context.chat_data["sug_queue"] = urls[1:]
+            context.user_data["curador_auto"] = True
+            async def _sug_reply(text, **kw):
+                return await context.bot.send_message(chat_id=query.message.chat_id, text=text, **kw)
+            fake_msg = type("FM", (), {"text": urls[0], "chat_id": query.message.chat_id, "reply_text": _sug_reply})()
+            fake_upd = type("FU", (), {"message": fake_msg})()
+            asyncio.create_task(handle_link(fake_upd, context))
+
+        else:  # sug_auto
+            status = await query.message.reply_text(f"⚡ Publicando {len(urls)} notas de la sugerencia…")
+            results = []
+            for i, url in enumerate(urls):
+                title, result = await _auto_publish_url(context.bot, context, url, query.message.chat_id)
+                if title:
+                    results.append(f"✅ {md_escape(title[:80])}\n🔗 {md_escape(result)}")
+                else:
+                    results.append(f"❌ {md_escape(url[:60])}: {md_escape(str(result)[:100])}")
+                await status.edit_text(f"⚡ Publicando sugerencia… {i+1}/{len(urls)}")
+            await status.edit_text(
+                "⚡ *Sugerencia publicada*\n\n" + "\n\n".join(results),
+                parse_mode="Markdown",
+            )
+        return
 
     parts = query.data.split("_", 2)
     if len(parts) != 3:
@@ -8774,7 +8881,7 @@ def main():
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
-    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^cf_"))
+    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^(cf_|sug_)"))
     app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
