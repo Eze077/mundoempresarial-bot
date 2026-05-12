@@ -7604,8 +7604,9 @@ def _suggest_top3_with_gpt(articles: list) -> str:
     return ""
 
 
-def _build_feedback_kb(article_idx: int) -> InlineKeyboardMarkup:
+def _build_feedback_kb(article_idx: int, selected: bool = False) -> InlineKeyboardMarkup:
     """Botones por artículo del curador."""
+    tog_label = "✅ Sugerida" if selected else "⬜ Sugerida"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("👍", callback_data=f"cf_up_{article_idx}"),
@@ -7616,6 +7617,7 @@ def _build_feedback_kb(article_idx: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📰", callback_data=f"cf_pub_{article_idx}"),
         ],
         [
+            InlineKeyboardButton(tog_label, callback_data=f"cf_tog_{article_idx}"),
             InlineKeyboardButton("🔴 Publicar auto", callback_data=f"cf_auto_{article_idx}"),
         ],
     ])
@@ -7634,10 +7636,18 @@ async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: 
         f"{n} hilo {h}" for h, n in sorted(by_hilo.items()) if n > 0
     )
 
+    # Parsear sugerencia antes de enviar artículos para poder marcarlos ya activados
+    import re as _re
+    _sug_indices = [int(x) - 1 for x in _re.findall(r'#(\d+)', suggestion)] if suggestion else []
+    _sug_indices = [i for i in _sug_indices if 0 <= i < len(articles)]
+    _sug_selected = set(_sug_indices)
+
     # Guardar artículos en chat_data para que los callbacks puedan resolver el idx
     if not hasattr(context, 'chat_data') or context.chat_data is None:
         pass
     context.chat_data["curador_articles"] = articles
+    context.chat_data["sug_indices"]  = _sug_indices
+    context.chat_data["sug_selected"] = _sug_selected
 
     # Header
     await bot.send_message(
@@ -7684,18 +7694,14 @@ async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: 
             await bot.send_message(
                 chat_id=chat_id, text=text, parse_mode="Markdown",
                 disable_web_page_preview=True,
-                reply_markup=_build_feedback_kb(idx),
+                reply_markup=_build_feedback_kb(idx, selected=(idx in _sug_selected)),
             )
 
     if suggestion:
-        import re as _re
-        sug_indices = [int(x) - 1 for x in _re.findall(r'#(\d+)', suggestion)]
-        sug_indices = [i for i in sug_indices if 0 <= i < len(articles)]
-        context.chat_data["sug_indices"] = sug_indices
         sug_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📰 Publicar una a una", callback_data="sug_pub"),
             InlineKeyboardButton("⚡ Auto todo",          callback_data="sug_auto"),
-        ]]) if sug_indices else None
+        ]]) if _sug_indices else None
         await bot.send_message(
             chat_id=chat_id,
             text=f"💡 *Mi sugerencia:* {suggestion}",
@@ -7781,9 +7787,9 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
 
     # ── Sugerencia: publicar una a una o auto todo ──
     if query.data in ("sug_pub", "sug_auto"):
-        indices  = context.chat_data.get("sug_indices", [])
+        selected = context.chat_data.get("sug_selected") or set(context.chat_data.get("sug_indices", []))
         articles = context.chat_data.get("curador_articles", [])
-        urls = [articles[i]["link"] for i in indices if i < len(articles) and articles[i].get("link")]
+        urls = [articles[i]["link"] for i in sorted(selected) if i < len(articles) and articles[i].get("link")]
         if not urls:
             await query.answer("❌ No encontré artículos en la sugerencia.", show_alert=True)
             return
@@ -7860,6 +7866,19 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+    elif action == "tog":
+        sug_selected = context.chat_data.setdefault("sug_selected", set())
+        if idx in sug_selected:
+            sug_selected.discard(idx)
+            now_on = False
+        else:
+            sug_selected.add(idx)
+            now_on = True
+        context.chat_data["sug_selected"] = sug_selected
+        await query.edit_message_reply_markup(reply_markup=_build_feedback_kb(idx, selected=now_on))
+        await query.answer("✅ Marcada" if now_on else "⬜ Desmarcada", show_alert=False)
+        return
+
     elif action == "pub":
         # Disparar el flujo normal de publicación con el URL del artículo
         await asyncio.to_thread(feedback_record, "publish", article)
