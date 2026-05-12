@@ -4666,6 +4666,49 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.get("is_youtube"):
         context.user_data["yt_embed_on"] = True
 
+    # Si viene del curador con "publicar auto", ir directo al preview unificado
+    if context.user_data.pop("curador_auto", False):
+        from datetime import datetime, timezone, timedelta
+        _tz_arg = timezone(timedelta(hours=-3))
+        _now = datetime.now(_tz_arg)
+        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
+        tw_on   = context.user_data.get("tw_on", True)
+        tg_on   = context.user_data.get("tg_on", True)
+        li_on   = context.user_data.get("li_on", False)
+        dest_on = context.user_data.get("dest_on", False)
+        s_title = get_title(data)
+        s_slug  = url_slug(data["title"])
+        cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
+        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
+        tags_str = " · ".join(extract_tags(data["title"])[:4])
+        hts      = _build_hashtags(data)
+        ch_tw = "✅" if tw_on else "❌"
+        ch_tg = "✅" if tg_on else "❌"
+        ch_li = "✅" if li_on else "❌"
+        dest_str = "⭐ Sí" if dest_on else "No"
+        preview_text = (
+            f"⚡ *Publicar auto*\n\n"
+            f"📰 *{md_escape(s_title)}*\n"
+            f"🔗 `/{s_slug}`\n"
+            f"🗂 {cats_str}\n"
+            f"🏷 {tags_str}\n"
+            f"🐦 `{md_escape(hts)}`\n\n"
+            f"📢 Canal TG: {ch_tg}  |  🐦 Twitter: {ch_tw}  |  💼 LinkedIn: {ch_li}\n"
+            f"⭐ Destacado: {dest_str}\n\n"
+            f"🕐 {fecha_str}\n\n"
+            f"¿Publicar ahora?"
+        )
+        kb_auto = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
+                InlineKeyboardButton("✏️ Volver",    callback_data="pub_auto_back"),
+                InlineKeyboardButton("❌ Cancelar",  callback_data="cancel"),
+            ]
+        ])
+        await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb_auto)
+        return
+
     # Mostrar preview
     kb = _preview_kb_from_ctx(context)
     await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
@@ -7557,6 +7600,9 @@ def _build_feedback_kb(article_idx: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧵3", callback_data=f"cf_h3_{article_idx}"),
             InlineKeyboardButton("📰", callback_data=f"cf_pub_{article_idx}"),
         ],
+        [
+            InlineKeyboardButton("🔴 Publicar auto", callback_data=f"cf_auto_{article_idx}"),
+        ],
     ])
 
 
@@ -7735,6 +7781,34 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"Publish shortcut: {e}")
             await query.message.reply_text(f"❌ Error disparando publicación: {e}")
+
+    elif action == "auto":
+        # Igual que "pub" pero va directo al preview de Publicar auto
+        await asyncio.to_thread(feedback_record, "publish", article)
+        link = article.get("link", "")
+        if not link:
+            await query.answer("❌ No tengo el URL del artículo.", show_alert=True)
+            return
+        await query.answer("⚡ Preparando publicación auto…", show_alert=False)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        context.user_data["curador_auto"] = True
+        fake_message = type("FakeMsg", (), {
+            "text": link,
+            "chat_id": query.message.chat_id,
+            "reply_text": query.message.reply_text,
+        })()
+        fake_update = type("FakeUpdate", (), {
+            "message": fake_message,
+        })()
+        try:
+            await handle_link(fake_update, context)
+        except Exception as e:
+            logger.error(f"Curador auto: {e}")
+            context.user_data.pop("curador_auto", None)
+            await query.message.reply_text(f"❌ Error: {e}")
 
 
 async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
