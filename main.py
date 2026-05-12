@@ -5742,6 +5742,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
+        # Si vino de auto_edit, marcar como done en auto_todo_processed
+        _edit_idx = context.user_data.pop("auto_todo_edit_idx", None)
+        if _edit_idx is not None:
+            _proc = context.chat_data.get("auto_todo_processed", [])
+            if _edit_idx < len(_proc):
+                _proc[_edit_idx]["done"] = True
+                context.chat_data["auto_todo_processed"] = _proc
+
         # Si hay cola de sugerencia, procesar la siguiente
         sug_queue = context.chat_data.get("sug_queue", [])
         if sug_queue:
@@ -7734,12 +7742,12 @@ async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _auto_publish_url(bot, context, url: str, chat_id: int):
-    """Scrape + publicación completa de una URL. Retorna (title, wp_url) o (None, error_str)."""
+async def _process_url_for_review(url: str) -> dict | None:
+    """Scrape + GPT rewrite sin publicar. Retorna data dict o None en error."""
     try:
         data = await asyncio.to_thread(scrape, url)
-    except Exception as e:
-        return None, str(e)
+    except Exception:
+        return None
     hilo = detect_hilo(data)
     data["hilo"] = hilo
     kw = focus_keyword(data.get("original_title") or data.get("title", ""))
@@ -7750,13 +7758,16 @@ async def _auto_publish_url(bot, context, url: str, chat_id: int):
         )
     except Exception:
         data["rewritten_excerpt"] = ""
+    return data
+
+
+async def _publish_processed(bot, context, data: dict, chat_id: int):
+    """Sube imagen + publica post + redes para un data dict ya procesado."""
+    kw = focus_keyword(data.get("original_title") or data.get("title", ""))
     dest_on = context.user_data.get("dest_on", False)
     image_id = None
     if data.get("image_url"):
-        image_id = await asyncio.to_thread(
-            upload_image, data["image_url"],
-            f"{kw} - {get_title(data)}"
-        )
+        image_id = await asyncio.to_thread(upload_image, data["image_url"], f"{kw} - {get_title(data)}")
     published = await asyncio.to_thread(publish_post, data, image_id, dest_on)
     if not published:
         return None, _LAST_WP_ERROR or "sin detalle"
@@ -7778,6 +7789,14 @@ async def _auto_publish_url(bot, context, url: str, chat_id: int):
             li_urn = _LAST_LINKEDIN_URN
     await asyncio.to_thread(append_social_meta, post_id, post_content, tweet_id, tg_msg_id, li_urn)
     return get_title(data), post_url
+
+
+async def _auto_publish_url(bot, context, url: str, chat_id: int):
+    """Scrape + publicación completa de una URL. Retorna (title, wp_url) o (None, error_str)."""
+    data = await _process_url_for_review(url)
+    if data is None:
+        return None, f"Error scrapeando {url[:60]}"
+    return await _publish_processed(bot, context, data, chat_id)
 
 
 async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7808,20 +7827,136 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
             fake_upd = type("FU", (), {"message": fake_msg})()
             asyncio.create_task(handle_link(fake_upd, context))
 
-        else:  # sug_auto
-            status = await query.message.reply_text(f"⚡ Publicando {len(urls)} notas de la sugerencia…")
-            results = []
+        else:  # sug_auto — primero procesar, luego mostrar preview para revisión
+            status = await query.message.reply_text(f"⚡ Preparando revisión de {len(urls)} notas…")
+            processed = []
             for i, url in enumerate(urls):
-                title, result = await _auto_publish_url(context.bot, context, url, query.message.chat_id)
-                if title:
-                    results.append(f"✅ {md_escape(title[:80])}\n🔗 {md_escape(result)}")
+                await status.edit_text(f"⚡ Procesando {i+1}/{len(urls)}…")
+                d = await _process_url_for_review(url)
+                processed.append({"url": url, "data": d})
+            context.chat_data["auto_todo_processed"] = processed
+            try:
+                await status.delete()
+            except Exception:
+                pass
+
+            from datetime import datetime, timezone, timedelta
+            _tz_arg = timezone(timedelta(hours=-3))
+            _now = datetime.now(_tz_arg)
+            dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+            fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
+
+            ok_count = 0
+            for i, item in enumerate(processed):
+                if item["data"]:
+                    d = item["data"]
+                    s_title  = get_title(d)
+                    s_slug   = url_slug(d["title"])
+                    cat_ids  = detect_categories(d["title"], d["text"], d["excerpt"])
+                    cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
+                    tags_str = " · ".join(extract_tags(d["title"])[:4])
+                    hts      = _build_hashtags(d)
+                    preview = (
+                        f"*#{i+1} — {md_escape(s_title)}*\n"
+                        f"🔗 `/{s_slug}`\n"
+                        f"🗂 {cats_str}\n"
+                        f"🏷 {tags_str}\n"
+                        f"🐦 `{md_escape(hts)}`\n"
+                        f"🕐 {fecha_str}"
+                    )
+                    kb_edit = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(f"✏️ Editar #{i+1}", callback_data=f"auto_edit_{i}"),
+                    ]])
+                    await query.message.reply_text(preview, parse_mode="Markdown", reply_markup=kb_edit)
+                    ok_count += 1
                 else:
-                    results.append(f"❌ {md_escape(url[:60])}: {md_escape(str(result)[:100])}")
-                await status.edit_text(f"⚡ Publicando sugerencia… {i+1}/{len(urls)}")
-            await status.edit_text(
-                "⚡ *Sugerencia publicada*\n\n" + "\n\n".join(results),
-                parse_mode="Markdown",
-            )
+                    await query.message.reply_text(
+                        f"❌ *#{i+1}* No se pudo procesar:\n`{md_escape(item['url'][:80])}`",
+                        parse_mode="Markdown",
+                    )
+
+            if ok_count:
+                kb_confirm = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(f"⚡ Publicar auto todo ({ok_count})", callback_data="sug_auto_confirm"),
+                    InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
+                ]])
+                await query.message.reply_text(
+                    f"Revisá las {ok_count} notas. ¿Publicar todo?",
+                    reply_markup=kb_confirm,
+                )
+        return
+
+    # ── Confirmar publicación de auto todo (luego de revisar) ──
+    if query.data == "sug_auto_confirm":
+        processed = context.chat_data.get("auto_todo_processed", [])
+        to_pub = [(i, p) for i, p in enumerate(processed) if p.get("data") and not p.get("done")]
+        if not to_pub:
+            await query.answer("❌ No hay notas para publicar.", show_alert=True)
+            return
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        status = await query.message.reply_text(f"⚡ Publicando {len(to_pub)} notas…")
+        results = []
+        for n, (i, item) in enumerate(to_pub):
+            await status.edit_text(f"⚡ Publicando… {n+1}/{len(to_pub)}")
+            title, result = await _publish_processed(context.bot, context, item["data"], query.message.chat_id)
+            if title:
+                results.append(f"✅ {md_escape(title[:80])}\n🔗 {md_escape(result)}")
+                processed[i]["done"] = True
+            else:
+                results.append(f"❌ #{i+1}: {md_escape(str(result)[:100])}")
+        context.chat_data["auto_todo_processed"] = processed
+        await status.edit_text(
+            "⚡ *Publicación completa*\n\n" + "\n\n".join(results),
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Editar un artículo individual del auto todo ──
+    if query.data.startswith("auto_edit_"):
+        edit_idx = int(query.data[10:])
+        processed = context.chat_data.get("auto_todo_processed", [])
+        if edit_idx >= len(processed) or not processed[edit_idx].get("data"):
+            await query.answer("⚠️ Artículo no disponible.", show_alert=True)
+            return
+        d = processed[edit_idx]["data"]
+        context.user_data["article"] = d
+        context.user_data["auto_todo_edit_idx"] = edit_idx
+        from datetime import datetime, timezone, timedelta
+        _tz_arg = timezone(timedelta(hours=-3))
+        _now = datetime.now(_tz_arg)
+        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
+        s_title  = get_title(d)
+        s_slug   = url_slug(d["title"])
+        cat_ids  = detect_categories(d["title"], d["text"], d["excerpt"])
+        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
+        tags_str = " · ".join(extract_tags(d["title"])[:4])
+        hts      = _build_hashtags(d)
+        tw_on   = context.user_data.get("tw_on", True)
+        tg_on   = context.user_data.get("tg_on", True)
+        li_on   = context.user_data.get("li_on", False)
+        dest_on = context.user_data.get("dest_on", False)
+        preview = (
+            f"⚡ *Editar y publicar — #{edit_idx+1}*\n\n"
+            f"📰 *{md_escape(s_title)}*\n"
+            f"🔗 `/{s_slug}`\n"
+            f"🗂 {cats_str}\n"
+            f"🏷 {tags_str}\n"
+            f"🐦 `{md_escape(hts)}`\n\n"
+            f"📢 TG: {'✅' if tg_on else '❌'}  |  🐦 TW: {'✅' if tw_on else '❌'}  |  💼 LI: {'✅' if li_on else '❌'}\n"
+            f"⭐ Destacado: {'Sí' if dest_on else 'No'}\n\n"
+            f"🕐 {fecha_str}\n\n"
+            f"¿Publicar ahora?"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
+            InlineKeyboardButton("✏️ Volver",   callback_data="pub_auto_back"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
+        ]])
+        await query.message.reply_text(preview, parse_mode="Markdown", reply_markup=kb)
         return
 
     parts = query.data.split("_", 2)
@@ -8902,7 +9037,7 @@ def main():
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
-    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^(cf_|sug_)"))
+    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^(cf_|sug_|auto_)"))
     app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
