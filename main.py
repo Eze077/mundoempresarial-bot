@@ -4102,6 +4102,7 @@ def build_preview(data: dict) -> str:
     if data.get("is_youtube"):
         yt_line = f"*YouTube:* 🎬 canal _{data.get('youtube_channel','?')}_\n"
 
+    hts = _build_hashtags(data)
     return (
         f"*{md_escape(s_title)}*\n\n"
         f"{yt_line}"
@@ -4109,7 +4110,8 @@ def build_preview(data: dict) -> str:
         f"*Keyword:* {s_kw}\n"
         f"*Slug:* /{s_slug}\n"
         f"*Categorias:* {cats_str}\n"
-        f"*Etiquetas:* {tag_preview}\n\n"
+        f"*Etiquetas:* {tag_preview}\n"
+        f"*HT:* `{md_escape(hts)}`\n\n"
         f"_{md_escape(s_desc)}_\n\n"
         f"Imagen: {media_str}  |  Palabras: ~{words}"
     )
