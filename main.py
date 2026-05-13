@@ -7924,39 +7924,11 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
         d = processed[edit_idx]["data"]
         context.user_data["article"] = d
         context.user_data["auto_todo_edit_idx"] = edit_idx
-        from datetime import datetime, timezone, timedelta
-        _tz_arg = timezone(timedelta(hours=-3))
-        _now = datetime.now(_tz_arg)
-        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
-        s_title  = get_title(d)
-        s_slug   = url_slug(d["title"])
-        cat_ids  = detect_categories(d["title"], d["text"], d["excerpt"])
-        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
-        tags_str = " · ".join(extract_tags(d["title"])[:4])
-        hts      = _build_hashtags(d)
-        tw_on   = context.user_data.get("tw_on", True)
-        tg_on   = context.user_data.get("tg_on", True)
-        li_on   = context.user_data.get("li_on", False)
-        dest_on = context.user_data.get("dest_on", False)
-        preview = (
-            f"⚡ *Editar y publicar — #{edit_idx+1}*\n\n"
-            f"📰 *{md_escape(s_title)}*\n"
-            f"🔗 `/{s_slug}`\n"
-            f"🗂 {cats_str}\n"
-            f"🏷 {tags_str}\n"
-            f"🐦 `{md_escape(hts)}`\n\n"
-            f"📢 TG: {'✅' if tg_on else '❌'}  |  🐦 TW: {'✅' if tw_on else '❌'}  |  💼 LI: {'✅' if li_on else '❌'}\n"
-            f"⭐ Destacado: {'Sí' if dest_on else 'No'}\n\n"
-            f"🕐 {fecha_str}\n\n"
-            f"¿Publicar ahora?"
+        await query.message.reply_text(
+            build_preview(d),
+            parse_mode="Markdown",
+            reply_markup=_preview_kb_from_ctx(context),
         )
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
-            InlineKeyboardButton("✏️ Volver",   callback_data="pub_auto_back"),
-            InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
-        ]])
-        await query.message.reply_text(preview, parse_mode="Markdown", reply_markup=kb)
         return
 
     parts = query.data.split("_", 2)
