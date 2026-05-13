@@ -2731,6 +2731,27 @@ def _fetch_google_cache(url: str, session: requests.Session) -> str | None:
     return None
 
 
+def _scrape_pagina12(html: str) -> str:
+    """Extrae cuerpo de artículo de Página 12 via Fusion.globalContent (Arc Publishing)."""
+    import re as _re, json as _json
+    m = _re.search(r'Fusion\.globalContent\s*=\s*(\{.+?\});\s*(?:Fusion\.|</script>)', html, _re.DOTALL)
+    if not m:
+        return ""
+    try:
+        data = _json.loads(m.group(1))
+    except Exception:
+        return ""
+    elements = data.get("content_elements", [])
+    paragraphs = []
+    for el in elements:
+        if el.get("type") in ("text", "raw_html"):
+            raw = el.get("content", "")
+            text = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
+            if text.strip():
+                paragraphs.append(text.strip())
+    return "\n\n".join(paragraphs)
+
+
 def scrape(url: str) -> dict:
     # Resolver redirect de Google News si aplica
     url = resolve_google_redirect(url)
@@ -2789,21 +2810,29 @@ def scrape(url: str) -> dict:
     # Detectar media (video/foto)
     media_info = _detect_media(soup, url)
 
-    # 1) Intentar JSON-LD primero
+    # 0) Extractor específico Página 12 (Fusion.globalContent, Arc Publishing)
     text = ""
     extraction_method = ""
-    ld = _extract_jsonld(soup)
-    if ld and len(ld["text"]) > 100:
-        text = clean_text(ld["text"])
-        title = ld["title"] or title
-        image_url = ld["image_url"] or image_url
-        extraction_method = f"json-ld ({len(text)} chars)"
-    else:
-        # 2) Fallback a trafilatura
-        traf_raw = trafilatura.extract(html) or ""
-        text = clean_text(traf_raw)
-        if text:
-            extraction_method = f"trafilatura ({len(text)} chars, raw {len(traf_raw)})"
+    if "pagina12.com.ar" in url:
+        p12_text = _scrape_pagina12(html)
+        if p12_text and len(p12_text) > 100:
+            text = clean_text(p12_text)
+            extraction_method = f"pagina12-fusion ({len(text)} chars)"
+
+    # 1) Intentar JSON-LD primero (solo si el extractor específico no ya tiene texto)
+    if not text:
+        ld = _extract_jsonld(soup)
+        if ld and len(ld["text"]) > 100:
+            text = clean_text(ld["text"])
+            title = ld["title"] or title
+            image_url = ld["image_url"] or image_url
+            extraction_method = f"json-ld ({len(text)} chars)"
+        else:
+            # 2) Fallback a trafilatura
+            traf_raw = trafilatura.extract(html) or ""
+            text = clean_text(traf_raw)
+            if text:
+                extraction_method = f"trafilatura ({len(text)} chars, raw {len(traf_raw)})"
 
     # 3) Si trafilatura también falla, intentar selectores de noticias comunes
     if not text or len(text) < 100:
