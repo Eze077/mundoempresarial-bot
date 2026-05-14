@@ -1958,13 +1958,7 @@ def _transcript_via_whisper(video_id: str) -> str:
                 "User-Agent": HEADERS_BROWSER["User-Agent"],
                 "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
             },
-            # Bypassar PO Token usando clients mobile
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "mweb", "web"],
-                    "player_skip": ["configs"],
-                },
-            },
+            # Sin player_client override: yt-dlp usa android_vr que no requiere PO Token
         }
         if has_ffmpeg:
             audio_opts["postprocessors"] = [{
@@ -1974,7 +1968,7 @@ def _transcript_via_whisper(video_id: str) -> str:
             }]
 
         download_ok = False
-        for attempt_opts in (audio_opts, {**audio_opts, "extractor_args": {"youtube": {"player_client": ["android"]}}}):
+        for attempt_opts in (audio_opts, {**audio_opts, "extractor_args": {"youtube": {"player_client": ["android_vr"]}}}):
             try:
                 with yt_dlp.YoutubeDL(attempt_opts) as ydl:
                     ydl.download([video_url])
@@ -2123,26 +2117,20 @@ def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
         return ""
 
     video_url = f"https://www.youtube.com/watch?v={video_id}"
+    # Sin player_client override: yt-dlp usa android_vr por defecto, que no
+    # requiere PO Token ni cookies y no activa bot-detection de YouTube.
     opts = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        # Headers de browser
         "http_headers": {
             "User-Agent": HEADERS_BROWSER["User-Agent"],
             "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
         },
-        # Bypassar PO Token: usar clients mobile que aún no lo requieren
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb", "ios", "android", "web"],
-                "player_skip": ["configs"],
-            },
-        },
     }
 
     info = None
-    for attempt_opts in (opts, {**opts, "extractor_args": {"youtube": {"player_client": ["android"]}}}):
+    for attempt_opts in (opts, {**opts, "extractor_args": {"youtube": {"player_client": ["android_vr"]}}}):
         try:
             with yt_dlp.YoutubeDL(attempt_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
