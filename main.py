@@ -2029,6 +2029,87 @@ def _transcript_via_whisper(video_id: str) -> str:
     return ""
 
 
+def _transcript_via_html(video_id: str) -> str:
+    """
+    Extrae captions directo del HTML de YouTube (ytInitialPlayerResponse).
+    No requiere cookies, JS runtime ni yt-dlp. Funciona para videos públicos.
+    """
+    import json as _json
+    from xml.etree import ElementTree as ET
+
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        r = requests.get(yt_url, headers=hdrs, timeout=15)
+        html = r.text
+    except Exception as e:
+        logger.warning(f"_transcript_via_html: fetch falló: {e}")
+        return ""
+
+    # Extraer el JSON embebido con raw_decode para no rompernos con regex
+    player_data = None
+    for marker in ("ytInitialPlayerResponse = ", "ytInitialPlayerResponse="):
+        idx = html.find(marker)
+        if idx == -1:
+            continue
+        start = html.find("{", idx)
+        if start == -1:
+            continue
+        try:
+            player_data, _ = _json.JSONDecoder().raw_decode(html[start:])
+            break
+        except Exception:
+            continue
+
+    if not player_data:
+        logger.warning(f"_transcript_via_html: ytInitialPlayerResponse no encontrado para {video_id}")
+        return ""
+
+    tracks = (
+        player_data.get("captions", {})
+        .get("playerCaptionsTracklistRenderer", {})
+        .get("captionTracks", [])
+    )
+    if not tracks:
+        logger.info(f"_transcript_via_html: sin captionTracks para {video_id}")
+        return ""
+
+    # Preferir español, luego cualquier idioma
+    es_track = next((t for t in tracks if t.get("languageCode", "").startswith("es")), None)
+    en_track = next((t for t in tracks if t.get("languageCode", "").startswith("en")), None)
+    track = es_track or en_track or tracks[0]
+    base_url = track.get("baseUrl", "")
+    if not base_url:
+        return ""
+
+    try:
+        sep = "&" if "?" in base_url else "?"
+        # Intentar VTT
+        r2 = requests.get(base_url + sep + "fmt=vtt", headers=hdrs, timeout=15)
+        if r2.status_code == 200 and r2.text:
+            text = _parse_vtt(r2.text)
+            if text:
+                logger.info(f"_transcript_via_html: OK via VTT ({len(text)} chars)")
+                return text
+        # Fallback: XML nativo
+        r3 = requests.get(base_url, headers=hdrs, timeout=15)
+        if r3.status_code == 200:
+            root = ET.fromstring(r3.text)
+            parts = [t.text for t in root.iter("text") if t.text]
+            combined = " ".join(parts)
+            if combined.strip():
+                logger.info(f"_transcript_via_html: OK via XML ({len(combined)} chars)")
+                return combined
+    except Exception as e:
+        logger.warning(f"_transcript_via_html: cap fetch falló: {e}")
+
+    return ""
+
+
 def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
     """
     Fallback cuando youtube-transcript-api falla. yt-dlp accede a la API
@@ -2193,9 +2274,19 @@ def scrape_youtube(url: str) -> dict:
     except ImportError:
         logger.warning("youtube-transcript-api no está instalado")
 
-    tier_status = {"t1_api": "no_text", "t2_ytdlp": "skipped", "t3_whisper": "skipped"}
+    tier_status = {"t1_api": "no_text", "t1b_html": "skipped", "t2_ytdlp": "skipped", "t3_whisper": "skipped"}
     if transcript_text and len(transcript_text) >= min_len:
         tier_status["t1_api"] = "ok"
+
+    # Fallback 1b: HTML directo (ytInitialPlayerResponse → captionTracks)
+    if not transcript_text or len(transcript_text) < min_len:
+        logger.info("Intentando extracción directa desde HTML de YouTube…")
+        try:
+            transcript_text = _transcript_via_html(video_id)
+            tier_status["t1b_html"] = "ok" if transcript_text and len(transcript_text) >= min_len else "no_text"
+        except Exception as e:
+            tier_status["t1b_html"] = f"err: {type(e).__name__}"
+            logger.error(f"HTML tier 1b falló: {e}")
 
     # Fallback 2: yt-dlp (subs oficiales / auto-generados via innertube)
     if not transcript_text or len(transcript_text) < min_len:
