@@ -1900,6 +1900,26 @@ def youtube_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parse_json3(content: str) -> str:
+    """Extrae texto plano del formato json3 de YouTube (captions API)."""
+    import json as _json
+    try:
+        data = _json.loads(content)
+    except Exception:
+        return ""
+    texts = []
+    for event in data.get("events", []):
+        for seg in event.get("segs", []):
+            t = seg.get("utf8", "").strip()
+            if t and t != "\n":
+                texts.append(t)
+    dedup = []
+    for t in texts:
+        if not dedup or t != dedup[-1]:
+            dedup.append(t)
+    return " ".join(dedup)
+
+
 def _parse_vtt(content: str) -> str:
     """Extrae texto plano de un VTT de YouTube, dedupeando líneas contiguas."""
     lines = []
@@ -2167,27 +2187,34 @@ def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
     logger.info(f"yt-dlp candidates: {[(lang, src) for _, lang, src in candidates[:5]]}")
 
     for fmts, lang, source in candidates:
-        vtt_fmt = next((f for f in fmts if f.get("ext") == "vtt"), None)
-        if not vtt_fmt:
-            logger.info(f"yt-dlp {lang}/{source}: no hay formato vtt")
+        # Preferir json3 (más confiable desde IPs de servidor); luego vtt/ttml/srt
+        fmt = None
+        fmt_ext = None
+        for ext in ("json3", "vtt", "ttml", "srt"):
+            fmt = next((f for f in fmts if f.get("ext") == ext), None)
+            if fmt:
+                fmt_ext = ext
+                break
+        if not fmt:
+            logger.info(f"yt-dlp {lang}/{source}: sin formatos de texto disponibles")
             continue
         try:
             r = requests.get(
-                vtt_fmt["url"], timeout=15,
+                fmt["url"], timeout=15,
                 headers={"User-Agent": HEADERS_BROWSER["User-Agent"]},
             )
-            logger.info(f"yt-dlp fetch {lang}/{source}: HTTP {r.status_code}, {len(r.text)} bytes")
-            if r.status_code != 200:
+            logger.info(f"yt-dlp fetch {lang}/{source}/{fmt_ext}: HTTP {r.status_code}, {len(r.text)} bytes")
+            if r.status_code != 200 or not r.text:
                 continue
-            text = _parse_vtt(r.text)
+            text = _parse_json3(r.text) if fmt_ext == "json3" else _parse_vtt(r.text)
             if text and len(text) >= min_len:
-                logger.info(f"yt-dlp transcript OK via {source} ({lang}): {len(text)} chars")
+                logger.info(f"yt-dlp transcript OK via {source} ({lang}/{fmt_ext}): {len(text)} chars")
                 if source.endswith("-en"):
                     text += "\n[Nota: transcripción en inglés, revisar traducción]"
                 return text
-            logger.info(f"yt-dlp {lang}/{source}: parsed text too short ({len(text)} chars)")
+            logger.info(f"yt-dlp {lang}/{source}/{fmt_ext}: texto muy corto ({len(text)} chars)")
         except Exception as e:
-            logger.warning(f"fetch VTT {lang}/{source}: {type(e).__name__}: {e}")
+            logger.warning(f"fetch {fmt_ext} {lang}/{source}: {type(e).__name__}: {e}")
             continue
     logger.warning("yt-dlp: ningún candidato devolvió texto válido")
     # Fallback interno: descripción del video (suele tener el contenido clave)
