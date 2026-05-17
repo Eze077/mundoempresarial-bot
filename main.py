@@ -2981,7 +2981,32 @@ def _scrape_instagram(url: str) -> dict:
         username = f"@{username}"
     duration = info.get("duration") or 0
 
-    logger.info(f"Instagram: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, duration={duration}s, user={username}")
+    logger.info(f"Instagram yt-dlp: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, duration={duration}s, user={username}")
+
+    # Fallback HTTP: OG tags — Instagram los sirve sin login para contenido público
+    if not caption or not thumbnail:
+        logger.info("Instagram: yt-dlp insuficiente, intentando OG tags vía HTTP...")
+        try:
+            r = requests.get(clean_url, headers=HEADERS_BROWSER, timeout=15, allow_redirects=True)
+            if r.status_code == 200:
+                soup_ig = BeautifulSoup(r.text, "html.parser")
+                def _og(prop):
+                    t = soup_ig.find("meta", property=prop) or soup_ig.find("meta", attrs={"name": prop})
+                    return (t.get("content") or "").strip() if t else ""
+                caption   = caption   or _og("og:description") or _og("description") or _og("og:title")
+                thumbnail = thumbnail or _og("og:image")
+                if not username:
+                    # og:title suele ser: "Nombre de usuario on Instagram: ..."
+                    og_title = _og("og:title")
+                    if " on Instagram" in og_title:
+                        username = "@" + og_title.split(" on Instagram")[0].strip().lstrip("@")
+                logger.info(f"Instagram OG fallback OK: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, user={username}")
+            else:
+                logger.warning(f"Instagram HTTP {r.status_code} para {clean_url[:60]}")
+        except Exception as e:
+            logger.warning(f"Instagram OG fallback: {type(e).__name__}: {e}")
+
+    logger.info(f"Instagram final: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, duration={duration}s, user={username}")
 
     # Título: primera línea del caption, máx 100 chars
     raw_title = caption.split("\n")[0].strip() if caption else ""
@@ -4897,8 +4922,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Si no se extrajo texto
-    if not data.get("text") or len(data["text"]) < 200:
+    # Si no se extrajo texto (Instagram tiene captions cortos, umbral menor)
+    _min_text = 50 if data.get("is_instagram") else 200
+    if not data.get("text") or len(data["text"]) < _min_text:
         stat_error()
         method = data.get("_extraction_method", "none")
         html_sz = data.get("_html_size", 0)
