@@ -2907,6 +2907,7 @@ def _whisper_from_url(url: str, proxy: str | None = None) -> str:
             "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "socket_timeout": 60,
             "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
         }
         if proxy:
@@ -2953,6 +2954,8 @@ def _scrape_instagram(url: str) -> dict:
     parsed = urlparse(url)
     clean_url = urlunparse(parsed._replace(query="", fragment=""))
 
+    logger.info(f"Instagram scrape: iniciando para {clean_url[:80]}")
+
     # 1) Extraer metadata sin descargar el video
     info = {}
     try:
@@ -2960,12 +2963,15 @@ def _scrape_instagram(url: str) -> dict:
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
+            "socket_timeout": 30,
             "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
         }
+        logger.info("Instagram: extrayendo metadata con yt-dlp...")
         with yt_dlp.YoutubeDL(meta_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False) or {}
+        logger.info(f"Instagram metadata OK: keys={list(info.keys())[:8]}")
     except Exception as e:
-        logger.warning(f"Instagram yt-dlp metadata: {type(e).__name__}: {str(e)[:200]}")
+        logger.warning(f"Instagram yt-dlp metadata: {type(e).__name__}: {str(e)[:300]}")
 
     caption   = info.get("description") or info.get("title") or ""
     thumbnail = info.get("thumbnail", "")
@@ -2974,6 +2980,8 @@ def _scrape_instagram(url: str) -> dict:
     if username and not username.startswith("@"):
         username = f"@{username}"
     duration = info.get("duration") or 0
+
+    logger.info(f"Instagram: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, duration={duration}s, user={username}")
 
     # Título: primera línea del caption, máx 100 chars
     raw_title = caption.split("\n")[0].strip() if caption else ""
@@ -2984,6 +2992,11 @@ def _scrape_instagram(url: str) -> dict:
     if OPENAI_API_KEY and 0 < duration <= 600:
         logger.info(f"Instagram Whisper: iniciando ({duration:.0f}s)")
         transcript = _whisper_from_url(clean_url)
+        logger.info(f"Instagram Whisper: {len(transcript)} chars")
+    elif duration > 600:
+        logger.info(f"Instagram Whisper: omitido, duración {duration:.0f}s > 10 min")
+    else:
+        logger.info("Instagram Whisper: omitido (sin OPENAI_API_KEY o duración=0)")
 
     # 3) Combinar caption + transcripción como cuerpo de la nota
     text_parts = []
@@ -2995,7 +3008,7 @@ def _scrape_instagram(url: str) -> dict:
 
     excerpt = (caption[:200] if caption else transcript[:200] if transcript else "").strip()
 
-    logger.info(f"Instagram scrape OK: title='{title[:60]}', text={len(text)} chars, thumbnail={'sí' if thumbnail else 'no'}")
+    logger.info(f"Instagram scrape OK: title='{title[:60]}', text={len(text)} chars")
 
     return {
         "title":              title,
