@@ -841,12 +841,22 @@ def format_content(data: dict, kw: str = "") -> str:
 
     if not paragraphs:
         first_h2 = f"{kw}: lo que hay que saber" if kw else "Lo que hay que saber"
+        if data.get("is_youtube"):
+            ch = data.get("youtube_channel", "")
+            fuente_html = (f'<p><em>Fuente: Video {ch + " " if ch else ""}— '
+                           f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">Ver en YouTube</a></em></p>')
+        elif data.get("is_instagram"):
+            ig = data.get("instagram_username", "")
+            fuente_html = (f'<p><em>Fuente: {ig + " en " if ig else ""}Instagram — '
+                           f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">Ver en Instagram</a></em></p>')
+        else:
+            fuente_html = (f'<p><em>Fuente: <a href="{data["source_url"]}" '
+                           f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>')
         return (
             f"<h2>{first_h2}</h2>\n"
             f'<p>{data["excerpt"]}</p>\n'
             + pyme_box(data["text"], data["excerpt"])
-            + f'<p><em>Fuente: <a href="{data["source_url"]}" '
-            f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
+            + fuente_html
         )
 
     # Generar H2 descriptivos basados en el contenido
@@ -907,14 +917,22 @@ def format_content(data: dict, kw: str = "") -> str:
     # Recuadro Pymes
     parts.append(pyme_box(data["text"], data["excerpt"]))
 
-    # Fuente — formato especial para YouTube
+    # Fuente — formato especial por plataforma
     if data.get("is_youtube"):
         channel = data.get("youtube_channel", "")
-        channel_html = f"del canal *{channel}* " if channel else ""
+        channel_html = f"del canal {channel} " if channel else ""
         parts.append(
             f'<p><em>Fuente: Video {channel_html}— '
             f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">'
             f'Ver en YouTube</a></em></p>'
+        )
+    elif data.get("is_instagram"):
+        ig_user = data.get("instagram_username", "")
+        user_html = f"{ig_user} en " if ig_user else ""
+        parts.append(
+            f'<p><em>Fuente: {user_html}Instagram — '
+            f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">'
+            f'Ver en Instagram</a></em></p>'
         )
     else:
         parts.append(
@@ -2872,9 +2890,134 @@ def _scrape_pagina12(html: str) -> str:
     return "\n\n".join(paragraphs)
 
 
+def _whisper_from_url(url: str, proxy: str | None = None) -> str:
+    """Baja audio de cualquier URL con yt-dlp y lo transcribe con Whisper API."""
+    if not OPENAI_API_KEY:
+        return ""
+    try:
+        import yt_dlp
+    except ImportError:
+        return ""
+    import tempfile, glob, shutil
+
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
+        }
+        if proxy:
+            opts["proxy"] = proxy
+        if has_ffmpeg:
+            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}]
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            logger.warning(f"_whisper_from_url yt-dlp failed: {type(e).__name__}: {str(e)[:200]}")
+            return ""
+        files = glob.glob(os.path.join(tmpdir, "audio.*"))
+        if not files:
+            return ""
+        audio_path = files[0]
+        size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        if size_mb > 24.5:
+            logger.error(f"_whisper_from_url: {size_mb:.1f} MB excede límite de 25 MB")
+            return ""
+        try:
+            with open(audio_path, "rb") as f:
+                r = openai_post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data={"model": "whisper-1", "language": "es", "response_format": "text"},
+                    files={"file": (os.path.basename(audio_path), f, "audio/mpeg")},
+                    timeout=180,
+                )
+            if r.status_code == 200:
+                return r.text.strip()
+            logger.error(f"_whisper_from_url API {r.status_code}: {r.text[:400]}")
+        except Exception as e:
+            logger.error(f"_whisper_from_url request falló: {e}")
+    return ""
+
+
+def _scrape_instagram(url: str) -> dict:
+    """Descarga un Reel o post con video de Instagram y retorna data dict compatible con publish_post."""
+    from urllib.parse import urlparse, urlunparse
+    import yt_dlp
+
+    # Limpiar tracking params de la URL
+    parsed = urlparse(url)
+    clean_url = urlunparse(parsed._replace(query="", fragment=""))
+
+    # 1) Extraer metadata sin descargar el video
+    info = {}
+    try:
+        meta_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
+        }
+        with yt_dlp.YoutubeDL(meta_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False) or {}
+    except Exception as e:
+        logger.warning(f"Instagram yt-dlp metadata: {type(e).__name__}: {str(e)[:200]}")
+
+    caption   = info.get("description") or info.get("title") or ""
+    thumbnail = info.get("thumbnail", "")
+    uploader  = info.get("uploader") or info.get("channel") or ""
+    username  = info.get("uploader_id") or info.get("channel_id") or uploader or ""
+    if username and not username.startswith("@"):
+        username = f"@{username}"
+    duration = info.get("duration") or 0
+
+    # Título: primera línea del caption, máx 100 chars
+    raw_title = caption.split("\n")[0].strip() if caption else ""
+    title = (raw_title[:97] + "...") if len(raw_title) > 100 else (raw_title or f"Reel de {username or 'Instagram'}")
+
+    # 2) Transcribir audio con Whisper (límite 10 min para no disparar costos)
+    transcript = ""
+    if OPENAI_API_KEY and 0 < duration <= 600:
+        logger.info(f"Instagram Whisper: iniciando ({duration:.0f}s)")
+        transcript = _whisper_from_url(clean_url)
+
+    # 3) Combinar caption + transcripción como cuerpo de la nota
+    text_parts = []
+    if caption and len(caption) > 20:
+        text_parts.append(clean_text(caption))
+    if transcript and len(transcript) > 50:
+        text_parts.append(transcript)
+    text = "\n\n".join(text_parts)
+
+    excerpt = (caption[:200] if caption else transcript[:200] if transcript else "").strip()
+
+    logger.info(f"Instagram scrape OK: title='{title[:60]}', text={len(text)} chars, thumbnail={'sí' if thumbnail else 'no'}")
+
+    return {
+        "title":              title,
+        "original_title":     title,
+        "text":               text,
+        "excerpt":            excerpt,
+        "original_excerpt":   excerpt,
+        "image_url":          thumbnail,
+        "source_url":         clean_url,
+        "is_instagram":       True,
+        "instagram_username": username,
+        "media":              {"has_video": bool(duration)},
+    }
+
+
 def scrape(url: str) -> dict:
     # Resolver redirect de Google News si aplica
     url = resolve_google_redirect(url)
+
+    # Scrapers específicos por plataforma
+    if "instagram.com" in url:
+        return _scrape_instagram(url)
 
     session = requests.Session()
     session.headers.update(HEADERS_BROWSER)
