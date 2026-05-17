@@ -78,6 +78,10 @@ GA4_SA_PATH        = os.environ.get("GA4_SA_PATH", "")
 _YT_COOKIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_cookies.txt")
 YOUTUBE_COOKIES  = _YT_COOKIES_PATH if os.path.isfile(_YT_COOKIES_PATH) else None
 
+# Proxy WARP (Cloudflare) en el VPS para bypassar ban de IP de YouTube
+# warp-cli mode proxy + warp-cli proxy port 40000 + warp-cli connect
+YOUTUBE_PROXY = "socks5://127.0.0.1:40000"
+
 HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1978,6 +1982,7 @@ def _transcript_via_whisper(video_id: str) -> str:
             "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "proxy": YOUTUBE_PROXY,
             "http_headers": {
                 "User-Agent": HEADERS_BROWSER["User-Agent"],
                 "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
@@ -2142,12 +2147,11 @@ def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
         return ""
 
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    # Sin player_client override: yt-dlp usa android_vr por defecto.
-    # Si la IP del VPS está bloqueada, se usa el cookiefile de YouTube.
     opts = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "proxy": YOUTUBE_PROXY,
         "http_headers": {
             "User-Agent": HEADERS_BROWSER["User-Agent"],
             "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
@@ -2269,7 +2273,10 @@ def scrape_youtube(url: str) -> dict:
         from youtube_transcript_api import YouTubeTranscriptApi
         try:
             # API 1.x: cookies= acepta path a Netscape cookies file (None = sin cookies)
-            _yapi = YouTubeTranscriptApi(cookies=YOUTUBE_COOKIES)
+            _yapi = YouTubeTranscriptApi(
+                cookies=YOUTUBE_COOKIES,
+                proxies={"https": YOUTUBE_PROXY, "http": YOUTUBE_PROXY},
+            )
             _tlist = _yapi.list(video_id)
             # Preferir español, luego inglés
             _preferred = None
