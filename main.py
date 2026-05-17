@@ -4820,12 +4820,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hilo_hint = extract_hilo_hint(text_in)
     kind = detect_url_kind(url)
 
-    if kind == "instagram":
-        await update.message.reply_text(
-            "Instagram todavía no lo soporto. Pegá el link del artículo original."
-        )
-        return
-
     # Check de duplicados: si el slug de la URL ya existe en WP, avisar y salir
     try:
         clean_url = url.split("?")[0].rstrip("/")
