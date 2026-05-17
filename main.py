@@ -74,6 +74,10 @@ OPENAI_API_KEY     = os.environ.get("OPENAI_API_KEY", "")
 GA4_PROPERTY_ID    = os.environ.get("GA4_PROPERTY_ID", "")
 GA4_SA_PATH        = os.environ.get("GA4_SA_PATH", "")
 
+# Cookies de YouTube para bypassar ban de IP en VPS (archivo Netscape)
+_YT_COOKIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_cookies.txt")
+YOUTUBE_COOKIES  = _YT_COOKIES_PATH if os.path.isfile(_YT_COOKIES_PATH) else None
+
 HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1978,8 +1982,9 @@ def _transcript_via_whisper(video_id: str) -> str:
                 "User-Agent": HEADERS_BROWSER["User-Agent"],
                 "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
             },
-            # Sin player_client override: yt-dlp usa android_vr que no requiere PO Token
         }
+        if YOUTUBE_COOKIES:
+            audio_opts["cookiefile"] = YOUTUBE_COOKIES
         if has_ffmpeg:
             audio_opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio",
@@ -2137,8 +2142,8 @@ def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
         return ""
 
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    # Sin player_client override: yt-dlp usa android_vr por defecto, que no
-    # requiere PO Token ni cookies y no activa bot-detection de YouTube.
+    # Sin player_client override: yt-dlp usa android_vr por defecto.
+    # Si la IP del VPS está bloqueada, se usa el cookiefile de YouTube.
     opts = {
         "skip_download": True,
         "quiet": True,
@@ -2148,6 +2153,8 @@ def _transcript_via_ytdlp(video_id: str, min_len: int = 200) -> str:
             "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
         },
     }
+    if YOUTUBE_COOKIES:
+        opts["cookiefile"] = YOUTUBE_COOKIES
 
     info = None
     for attempt_opts in (opts, {**opts, "extractor_args": {"youtube": {"player_client": ["android_vr"]}}}):
@@ -2261,8 +2268,8 @@ def scrape_youtube(url: str) -> dict:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         try:
-            # API 1.x: instanciar + list() + fetch(); seg.text en vez de seg["text"]
-            _yapi = YouTubeTranscriptApi()
+            # API 1.x: cookies= acepta path a Netscape cookies file (None = sin cookies)
+            _yapi = YouTubeTranscriptApi(cookies=YOUTUBE_COOKIES)
             _tlist = _yapi.list(video_id)
             # Preferir español, luego inglés
             _preferred = None
