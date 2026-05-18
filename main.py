@@ -82,6 +82,10 @@ YOUTUBE_COOKIES  = _YT_COOKIES_PATH if os.path.isfile(_YT_COOKIES_PATH) else Non
 # warp-cli mode proxy + warp-cli proxy port 40000 + warp-cli connect
 YOUTUBE_PROXY = "socks5://127.0.0.1:40000"
 
+# Cookies de Instagram (sesión exportada en formato Netscape desde Chrome)
+_IG_COOKIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instagram_cookies.txt")
+INSTAGRAM_COOKIES = _IG_COOKIES_PATH if os.path.isfile(_IG_COOKIES_PATH) else None
+
 HEADERS_BROWSER = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2890,7 +2894,7 @@ def _scrape_pagina12(html: str) -> str:
     return "\n\n".join(paragraphs)
 
 
-def _whisper_from_url(url: str, proxy: str | None = None) -> str:
+def _whisper_from_url(url: str, proxy: str | None = None, cookies: str | None = None) -> str:
     """Baja audio de cualquier URL con yt-dlp y lo transcribe con Whisper API."""
     if not OPENAI_API_KEY:
         return ""
@@ -2912,6 +2916,8 @@ def _whisper_from_url(url: str, proxy: str | None = None) -> str:
         }
         if proxy:
             opts["proxy"] = proxy
+        if cookies:
+            opts["cookiefile"] = cookies
         if has_ffmpeg:
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}]
         try:
@@ -2954,7 +2960,7 @@ def _scrape_instagram(url: str) -> dict:
     parsed = urlparse(url)
     clean_url = urlunparse(parsed._replace(query="", fragment=""))
 
-    logger.info(f"Instagram scrape: iniciando para {clean_url[:80]}")
+    logger.info(f"Instagram scrape: iniciando para {clean_url[:80]} (cookies={'sí' if INSTAGRAM_COOKIES else 'no'})")
 
     # 1) Extraer metadata sin descargar el video
     info = {}
@@ -2966,6 +2972,8 @@ def _scrape_instagram(url: str) -> dict:
             "socket_timeout": 30,
             "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
         }
+        if INSTAGRAM_COOKIES:
+            meta_opts["cookiefile"] = INSTAGRAM_COOKIES
         logger.info("Instagram: extrayendo metadata con yt-dlp...")
         with yt_dlp.YoutubeDL(meta_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False) or {}
@@ -3016,7 +3024,7 @@ def _scrape_instagram(url: str) -> dict:
     transcript = ""
     if OPENAI_API_KEY and 0 < duration <= 600:
         logger.info(f"Instagram Whisper: iniciando ({duration:.0f}s)")
-        transcript = _whisper_from_url(clean_url)
+        transcript = _whisper_from_url(clean_url, cookies=INSTAGRAM_COOKIES)
         logger.info(f"Instagram Whisper: {len(transcript)} chars")
     elif duration > 600:
         logger.info(f"Instagram Whisper: omitido, duración {duration:.0f}s > 10 min")
