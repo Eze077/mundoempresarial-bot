@@ -3016,9 +3016,23 @@ def _scrape_instagram(url: str) -> dict:
 
     logger.info(f"Instagram final: caption={len(caption)}ch, thumbnail={'sí' if thumbnail else 'no'}, duration={duration}s, user={username}")
 
-    # Título: primera línea del caption, máx 100 chars
-    raw_title = caption.split("\n")[0].strip() if caption else ""
-    title = (raw_title[:97] + "...") if len(raw_title) > 100 else (raw_title or f"Reel de {username or 'Instagram'}")
+    # Limpiar caption: quitar hashtags, @mentions y CTAs sociales
+    def _clean_caption(raw: str) -> str:
+        import re as _re
+        # Eliminar hashtags y @mentions
+        cleaned = _re.sub(r'#\S+', '', raw)
+        cleaned = _re.sub(r'@\S+', '', cleaned)
+        # Eliminar líneas de CTA social típicas
+        cta_patterns = [
+            r'(?i)(dale\s+like|compartí|seguime|seguinos|link\s+en\s+bio|swipe|activ[aá]\s+la\s+campana|suscribite|turn\s+on\s+notif)',
+        ]
+        for pat in cta_patterns:
+            cleaned = _re.sub(pat, '', cleaned)
+        # Comprimir espacios y líneas vacías
+        cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned_text if (cleaned_text := cleaned.strip()) else ""
+
+    clean_caption = _clean_caption(caption) if caption else ""
 
     # 2) Transcribir audio con Whisper (límite 10 min para no disparar costos)
     transcript = ""
@@ -3031,15 +3045,61 @@ def _scrape_instagram(url: str) -> dict:
     else:
         logger.info("Instagram Whisper: omitido (sin OPENAI_API_KEY o duración=0)")
 
-    # 3) Combinar caption + transcripción como cuerpo de la nota
-    text_parts = []
-    if caption and len(caption) > 20:
-        text_parts.append(clean_text(caption))
-    if transcript and len(transcript) > 50:
-        text_parts.append(transcript)
-    text = "\n\n".join(text_parts)
+    # 3) Texto principal = transcripción (lo que se dijo en el video)
+    #    Caption limpio solo como contexto adicional si el transcript es corto
+    if transcript and len(transcript) >= 200:
+        # Transcript es la fuente principal
+        text = transcript
+        if clean_caption and len(clean_caption) > 50:
+            text = transcript + "\n\n" + clean_caption
+    elif clean_caption:
+        text = clean_caption
+        if transcript:
+            text = clean_caption + "\n\n" + transcript
+    else:
+        text = transcript
 
-    excerpt = (caption[:200] if caption else transcript[:200] if transcript else "").strip()
+    # 4) Título: generado por GPT a partir del transcript (no del caption social)
+    #    Fallback: primera oración del transcript o del caption limpio
+    def _ig_title_from_gpt(transcript_text: str, caption_text: str, author: str) -> str:
+        if not OPENAI_API_KEY or not transcript_text:
+            # Fallback sin GPT: primera oración del transcript
+            first = (transcript_text or caption_text or "").split(".")[0].strip()
+            return (first[:97] + "...") if len(first) > 100 else (first or f"Reel de {author or 'Instagram'}")
+        ctx = transcript_text[:1200]
+        prompt = (
+            "Sos editor de MundoEmpresarial.ar, medio económico argentino para pymes.\n"
+            "Te paso la transcripción de un video de Instagram de contenido económico/empresarial.\n"
+            "Escribí UN TÍTULO periodístico para una nota en el sitio web.\n\n"
+            "REGLAS:\n"
+            "- Máximo 70 caracteres\n"
+            "- Basado ESTRICTAMENTE en lo que se dice en la transcripción\n"
+            "- Sin clickbait, sin preguntas retóricas\n"
+            "- Español rioplatense, voz activa, tercera persona\n"
+            "- No menciones Instagram, likes, follows ni redes sociales\n"
+            "- Devolvé SOLO el título, sin comillas, sin punto final\n\n"
+            f"Autor del video: {author or 'desconocido'}\n\n"
+            f"Transcripción:\n{ctx}\n\n"
+            "Título:"
+        )
+        try:
+            r = openai_post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "temperature": 0.3},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                t = r.json()["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+                return t[:100]
+        except Exception as e:
+            logger.warning(f"Instagram GPT title falló: {e}")
+        first = transcript_text.split(".")[0].strip()
+        return (first[:97] + "...") if len(first) > 100 else first or f"Reel de {author or 'Instagram'}"
+
+    title = _ig_title_from_gpt(transcript, clean_caption, uploader)
+
+    excerpt = (transcript[:200] if transcript else clean_caption[:200] if clean_caption else "").strip()
 
     logger.info(f"Instagram scrape OK: title='{title[:60]}', text={len(text)} chars")
 
