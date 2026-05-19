@@ -6,6 +6,7 @@ import logging
 import asyncio
 import base64
 import unicodedata
+import uuid
 from datetime import datetime, time as dtime
 import requests
 from requests_oauthlib import OAuth1
@@ -244,6 +245,12 @@ CATEGORY_KEYWORDS = {
           "energía", "luz", "gas", "agua", "tarifas", "utilities"],
     93:  ["sindicato", "gremio", "sindical", "paritaria", "salario", "sueldo",
           "convenio colectivo", "huelga", "paro", "cgt", "uom", "camioneros"],
+    1139:["vino", "vinos", "bodega", "bodegas", "malbec", "torrontés", "torrontes",
+          "cabernet", "chardonnay", "syrah", "pinot", "viñedo", "viñedos",
+          "vitivinícola", "vitivinicola", "enología", "enólogo", "enólogos",
+          "sommelier", "sommeliers", "vinoteca", "maridaje", "cepa", "cepas",
+          "coviar", "industria vitivinícola", "exportación de vinos",
+          "vendimia", "cosecha vitivinícola"],
 }
 
 def detect_categories(title: str, text: str, excerpt: str) -> list:
@@ -786,6 +793,41 @@ def normalize_text(text: str) -> str:
     return t.strip()
 
 
+def _slugify_h2(text: str) -> str:
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    text = re.sub(r'[^\w\s-]', '', text).strip().lower()
+    return re.sub(r'[\s_-]+', '-', text)
+
+
+def _build_rank_math_toc(headings: list, hilo: int) -> str:
+    """Build Rank Math ToC block from pre-collected heading data (content+anchor pairs)."""
+    if len(headings) < 2:
+        return ""
+    TOC_TITLES = {
+        1: "Informarse es respetarse, ejes que vas a leer acá:",
+        2: "La voz de las pymes, ejes que vas a leer acá:",
+        3: "Opiniones y análisis, ejes que vas a leer acá:",
+    }
+    title = TOC_TITLES.get(hilo, TOC_TITLES[2])
+    attrs = {
+        "title": title,
+        "headings": [
+            {"key": str(uuid.uuid4()), "content": h["content"], "level": 2,
+             "link": f"#{h['anchor']}", "disable": False, "isUpdated": False, "isGeneratedLink": True}
+            for h in headings
+        ],
+        "listStyle": "ul",
+    }
+    attrs_json = json.dumps(attrs, ensure_ascii=False, separators=(',', ':'))
+    toc_items = ''.join(f'<li class=""><a href="#{h["anchor"]}">{h["content"]}</a></li>' for h in headings)
+    return (
+        f'<!-- wp:rank-math/toc-block {attrs_json} -->\n'
+        f'<div class="wp-block-rank-math-toc-block" id="rank-math-toc">'
+        f'<h2>{title}</h2><nav><ul>{toc_items}</ul></nav></div>\n'
+        f'<!-- /wp:rank-math/toc-block -->'
+    )
+
+
 def format_content(data: dict, kw: str = "") -> str:
     """
     Estructura SEO del contenido según el Manual de Estilo:
@@ -843,6 +885,8 @@ def format_content(data: dict, kw: str = "") -> str:
         else:
             paragraphs.append(p)
 
+    hilo = data.get("hilo", 2)
+
     if not paragraphs:
         first_h2 = f"{kw}: lo que hay que saber" if kw else "Lo que hay que saber"
         if data.get("is_youtube"):
@@ -876,13 +920,26 @@ def format_content(data: dict, kw: str = "") -> str:
 
     parts = []
     h2_index = 0
-    hilo = data.get("hilo", 2)
+    h2_headings = []  # (content, anchor) para el ToC
+
+    def _append_h2(label):
+        nonlocal h2_index
+        anchor = _slugify_h2(label)
+        h2_headings.append({'content': label, 'anchor': anchor})
+        parts.append(
+            f'<!-- wp:heading {{"level":2,"anchor":"{anchor}"}} -->\n'
+            f'<h2 class="wp-block-heading" id="{anchor}">{label}</h2>\n'
+            f'<!-- /wp:heading -->'
+        )
+        h2_index += 1
 
     # Tag visual [OPINIÓN] / [ANÁLISIS] al inicio si es Hilo 3
     if hilo == 3:
         parts.append(
+            '<!-- wp:html -->\n'
             '<p style="color:#c0392b;font-weight:700;letter-spacing:1px;'
-            'font-size:12px;margin:0 0 8px;">[OPINIÓN / ANÁLISIS]</p>'
+            'font-size:12px;margin:0 0 8px;">[OPINIÓN / ANÁLISIS]</p>\n'
+            '<!-- /wp:html -->'
         )
 
     for i, para in enumerate(paragraphs):
@@ -891,12 +948,13 @@ def format_content(data: dict, kw: str = "") -> str:
 
         if i == 0:
             # Lead en negrita
-            parts.append(f"<p><strong>{para_html}</strong></p>")
+            parts.append(f'<!-- wp:paragraph -->\n<p><strong>{para_html}</strong></p>\n<!-- /wp:paragraph -->')
 
             # Si es YouTube, embebemos el video justo después del lead
             if data.get("is_youtube") and data.get("youtube_video_id"):
                 yt_id = data["youtube_video_id"]
                 parts.append(
+                    f'<!-- wp:html -->\n'
                     f'<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube aligncenter" '
                     f'style="margin:24px 0;">'
                     f'<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;">'
@@ -905,45 +963,69 @@ def format_content(data: dict, kw: str = "") -> str:
                     f'title="Video de YouTube" '
                     f'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" '
                     f'allowfullscreen></iframe>'
-                    f'</div></figure>'
+                    f'</div></figure>\n'
+                    f'<!-- /wp:html -->'
+                )
+
+            # Si es Instagram, embebemos el reel/post justo después del lead
+            if data.get("is_instagram") and data.get("source_url"):
+                ig_url = data["source_url"]
+                ig_url_embed = ig_url.rstrip("/") + "/?utm_source=ig_embed&utm_campaign=loading"
+                parts.append(
+                    f'<!-- wp:html -->\n'
+                    f'<blockquote class="instagram-media" data-instgrm-captioned '
+                    f'data-instgrm-permalink="{ig_url_embed}" data-instgrm-version="14" '
+                    f'style="background:#FFF;border:0;border-radius:3px;box-shadow:0 0 1px 0 rgba(0,0,0,.5),'
+                    f'0 1px 10px 0 rgba(0,0,0,.15);margin:1px auto 24px;max-width:540px;min-width:326px;'
+                    f'padding:0;width:calc(100% - 2px);">'
+                    f'<a href="{ig_url_embed}" target="_blank">Ver publicación en Instagram</a>'
+                    f'</blockquote>'
+                    f'<script async src="//www.instagram.com/embed.js"></script>\n'
+                    f'<!-- /wp:html -->'
                 )
 
             if h2_index < len(h2_labels):
-                parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
-                h2_index += 1
+                _append_h2(h2_labels[h2_index])
         else:
             # H2 cada 3 párrafos
             if i % 3 == 0 and h2_index < len(h2_labels):
-                parts.append(f"<h2>{h2_labels[h2_index]}</h2>")
-                h2_index += 1
-            parts.append(f"<p>{para_html}</p>")
+                _append_h2(h2_labels[h2_index])
+            parts.append(f'<!-- wp:paragraph -->\n<p>{para_html}</p>\n<!-- /wp:paragraph -->')
 
     # Recuadro Pymes
-    parts.append(pyme_box(data["text"], data["excerpt"]))
+    parts.append('<!-- wp:html -->\n' + pyme_box(data["text"], data["excerpt"]) + '<!-- /wp:html -->')
 
     # Fuente — formato especial por plataforma
     if data.get("is_youtube"):
         channel = data.get("youtube_channel", "")
         channel_html = f"del canal {channel} " if channel else ""
         parts.append(
+            f'<!-- wp:paragraph -->\n'
             f'<p><em>Fuente: Video {channel_html}— '
             f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">'
-            f'Ver en YouTube</a></em></p>'
+            f'Ver en YouTube</a></em></p>\n<!-- /wp:paragraph -->'
         )
     elif data.get("is_instagram"):
         ig_user = data.get("instagram_username", "")
         user_html = f"{ig_user} en " if ig_user else ""
         parts.append(
+            f'<!-- wp:paragraph -->\n'
             f'<p><em>Fuente: {user_html}Instagram — '
             f'<a href="{data["source_url"]}" target="_blank" rel="noopener noreferrer">'
-            f'Ver en Instagram</a></em></p>'
+            f'Ver en Instagram</a></em></p>\n<!-- /wp:paragraph -->'
         )
     else:
         parts.append(
+            f'<!-- wp:paragraph -->\n'
             f'<p><em>Fuente: <a href="{data["source_url"]}" '
-            f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>'
+            f'target="_blank" rel="noopener noreferrer">Ver nota original</a></em></p>\n'
+            f'<!-- /wp:paragraph -->'
         )
-    return "\n".join(parts)
+    content = "\n".join(parts)
+    toc_block = _build_rank_math_toc(h2_headings, hilo)
+    if toc_block:
+        content = toc_block + "\n" + content
+    return content
 
 
 # ── WordPress API ──────────────────────────────────────────────────────────────
@@ -2984,7 +3066,7 @@ def _scrape_instagram(url: str) -> dict:
     caption   = info.get("description") or info.get("title") or ""
     thumbnail = info.get("thumbnail", "")
     uploader  = info.get("uploader") or info.get("channel") or ""
-    username  = info.get("uploader_id") or info.get("channel_id") or uploader or ""
+    username  = uploader or info.get("uploader_id") or info.get("channel_id") or ""
     if username and not username.startswith("@"):
         username = f"@{username}"
     duration = info.get("duration") or 0
