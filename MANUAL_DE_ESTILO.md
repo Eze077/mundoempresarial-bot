@@ -376,3 +376,44 @@ rank_math_og_content_image: {URL de imagen destacada}
 - [ ] Fuente con link al original
 - [ ] Categorias correctas (max 3)
 - [ ] Etiquetas relevantes (max 8)
+
+---
+
+## 10. Nota desplegable (formato expandible)
+
+Standard desde 2026-05-20. Se activa con el boton **"📖 Desplegable ON/OFF"** en el panel del bot.
+
+### 10.1 Concepto
+
+El lector pyme escanea el resumen en 15 segundos y decide si profundiza. La nota desplegable separa el contenido en dos capas:
+- **Capa visible siempre**: bullets de lo que hay que saber + ToC para navegar + boton de expansion.
+- **Capa oculta (expandible)**: articulo completo con H2s, analisis y recuadro Pymes.
+
+La fuente al pie queda **fuera del div oculto**, siempre visible para Rank Math.
+
+### 10.2 Estructura HTML en orden
+
+1. `<p><strong>Lo que tenes que saber:</strong></p>` + `<ul>` con 3-5 bullets (oraciones clave del excerpt)
+2. Bloque ToC Rank Math (`<div class="wp-block-rank-math-toc-block" id="rank-math-toc">`) — fuera del div oculto
+3. `<style>` anti-autolink de WP para el boton
+4. Boton CTA azul `#1a73e8` con `onclick="toggleNotaXXX()"`
+5. `<div id="nota-ampliada-XXX" style="display:none;">` con el articulo completo
+6. Fuente al pie (fuera del div oculto)
+7. `<script>` con funciones `expandirNotaXXX()`, `toggleNotaXXX()`, `irAXXX(id)` + GA4 event
+
+### 10.3 ToC: detalles de implementacion
+
+- **Clase del bloque**: `wp-block-rank-math-toc-block` con `id="rank-math-toc"` — Rank Math la reconoce.
+- **Titulo del ToC**: `<p><strong>TITULO</strong></p>` (NO `<h2>`). Varia por hilo editorial:
+  - Hilo 1 → `"Informarse es respetarse, ejes que vas a leer aca:"`
+  - Hilo 2 → `"La voz de las pymes, ejes que vas a leer aca:"`
+  - Hilo 3 → `"Opiniones y analisis, ejes que vas a leer aca:"`
+- **Links del ToC**: negrita + color bordo `#800020` + `onclick="return irAXXX('anchor')"` que expande la seccion y scrollea al H2.
+
+### 10.4 GA4
+
+Evento: `expand_nota` con `event_category: nota_completa` y `event_label: {slug}`.
+
+### 10.5 Boton publicar en el bot
+
+Toggle **"📖 Desplegable ON/OFF"** en el panel de publicacion. Cuando esta ON, despues de publicar en WP el bot aplica el wrapper desplegable y hace un segundo POST a la API de WP con el contenido envuelto.

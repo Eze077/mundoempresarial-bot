@@ -47,6 +47,8 @@ _LAST_LINKEDIN_ERROR = ""
 _LAST_LINKEDIN_URN = ""
 _LINKEDIN_MEMBER_URN_CACHE: str | None = None
 _LAST_WP_ERROR = ""
+# Modo pausa: cuando True, el bot ignora links y scheduled posts
+BOT_PAUSED = False
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
@@ -828,6 +830,110 @@ def _build_rank_math_toc(headings: list, hilo: int) -> str:
     )
 
 
+def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dict) -> str:
+    """Envuelve contenido en formato nota desplegable (bullets + ToC + expand btn + div oculto + JS)."""
+    # 1. Extraer bloque ToC generado por _build_rank_math_toc
+    toc_match = re.search(
+        r'<!-- wp:rank-math/toc-block[^-]*-->\s*(<div class="wp-block-rank-math-toc-block".*?</div>)\s*<!-- /wp:rank-math/toc-block -->',
+        content_html, re.DOTALL
+    )
+    toc_raw = toc_match.group(1).strip() if toc_match else ""
+
+    # 2. Extraer fuente (último wp:paragraph con <em>Fuente:)
+    fuente_matches = list(re.finditer(
+        r'<!-- wp:paragraph -->\s*(<p><em>Fuente:.*?</em></p>)\s*<!-- /wp:paragraph -->',
+        content_html, re.DOTALL
+    ))
+    fuente_html = fuente_matches[-1].group(1).strip() if fuente_matches else ""
+
+    # 3. Body = contenido sin ToC ni fuente, con Gutenberg comments eliminados
+    body = content_html
+    if toc_match:
+        body = body[:toc_match.start()] + body[toc_match.end():]
+    if fuente_matches:
+        last_f = fuente_matches[-1]
+        body = body[:last_f.start()] + body[last_f.end():]
+    body = re.sub(r'<!-- /?wp:[^>]+ -->\n?', '', body).strip()
+
+    # 4. Bullets desde excerpt (3-5 oraciones clave)
+    raw = (data.get("excerpt") or data.get("text", ""))[:700]
+    sentences = re.split(r'(?<=[.!?])\s+', raw.strip())
+    bullets = []
+    for s in sentences:
+        s = s.strip()
+        if len(s) > 25:
+            bullets.append(f'<li>{s}</li>')
+        if len(bullets) >= 5:
+            break
+    if not bullets:
+        bullets = [f'<li>{raw[:200]}</li>']
+    bullets_html = '<ul>\n' + '\n'.join(bullets) + '\n</ul>'
+
+    # 5. Reconstruir ToC con <p><strong>, estilos bordó y onclick expandir
+    hilo = data.get("hilo", 2)
+    toc_titles = {
+        1: "Informarse es respetarse, ejes que vas a leer acá:",
+        2: "La voz de las pymes, ejes que vas a leer acá:",
+        3: "Opiniones y análisis, ejes que vas a leer acá:",
+    }
+    toc_title = toc_titles.get(hilo, toc_titles[2])
+    toc_html = ""
+    if toc_raw:
+        items_m = re.search(r'<ul>(.*?)</ul>', toc_raw, re.DOTALL)
+        if items_m:
+            items = re.sub(
+                r'<a href="#([^"]+)">',
+                lambda m: (
+                    f'<a href="#{m.group(1)}" '
+                    f'onclick="return irA{post_id}(\'{m.group(1)}\')" '
+                    f'style="font-weight:700;color:#800020;">'
+                ),
+                items_m.group(1)
+            )
+            toc_html = (
+                f'<div class="wp-block-rank-math-toc-block" id="rank-math-toc">\n'
+                f'<p><strong>{toc_title}</strong></p>\n'
+                f'<nav><ul>{items}</ul></nav></div>'
+            )
+
+    # 6. JS compacto con toggle, GA4 y scroll-to-anchor
+    js = (
+        f'function expandirNota{post_id}(){{'
+        f'var el=document.getElementById("nota-ampliada-{post_id}");'
+        f'if(el.style.display==="none"){{'
+        f'el.style.display="block";'
+        f'if(typeof gtag!=="undefined")gtag("event","expand_nota",{{"event_category":"nota_completa","event_label":"{slug}"}});'
+        f'}}}}\n'
+        f'function toggleNota{post_id}(){{'
+        f'var el=document.getElementById("nota-ampliada-{post_id}");'
+        f'var a=el.style.display==="none";'
+        f'el.style.display=a?"block":"none";'
+        f'if(a&&typeof gtag!=="undefined")gtag("event","expand_nota",{{"event_category":"nota_completa","event_label":"{slug}"}});'
+        f'}}\n'
+        f'function irA{post_id}(id){{'
+        f'expandirNota{post_id}();'
+        f'setTimeout(function(){{var t=document.getElementById(id);if(t)t.scrollIntoView({{behavior:"smooth"}})}},50);'
+        f'return false;}}'
+    )
+
+    result = (
+        f'<p><strong>Lo que tenés que saber:</strong></p>\n'
+        f'{bullets_html}\n\n'
+        + (f'{toc_html}\n\n' if toc_html else '')
+        + f'<style>#btn-expandir-{post_id} a{{pointer-events:none!important;color:#fff!important;text-decoration:none!important;}}</style>\n'
+        f'<div id="btn-expandir-{post_id}" onclick="toggleNota{post_id}()" '
+        f'style="background:#1a73e8;color:#fff;padding:14px 20px;cursor:pointer;font-weight:700;'
+        f'font-size:1em;text-align:center;border-radius:6px;margin:8px 0;user-select:none;">'
+        f'&#128269; Clickear acá para obtener el análisis completo</div>\n\n'
+        f'<div id="nota-ampliada-{post_id}" style="display:none;margin-top:8px;">\n'
+        f'{body}\n'
+        f'</div>\n\n'
+        + (f'{fuente_html}\n\n' if fuente_html else '')
+        + f'<script>\n{js}\n</script>'
+    )
+    return f'<!-- wp:html -->\n{result}\n<!-- /wp:html -->'
+
+
 def format_content(data: dict, kw: str = "") -> str:
     """
     Estructura SEO del contenido según el Manual de Estilo:
@@ -1083,6 +1189,28 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
     return None
 
 
+def upload_image_bytes(img_bytes: bytes, ext: str = "jpg", alt: str = "") -> int | None:
+    """Sube bytes de imagen directamente a la media library de WP."""
+    try:
+        ctype = f"image/{ext}"
+        h = {**wp_auth(), "Content-Disposition": f"attachment; filename=nota.{ext}",
+             "Content-Type": ctype}
+        r = requests.post(f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes, timeout=30)
+        if r.status_code == 201:
+            media_id = r.json()["id"]
+            if alt:
+                requests.post(
+                    f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
+                    headers={**wp_auth(), "Content-Type": "application/json"},
+                    json={"alt_text": alt, "caption": alt}, timeout=10,
+                )
+            return media_id
+        logger.warning(f"upload_image_bytes {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"upload_image_bytes: {e}")
+    return None
+
+
 def _target_datetime_for_slot(slot: str):
     """
     Devuelve datetime ARG para el slot pedido.
@@ -1166,7 +1294,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     s_slug   = url_slug(data["title"])
     content  = format_content(data, kw=s_kw)
 
-    cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
+    cat_ids = data.get("_cat_override") or detect_categories(data["title"], data["text"], data["excerpt"])
     if destacado and CAT_DESTACADOS not in cat_ids:
         cat_ids = [CAT_DESTACADOS] + cat_ids
 
@@ -1216,7 +1344,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
     if r.status_code == 201:
         body = r.json()
-        return {"link": body.get("link"), "id": body.get("id"), "content": content}
+        return {"link": body.get("link"), "id": body.get("id"), "content": content, "slug": s_slug}
     _LAST_WP_ERROR = f"HTTP {r.status_code}: {r.text[:300]}"
     logger.error(f"WP publish falló: {_LAST_WP_ERROR}")
     return None
@@ -1745,6 +1873,115 @@ def generate_thread_with_gpt(title: str, body_text: str, wp_url: str, hashtags: 
     return tweets
 
 
+# ── Agente /c — planificador editorial ──────────────────────────────────────
+
+_CMD_C_SYSTEM = """Sos el asistente editorial del bot de MundoEmpresarial.ar.
+El operador te manda una URL + instrucciones en texto libre.
+Tu tarea: interpretar el pedido y armar un plan de acción.
+
+MODO:
+- Si la URL pertenece a mundoempresarial.ar → la nota YA EXISTE en el sitio. Usá MODO: actualizar.
+  En este modo solo se aplican los cambios pedidos (imagen, título, categorías). NO se republica a redes.
+- Si la URL es externa (otra fuente) → es una nota nueva. Usá MODO: crear.
+
+Categorías disponibles (ID: nombre):
+95:Impuestos/AFIP | 88:Agro | 1048:Seguros | 89:Comercio | 99:Legislativo
+239:Digitalización Pymes | 94:Economía | 96:Empresas | 100:Gobierno | 90:Industria
+103:Informes y estadísticas | 97:Internacional | 98:Nacional | 91:Opinión
+87:Política | 102:Provincias | 92:Servicios | 93:Sindical | 1139:Mundo del vino
+
+Respondé en este formato exacto (sin texto extra fuera de los bloques):
+---PLAN---
+URL: <url extraída del mensaje>
+MODO: <crear | actualizar>
+TITULO: <título propuesto o AUTOMATICO>
+CATEGORIAS: <IDs separados por coma, ej: 1139,98 — o AUTOMATICO>
+CANALES: <lista de: wordpress,telegram,twitter,linkedin — los que correspondan; para MODO actualizar normalmente ninguno>
+INSTRUCCION: <instrucción concreta para el redactor, o NINGUNA>
+---RESUMEN---
+<2-4 líneas en español explicando qué vas a hacer y por qué, para que el operador confirme o ajuste>"""
+
+
+def _cmd_c_plan_sync(user_input: str, history: list | None = None) -> dict:
+    """Llama a GPT-4o-mini para interpretar el pedido y devolver un plan estructurado."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY no configurada")
+
+    messages = [{"role": "system", "content": _CMD_C_SYSTEM}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_input})
+
+    r = openai_post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        json={"model": "gpt-4o-mini", "temperature": 0, "messages": messages},
+    )
+    text = r.json()["choices"][0]["message"]["content"]
+
+    plan_raw, resumen = {}, ""
+    plan_m   = re.search(r'---PLAN---\n(.*?)---RESUMEN---', text, re.DOTALL)
+    resumen_m = re.search(r'---RESUMEN---\n(.*?)$', text, re.DOTALL)
+    if plan_m:
+        for line in plan_m.group(1).strip().splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                plan_raw[k.strip()] = v.strip()
+    if resumen_m:
+        resumen = resumen_m.group(1).strip()
+
+    modo = plan_raw.get("MODO", "crear").strip().lower()
+
+    titulo = plan_raw.get("TITULO", "AUTOMATICO")
+    override_title = None if titulo.upper() == "AUTOMATICO" else titulo
+
+    cats_raw = plan_raw.get("CATEGORIAS", "AUTOMATICO")
+    if cats_raw.upper() == "AUTOMATICO":
+        override_categories = None
+    else:
+        override_categories = [int(x.strip()) for x in cats_raw.split(",") if x.strip().isdigit()] or None
+
+    canales_raw = plan_raw.get("CANALES", "wordpress,telegram,twitter")
+    channels = [c.strip() for c in canales_raw.split(",") if c.strip()]
+
+    instruccion = plan_raw.get("INSTRUCCION", "NINGUNA")
+    redactor_instructions = None if instruccion.upper() == "NINGUNA" else instruccion
+
+    return {
+        "url":                  plan_raw.get("URL", ""),
+        "modo":                 modo,
+        "override_title":       override_title,
+        "override_categories":  override_categories,
+        "channels":             channels,
+        "redactor_instructions": redactor_instructions,
+        "resumen":              resumen,
+        "gpt_reply":            text,
+        "history":              messages + [{"role": "assistant", "content": text}],
+    }
+
+
+def _cmd_c_plan_text(plan: dict) -> str:
+    """Formatea el plan para mostrar al operador."""
+    cats_str = ("Automático" if not plan["override_categories"]
+                else " · ".join(CAT_NAMES.get(c, str(c)) for c in plan["override_categories"]))
+    titulo_str = plan["override_title"] or "Automático"
+    ch_str = " + ".join(plan["channels"]) if plan["channels"] else "—"
+    instruccion_str = plan["redactor_instructions"] or "—"
+    modo = plan.get("modo", "crear")
+    modo_emoji = "✏️ Actualizar post existente" if modo == "actualizar" else "🆕 Crear nota nueva"
+    resumen = plan["resumen"]
+    return (
+        f"*Plan de publicación*\n\n"
+        f"⚙️ Modo: {md_escape(modo_emoji)}\n"
+        f"🔗 URL: `{md_escape(plan['url'])}`\n"
+        f"📝 Título: {md_escape(titulo_str)}\n"
+        f"📂 Categorías: {md_escape(cats_str)}\n"
+        f"📣 Canales: {md_escape(ch_str)}\n"
+        f"✏️ Instrucción: {md_escape(instruccion_str)}\n\n"
+        f"_{md_escape(resumen)}_"
+    )
+
+
 def post_twitter_thread(tweets: list[str], image_url: str = "") -> list[str]:
     """
     Publica una cadena de tweets como hilo. El primero lleva la imagen.
@@ -1909,7 +2146,7 @@ def _extract_jsonld(soup: BeautifulSoup) -> dict | None:
                 data = data["@graph"]
             if isinstance(data, list):
                 data = next(
-                    (d for d in data if d.get("@type") in
+                    (d for d in data if isinstance(d, dict) and d.get("@type") in
                      ("NewsArticle", "Article", "WebPage", "ReportageNewsArticle")),
                     None
                 )
@@ -3477,6 +3714,23 @@ def _build_commands_text() -> str:
     )
 
 
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pausa el bot: deja de procesar links y posts programados sin apagar el servicio."""
+    global BOT_PAUSED
+    BOT_PAUSED = True
+    await update.message.reply_text(
+        "⏸ *Bot pausado.* No voy a procesar links ni posts programados hasta que uses /RESUME.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reactiva el bot después de /STOP."""
+    global BOT_PAUSED
+    BOT_PAUSED = False
+    await update.message.reply_text("▶️ *Bot reactivado.* Listo para procesar links.", parse_mode="Markdown")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
@@ -4446,10 +4700,11 @@ def _preview_kb_from_ctx(context) -> InlineKeyboardMarkup:
         orig_on = ud.get("orig_title_on", False),
         orig_excerpt_on = ud.get("orig_excerpt_on", False),
         eco_on  = ud.get("eco_on", False),
+        desp_on = ud.get("desp_on", False),
     )
 
 
-def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, li_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False, eco_on: bool = False) -> InlineKeyboardMarkup:
+def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False, li_on: bool = False, dest_on: bool = False, orig_on: bool = False, orig_excerpt_on: bool = False, eco_on: bool = False, desp_on: bool = False) -> InlineKeyboardMarkup:
     tw_label     = "✅ Twitter" if tw_on else "❌ Twitter"
     tg_label     = "✅ Canal TG" if tg_on else "❌ Canal TG"
     wa_label     = "✅ WhatsApp" if wa_on else "❌ WhatsApp"
@@ -4458,6 +4713,7 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
     orig_label   = "✅ Titulo original" if orig_on else "❌ Titulo original"
     orig_ex_label = "✅ Bajada original" if orig_excerpt_on else "❌ Bajada original"
     eco_label    = "📣 ECO ON" if eco_on else "📣 ECO OFF"
+    desp_label   = "📖 Desplegable ON" if desp_on else "📖 Desplegable OFF"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(tw_label, callback_data="toggle_tw"),
@@ -4476,6 +4732,9 @@ def build_preview_kb(tw_on: bool = True, tg_on: bool = True, wa_on: bool = False
         ],
         [
             InlineKeyboardButton(eco_label, callback_data="toggle_eco"),
+        ],
+        [
+            InlineKeyboardButton(desp_label, callback_data="toggle_desp"),
         ],
         [
             InlineKeyboardButton("⚡ Publicar auto", callback_data="pub_auto"),
@@ -4633,6 +4892,12 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ADMIN_CHAT_ID
+    # Ignorar mensajes de canales (el bot es admin del canal; no debe procesar sus posts)
+    if update.message and update.message.chat.type == "channel":
+        return
+    if BOT_PAUSED:
+        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+        return
     text_in = update.message.text.strip()
 
     # Guardar chat_id del operador para reportes
@@ -4996,6 +5261,28 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Agente /c — ajuste del plan ──
+    if context.user_data.get("waiting_for_cmdc_adjust"):
+        context.user_data["waiting_for_cmdc_adjust"] = False
+        old_plan = context.user_data.get("cmd_c_plan", {})
+        history  = old_plan.get("history", [])
+        msg_edit = await update.message.reply_text("Ajustando el plan...")
+        try:
+            plan = await asyncio.to_thread(_cmd_c_plan_sync, text_in, history)
+        except Exception as e:
+            await msg_edit.edit_text(f"No pude ajustar el plan: {e}")
+            return
+        if not plan["url"]:
+            plan["url"] = old_plan.get("url", "")
+        context.user_data["cmd_c_plan"] = plan
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
+            InlineKeyboardButton("✏️ Ajustar",  callback_data="cmdc_adjust"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="cmdc_cancel"),
+        ]])
+        await msg_edit.edit_text(_cmd_c_plan_text(plan), parse_mode="Markdown", reply_markup=kb)
+        return
+
     # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
     url = extract_url_from_text(text_in)
     if not url:
@@ -5240,6 +5527,12 @@ async def _do_schedule(query, context, data, target):
     post_content = published["content"]
     custom_hashtags = context.user_data.get("pre_sched_hashtags")
 
+    if context.user_data.get("desp_on", False):
+        slug = published.get("slug", url_slug(data["title"]))
+        wrapped = _wrap_nota_desplegable(post_id, slug, post_content, data)
+        if await asyncio.to_thread(update_post, post_id, {"content": wrapped}):
+            post_content = wrapped
+
     try:
         await asyncio.to_thread(
             _add_scheduled_job,
@@ -5339,6 +5632,151 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Cancelado.")
         return
 
+    # ── Agente /c callbacks ──────────────────────────────────────────────────
+    if query.data == "cmdc_cancel":
+        context.user_data.pop("cmd_c_plan", None)
+        await query.edit_message_text("Cancelado.")
+        return
+
+    if query.data == "cmdc_adjust":
+        context.user_data["waiting_for_cmdc_adjust"] = True
+        await query.edit_message_text(
+            _cmd_c_plan_text(context.user_data.get("cmd_c_plan", {}))
+            + "\n\n_Escribí tus ajustes como mensaje normal:_",
+            parse_mode="Markdown",
+        )
+        return
+
+    if query.data == "cmdc_exec":
+        plan = context.user_data.pop("cmd_c_plan", None)
+        if not plan or not plan.get("url"):
+            await query.edit_message_text("Plan inválido o expirado. Usá /c de nuevo.")
+            return
+
+        url = plan["url"]
+        modo = plan.get("modo", "crear")
+
+        # ── MODO ACTUALIZAR: patch directo sobre post existente de ME ──────────
+        if modo == "actualizar":
+            await query.edit_message_text("Actualizando post existente...")
+            # Buscar ID del post por slug
+            slug = url.rstrip("/").rsplit("/", 1)[-1]
+            r = await asyncio.to_thread(
+                requests.get,
+                f"{WP_URL}/wp-json/wp/v2/posts",
+                params={"slug": slug, "context": "edit"},
+                headers=wp_auth(), timeout=15
+            )
+            posts = r.json() if r.ok else []
+            if not posts or not isinstance(posts, list):
+                await query.edit_message_text(f"No encontré el post en WP para: {url}")
+                context.user_data.pop("cmd_c_photo_bytes", None)
+                return
+            post_id = posts[0]["id"]
+            patch: dict = {}
+
+            # Foto adjunta → subir y usar como portada
+            photo_bytes = context.user_data.pop("cmd_c_photo_bytes", None)
+            if photo_bytes:
+                await query.edit_message_text("Subiendo imagen adjunta...")
+                alt = plan.get("override_title") or posts[0].get("title", {}).get("rendered", "")
+                media_id = await asyncio.to_thread(upload_image_bytes, photo_bytes, "jpg", alt)
+                if media_id:
+                    patch["featured_media"] = media_id
+                else:
+                    await query.edit_message_text("Error subiendo la imagen. Intentá de nuevo.")
+                    return
+
+            if plan.get("override_title"):
+                patch["title"] = plan["override_title"]
+            if plan.get("override_categories"):
+                patch["categories"] = plan["override_categories"]
+
+            if not patch:
+                await query.edit_message_text("No hay cambios que aplicar.")
+                return
+
+            rp = await asyncio.to_thread(
+                requests.post,
+                f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+                headers={**wp_auth(), "Content-Type": "application/json"},
+                json=patch, timeout=20
+            )
+            if rp.ok:
+                post_link = rp.json().get("link", url)
+                cambios = []
+                if "featured_media" in patch: cambios.append("imagen")
+                if "title" in patch: cambios.append("título")
+                if "categories" in patch: cambios.append("categorías")
+                await query.edit_message_text(
+                    f"Post actualizado ({', '.join(cambios)}):\n{post_link}"
+                )
+            else:
+                await query.edit_message_text(f"Error WP {rp.status_code}: {rp.text[:200]}")
+            return
+        # ── fin modo actualizar ────────────────────────────────────────────────
+
+        await query.edit_message_text("Procesando la nota...")
+        kind = detect_url_kind(url)
+        try:
+            if kind == "youtube":
+                data = await asyncio.to_thread(scrape_youtube, url)
+            else:
+                data = await asyncio.to_thread(scrape, url)
+        except Exception as e:
+            logger.exception("cmdc_exec scrape error: %s", url)
+            await query.edit_message_text(f"No pude extraer la nota: {e}")
+            return
+
+        # Aplicar overrides del plan
+        if plan.get("override_title"):
+            data["title"] = plan["override_title"]
+        if plan.get("override_categories") is not None:
+            data["_cat_override"] = plan["override_categories"]
+        if plan.get("redactor_instructions"):
+            data["_redactor_instructions"] = plan["redactor_instructions"]
+
+        # Foto adjunta: subir a WP y usar como portada
+        photo_bytes = context.user_data.pop("cmd_c_photo_bytes", None)
+        if photo_bytes:
+            await query.edit_message_text("Subiendo imagen adjunta...")
+            alt = get_title(data)
+            media_id = await asyncio.to_thread(upload_image_bytes, photo_bytes, "jpg", alt)
+            if media_id:
+                data["_featured_media_id"] = media_id
+                data["image_url"] = ""  # no re-subir desde URL
+
+        # Aplicar toggles de canales
+        channels = plan.get("channels", ["wordpress", "telegram", "twitter"])
+        context.user_data["tw_on"]   = "twitter"  in channels
+        context.user_data["tg_on"]   = "telegram" in channels
+        context.user_data["li_on"]   = "linkedin" in channels
+        context.user_data["wa_on"]   = False
+        context.user_data["dest_on"] = False
+
+        hilo = detect_hilo(data)
+        data["hilo"] = hilo
+        context.user_data["article"] = data
+
+        # Generar bajada reescrita
+        if not data.get("rewritten_excerpt"):
+            kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+            try:
+                instr = plan.get("redactor_instructions") or ""
+                data["rewritten_excerpt"] = await asyncio.to_thread(
+                    rewrite_excerpt_with_gpt,
+                    get_title(data), data.get("text", ""),
+                    data.get("original_excerpt") or data.get("excerpt", ""),
+                    kw + (f". {instr}" if instr else ""),
+                )
+            except Exception:
+                data["rewritten_excerpt"] = ""
+
+        kb = _preview_kb_from_ctx(context)
+        await query.edit_message_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
+        return
+    # ── fin agente /c ────────────────────────────────────────────────────────
+
     if query.data == "change_title":
         context.user_data["waiting_for_title"] = True
         await query.edit_message_text(
@@ -5407,6 +5845,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_eco":
         context.user_data["eco_on"] = not context.user_data.get("eco_on", False)
+        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
+        return
+
+    if query.data == "toggle_desp":
+        context.user_data["desp_on"] = not context.user_data.get("desp_on", False)
         await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
@@ -6144,9 +6587,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text("⚡ Publicando…")
 
-        # Imagen
-        image_id = None
-        if data.get("image_url"):
+        # Imagen — prioridad: foto adjunta de /Claude > image_url scrapeada
+        image_id = data.pop("_featured_media_id", None)
+        if not image_id and data.get("image_url"):
             kw  = focus_keyword(data["title"])
             alt = f"{kw} - {get_title(data)}"
             image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
@@ -6165,6 +6608,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post_id      = published["id"]
         post_content = published["content"]
         suffix       = " (Destacados)" if dest_on else ""
+
+        if context.user_data.get("desp_on", False):
+            slug = published.get("slug", url_slug(data["title"]))
+            wrapped = _wrap_nota_desplegable(post_id, slug, post_content, data)
+            if await asyncio.to_thread(update_post, post_id, {"content": wrapped}):
+                post_content = wrapped
+
         stat_publish(data["title"], data.get("source_url", ""))
         context.user_data["published"] = {
             "url": post_url, "data": data, "id": post_id, "content": post_content
@@ -7302,6 +7752,9 @@ def _remove_scheduled_job(post_id: int):
 
 async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
     """Callback de job_queue.run_once: dispara canal TG + tweet automático."""
+    if BOT_PAUSED:
+        logger.info("_fire_scheduled_social: bot pausado, saltando job")
+        return
     job_data = context.job.data
     data = job_data.get("data", {})
     post_url = job_data.get("post_url", "")
@@ -8191,6 +8644,83 @@ async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: 
             parse_mode="Markdown",
             reply_markup=sug_kb,
         )
+
+
+async def cmd_c(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agente editorial: /Claude [URL + instrucciones en texto libre]"""
+    user_input = update.message.text
+    # Quitar el comando /Claude o /Claude@botname
+    user_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', user_input).strip()
+    if not user_input:
+        await update.message.reply_text(
+            "Mandame la URL y tus instrucciones. Ejemplo:\n"
+            "`/c https://... publicala en Mundo del vino, título más corto`",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("Interpretando tu pedido...")
+    try:
+        plan = await asyncio.to_thread(_cmd_c_plan_sync, user_input)
+    except Exception as e:
+        await msg.edit_text(f"No pude interpretar el pedido: {e}")
+        return
+
+    if not plan["url"]:
+        await msg.edit_text("No encontré una URL en el mensaje. Incluí el link.")
+        return
+
+    context.user_data["cmd_c_plan"]  = plan
+    context.user_data["cmd_c_msg_id"] = msg.message_id
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
+        InlineKeyboardButton("✏️ Ajustar",  callback_data="cmdc_adjust"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="cmdc_cancel"),
+    ]])
+    await msg.edit_text(_cmd_c_plan_text(plan), parse_mode="Markdown", reply_markup=kb)
+
+
+async def handle_claude_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foto enviada con caption /Claude ... — usa la foto como imagen de portada."""
+    caption = update.message.caption or ""
+    user_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', caption).strip()
+    if not user_input:
+        await update.message.reply_text(
+            "Incluí la URL e instrucciones en el caption. Ej:\n"
+            "`/Claude https://... publicala con esta imagen`",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text("Interpretando tu pedido...")
+
+    # Descargar foto de Telegram (resolución máxima)
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = bytes(await photo_file.download_as_bytearray())
+
+    try:
+        plan = await asyncio.to_thread(_cmd_c_plan_sync, user_input)
+    except Exception as e:
+        await msg.edit_text(f"No pude interpretar el pedido: {e}")
+        return
+
+    if not plan["url"]:
+        await msg.edit_text("No encontré una URL en el caption. Incluí el link.")
+        return
+
+    context.user_data["cmd_c_plan"]       = plan
+    context.user_data["cmd_c_photo_bytes"] = photo_bytes
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
+        InlineKeyboardButton("✏️ Ajustar",  callback_data="cmdc_adjust"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="cmdc_cancel"),
+    ]])
+    await msg.edit_text(
+        _cmd_c_plan_text(plan) + "\n\n📎 _Imagen adjunta como portada_",
+        parse_mode="Markdown", reply_markup=kb,
+    )
 
 
 async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9463,12 +9993,15 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("STOP", cmd_stop))
+    app.add_handler(CommandHandler("RESUME", cmd_resume))
     app.add_handler(CommandHandler("comandos", cmd_comandos))
     app.add_handler(CommandHandler("help", cmd_comandos))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
+    app.add_handler(CommandHandler("Claude", cmd_c))
     app.add_handler(CommandHandler("curador", cmd_curador))
     app.add_handler(CommandHandler("horarios", cmd_horarios))
     app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
@@ -9480,6 +10013,7 @@ def main():
     app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"(?i)^/[Cc]laude"), handle_claude_photo))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
@@ -9541,7 +10075,10 @@ def main():
         logger.warning(f"restore_scheduled_jobs: {e}")
 
     logger.info("Bot iniciado y esperando links...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query", "my_chat_member", "edited_message"],
+    )
 
 
 if __name__ == "__main__":
