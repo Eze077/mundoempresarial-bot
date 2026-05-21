@@ -1960,6 +1960,7 @@ def _cmd_c_plan_sync(user_input: str, history: list | None = None) -> dict:
         "resumen":              resumen,
         "gpt_reply":            text,
         "history":              messages + [{"role": "assistant", "content": text}],
+        "raw_input":            user_input,
     }
 
 
@@ -1973,10 +1974,11 @@ def _cmd_c_plan_text(plan: dict) -> str:
     modo = plan.get("modo", "crear")
     modo_emoji = "✏️ Actualizar post existente" if modo == "actualizar" else "🆕 Crear nota nueva"
     resumen = plan["resumen"]
+    url_display = f"`{md_escape(plan['url'])}`" if plan.get("url") else "_\\(texto directo, sin URL\\)_"
     return (
         f"*Plan de publicación*\n\n"
         f"⚙️ Modo: {md_escape(modo_emoji)}\n"
-        f"🔗 URL: `{md_escape(plan['url'])}`\n"
+        f"🔗 Fuente: {url_display}\n"
         f"📝 Título: {md_escape(titulo_str)}\n"
         f"📂 Categorías: {md_escape(cats_str)}\n"
         f"📣 Canales: {md_escape(ch_str)}\n"
@@ -5277,6 +5279,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if not plan["url"]:
             plan["url"] = old_plan.get("url", "")
+        if not plan.get("raw_input"):
+            plan["raw_input"] = old_plan.get("raw_input", "")
         context.user_data["cmd_c_plan"] = plan
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
@@ -5652,14 +5656,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cmdc_exec":
         plan = context.user_data.pop("cmd_c_plan", None)
-        if not plan or not plan.get("url") or not plan["url"].startswith("http"):
-            await query.edit_message_text(
-                "No se detectó una URL válida en el mensaje. "
-                "Incluí el link a la nota que querés publicar y volvé a intentar con /c."
-            )
+        if not plan:
+            await query.edit_message_text("Plan inválido o expirado. Usá /c de nuevo.")
             return
 
-        url = plan["url"]
+        url = plan.get("url", "")
         modo = plan.get("modo", "crear")
 
         # ── MODO ACTUALIZAR: patch directo sobre post existente de ME ──────────
@@ -5723,16 +5724,46 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ── fin modo actualizar ────────────────────────────────────────────────
 
         await query.edit_message_text("Procesando la nota...")
-        kind = detect_url_kind(url)
-        try:
-            if kind == "youtube":
-                data = await asyncio.to_thread(scrape_youtube, url)
+
+        if url and url.startswith("http"):
+            kind = detect_url_kind(url)
+            try:
+                if kind == "youtube":
+                    data = await asyncio.to_thread(scrape_youtube, url)
+                else:
+                    data = await asyncio.to_thread(scrape, url)
+            except Exception as e:
+                logger.exception("cmdc_exec scrape error: %s", url)
+                await query.edit_message_text(f"No pude extraer la nota: {e}")
+                return
+        else:
+            # Modo texto directo: el contenido viene en raw_input del plan
+            raw_input = plan.get("raw_input", "").strip()
+            if not raw_input:
+                await query.edit_message_text(
+                    "No hay URL ni texto para procesar. Pegá el contenido junto con /c."
+                )
+                return
+            # Si hay una URL de referencia en el texto, usarla como source_url
+            ref_match = re.search(r'https?://\S+', raw_input)
+            source_url = ref_match.group(0).rstrip(".,;)>") if ref_match else "https://mundoempresarial.ar"
+            # Limpiar el texto: quitar URLs y prefijo del comando
+            clean_text = re.sub(r'https?://\S+', '', raw_input).strip()
+            clean_text = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_text).strip()
+            # Título: override del plan o primera oración del texto
+            if plan.get("override_title"):
+                title = plan["override_title"]
             else:
-                data = await asyncio.to_thread(scrape, url)
-        except Exception as e:
-            logger.exception("cmdc_exec scrape error: %s", url)
-            await query.edit_message_text(f"No pude extraer la nota: {e}")
-            return
+                first_sent = re.split(r'(?<=[.!?])\s+', clean_text)[0]
+                title = (first_sent[:80] if first_sent else clean_text[:80]).strip()
+            data = {
+                "title":      title,
+                "text":       clean_text,
+                "excerpt":    clean_text[:200],
+                "source_url": source_url,
+                "image_url":  "",
+                "hilo":       2,
+            }
 
         # Aplicar overrides del plan
         if plan.get("override_title"):
@@ -8670,10 +8701,6 @@ async def cmd_c(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan = await asyncio.to_thread(_cmd_c_plan_sync, user_input)
     except Exception as e:
         await msg.edit_text(f"No pude interpretar el pedido: {e}")
-        return
-
-    if not plan["url"]:
-        await msg.edit_text("No encontré una URL en el mensaje. Incluí el link.")
         return
 
     context.user_data["cmd_c_plan"]  = plan
