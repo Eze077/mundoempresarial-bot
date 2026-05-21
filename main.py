@@ -493,16 +493,22 @@ def _gpt_format_article(title: str, text: str, source_url: str,
 El lector es un empresario pyme, monotributista o profesional independiente argentino con poco tiempo.
 
 REGLAS OBLIGATORIAS:
-1. Dividí el contenido en secciones con <h2 id="slug-en-kebab-case">Título descriptivo</h2>
-   — el id debe ser único, en minúsculas, sin tildes, con guiones.
+0. ANTES del HTML principal, generá 3 a 5 bullets analíticos para el resumen "Lo que tenés que saber".
+   Cada bullet debe resumir UN dato clave, cambio concreto o impacto para pymes — NO copies frases del texto.
+   Encerralos entre estas marcas exactas (JSON array, strings sin HTML):
+   BULLETS_START
+   ["bullet analítico 1", "bullet con dato clave 2", "bullet impacto pyme 3"]
+   BULLETS_END
+1. Dividí el contenido en MÍNIMO 4 secciones con <h2 id="slug-en-kebab-case">Título analítico</h2>
+   — el id debe ser único, en minúsculas, sin tildes, con guiones. Cada sección responde UNA pregunta concreta del lector.
 2. Cada párrafo en <p>...</p>
 3. Datos numéricos, porcentajes y cifras clave en <strong>dato</strong>
 4. Al menos 1 link interno a otra nota de mundoempresarial.ar si el contexto lo permite
 5. Al final incluí este bloque exacto (reemplazá RESUMEN_AQUI con máx. 200 caracteres):
 {pyme_box_template}
 6. Tono: directo, informativo, español rioplatense. Sin "cabe destacar", "en el marco de", "en pos de".
-7. NO incluyas: bullets, ToC, fuente, scripts, comentarios HTML — eso lo agrega el sistema.
-8. Devolvé SOLO el HTML del cuerpo (H2s + párrafos + pyme-box). Nada más.{instr_extra}
+7. NO incluyas: ToC, fuente, scripts, comentarios HTML — eso lo agrega el sistema.
+8. Devolvé: BULLETS_START...BULLETS_END y luego el HTML del cuerpo (H2s + párrafos + pyme-box). Nada más.{instr_extra}
 
 TÍTULO: {title}
 KEYWORD SEO: {kw}
@@ -526,10 +532,25 @@ TEXTO A FORMATEAR:
             logger.warning(f"_gpt_format_article {r.status_code}: {r.text[:200]}")
             return None
 
-        html = r.json()["choices"][0]["message"]["content"].strip()
+        raw_response = r.json()["choices"][0]["message"]["content"].strip()
         # Limpiar markdown fences si GPT los puso
-        html = re.sub(r'^```(?:html)?\s*', '', html)
-        html = re.sub(r'\s*```$', '', html).strip()
+        raw_response = re.sub(r'^```(?:html|json)?\s*', '', raw_response)
+        raw_response = re.sub(r'\s*```$', '', raw_response).strip()
+
+        # Extraer bullets analíticos del bloque BULLETS_START...BULLETS_END
+        bullets_list = []
+        bullets_match = re.search(r'BULLETS_START\s*(\[.*?\])\s*BULLETS_END', raw_response, re.DOTALL)
+        if bullets_match:
+            try:
+                bullets_list = json.loads(bullets_match.group(1))
+                if not isinstance(bullets_list, list):
+                    bullets_list = []
+            except Exception:
+                bullets_list = []
+            html = raw_response[:bullets_match.start()].strip() + "\n" + raw_response[bullets_match.end():].strip()
+            html = html.strip()
+        else:
+            html = raw_response
 
         # Extraer H2 headings para el ToC
         h2_headings = []
@@ -539,8 +560,8 @@ TEXTO A FORMATEAR:
             if anchor and label:
                 h2_headings.append({"content": label, "anchor": anchor})
 
-        logger.info(f"_gpt_format_article OK: {len(html)} chars, {len(h2_headings)} H2s")
-        return {"html": html, "h2_headings": h2_headings}
+        logger.info(f"_gpt_format_article OK: {len(html)} chars, {len(h2_headings)} H2s, {len(bullets_list)} bullets")
+        return {"html": html, "h2_headings": h2_headings, "bullets": bullets_list}
 
     except Exception as e:
         logger.warning(f"_gpt_format_article error: {e}")
@@ -931,34 +952,38 @@ def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dic
         body = body[:last_f.start()] + body[last_f.end():]
     body = re.sub(r'<!-- /?wp:[^>]+ -->\n?', '', body).strip()
 
-    # 4. Bullets: si hay HTML de GPT usarlo (evita garbage de existing post stripeado)
-    gpt_html_src = data.get("_gpt_html", "")
-    if gpt_html_src:
-        bullets = []
-        for m in re.finditer(r'<p(?:\s[^>]*)?>(.+?)</p>', gpt_html_src, re.DOTALL):
-            p_text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-            if len(p_text) < 30:
-                continue
-            first_sent = re.match(r'([^.!?]+[.!?])', p_text)
-            bullet_text = first_sent.group(1).strip() if first_sent else p_text[:200]
-            if len(bullet_text) > 25:
-                bullets.append(f'<li>{bullet_text}</li>')
-            if len(bullets) >= 5:
-                break
-        if not bullets:
-            bullets = [f'<li>{p_text[:200]}</li>']
+    # 4. Bullets: prioridad → GPT analíticos → párrafos GPT → excerpt
+    gpt_bullets = [b for b in data.get("_gpt_bullets", []) if isinstance(b, str) and len(b) > 25]
+    if gpt_bullets:
+        bullets = [f'<li>{b}</li>' for b in gpt_bullets[:5]]
     else:
-        raw = (data.get("excerpt") or data.get("text", ""))[:700]
-        sentences = re.split(r'(?<=[.!?])\s+', raw.strip())
-        bullets = []
-        for s in sentences:
-            s = s.strip()
-            if len(s) > 25:
-                bullets.append(f'<li>{s}</li>')
-            if len(bullets) >= 5:
-                break
-        if not bullets:
-            bullets = [f'<li>{raw[:200]}</li>']
+        gpt_html_src = data.get("_gpt_html", "")
+        if gpt_html_src:
+            bullets = []
+            for m in re.finditer(r'<p(?:\s[^>]*)?>(.+?)</p>', gpt_html_src, re.DOTALL):
+                p_text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+                if len(p_text) < 30:
+                    continue
+                first_sent = re.match(r'([^.!?]+[.!?])', p_text)
+                bullet_text = first_sent.group(1).strip() if first_sent else p_text[:200]
+                if len(bullet_text) > 25:
+                    bullets.append(f'<li>{bullet_text}</li>')
+                if len(bullets) >= 5:
+                    break
+            if not bullets:
+                bullets = [f'<li>{p_text[:200]}</li>']
+        else:
+            raw = (data.get("excerpt") or data.get("text", ""))[:700]
+            sentences = re.split(r'(?<=[.!?])\s+', raw.strip())
+            bullets = []
+            for s in sentences:
+                s = s.strip()
+                if len(s) > 25:
+                    bullets.append(f'<li>{s}</li>')
+                if len(bullets) >= 5:
+                    break
+            if not bullets:
+                bullets = [f'<li>{raw[:200]}</li>']
     bullets_html = '<ul>\n' + '\n'.join(bullets) + '\n</ul>'
 
     # 5. Reconstruir ToC con <p><strong>, estilos bordó y onclick expandir
@@ -5857,7 +5882,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if gpt_result:
                     # Construir contenido desde el HTML de GPT
                     hilo       = detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]})
-                    data_upd["_gpt_html"] = gpt_result["html"]   # para bullets en _wrap_nota_desplegable
+                    data_upd["_gpt_html"]    = gpt_result["html"]
+                    data_upd["_gpt_bullets"] = gpt_result.get("bullets", [])
                     toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
                     fuente_html = (
                         f'<!-- wp:paragraph -->\n'
