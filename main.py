@@ -1430,6 +1430,11 @@ def find_scheduled_collision(target_dt, window_minutes: int = 5):
     return adjusted
 
 
+def _meta_safe(text: str, max_len: int = 160) -> str:
+    """Sanitiza valor para wp_postmeta: elimina chars de 4 bytes (emojis) que rompen MySQL utf8."""
+    return re.sub(r'[\U00010000-\U0010FFFF]', '', text or '')[:max_len].strip()
+
+
 def publish_post(data: dict, image_id: int | None, destacado: bool = False,
                  scheduled_date=None) -> str | None:
     """
@@ -1475,8 +1480,8 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
         "categories": cat_ids,
         "tags":       tag_ids,
         "meta": {
-            "rank_math_title":            s_title,
-            "rank_math_description":      s_desc,
+            "rank_math_title":            _meta_safe(s_title),
+            "rank_math_description":      _meta_safe(s_desc, 320),
             "rank_math_focus_keyword":    s_kw,
             "rank_math_robots":           ["index", "follow"],
             "rank_math_og_content_image": data.get("image_url", ""),
@@ -5957,7 +5962,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "rank_math_description":   s_desc,
                 })
                 if plan.get("override_title"):
-                    patch["meta"]["rank_math_title"] = plan["override_title"]
+                    patch["meta"]["rank_math_title"] = _meta_safe(plan["override_title"])
 
             if not patch:
                 await query.edit_message_text("No hay cambios que aplicar.")
@@ -9932,8 +9937,8 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
         "categories":     [CAT_FRASES],
         "featured_media": img_id or 0,
         "meta": {
-            "rank_math_title":            wp_title,
-            "rank_math_description":      desc,
+            "rank_math_title":            _meta_safe(wp_title),
+            "rank_math_description":      _meta_safe(desc, 320),
             "rank_math_focus_keyword":    kw,
             "rank_math_robots":           ["index", "follow"],
             "rank_math_og_content_image": img_url,
