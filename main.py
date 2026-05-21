@@ -5702,10 +5702,23 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ── Actualizar contenido si hay texto nuevo o instrucciones de reescritura ──
             raw_input      = plan.get("raw_input", "")
             redactor_instr = plan.get("redactor_instructions") or ""
-            # Extraer texto limpio (sin URL ni prefijo de comando)
-            clean_new_text = re.sub(r'https?://\S+', '', raw_input).strip()
-            clean_new_text = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_new_text).strip()
-            has_new_text   = len(clean_new_text.split()) >= 60
+            desp_requested = False
+
+            # Quitar URL y prefijo de comando del raw_input
+            clean_input = re.sub(r'https?://\S+', '', raw_input).strip()
+            clean_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_input).strip()
+
+            # Si hay un marcador "Texto:" o "Contenido:", separar instrucción de contenido
+            text_marker = re.search(r'(?i)\b(Texto|Contenido)\s*:\s*', clean_input)
+            if text_marker:
+                instr_part     = clean_input[:text_marker.start()].strip()
+                clean_new_text = clean_input[text_marker.end():].strip()
+                if instr_part and not redactor_instr:
+                    redactor_instr = instr_part
+            else:
+                clean_new_text = clean_input
+
+            has_new_text = len(clean_new_text.split()) >= 60
             has_content_instr = bool(re.search(
                 r'mejora|reescrib|agreg|desplegable|nota|contenido|texto', redactor_instr, re.I
             ))
@@ -5713,17 +5726,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if has_new_text or has_content_instr:
                 await query.edit_message_text("Reformateando contenido...")
 
-                # Extraer source_url del contenido existente
+                # source_url: extraer del contenido existente o usar la URL del plan
                 existing_raw = post_data.get("content", {}).get("raw", "")
                 src_match = re.search(r'href="(https?://[^"]+)"[^>]*>Ver nota original', existing_raw)
                 source_url = src_match.group(1) if src_match else url
 
-                # Texto base: limpiar Gutenberg blocks del contenido existente
-                existing_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
-                existing_text = re.sub(r'<[^>]+>', ' ', existing_text)
-                existing_text = re.sub(r'\s+', ' ', existing_text).strip()
-
-                combined_text = (existing_text + "\n\n" + clean_new_text).strip() if has_new_text else existing_text
+                # Usar el texto nuevo directamente (reemplaza, no combina con el contenido anterior)
+                body_text = clean_new_text if has_new_text else ""
+                if not body_text:
+                    # Sin texto nuevo: extraer texto limpio del post existente
+                    body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
+                    body_text = re.sub(r'<[^>]+>', ' ', body_text)
+                    body_text = re.sub(r'\s+', ' ', body_text).strip()
 
                 existing_title = (post_data.get("title", {}).get("raw")
                                   or post_data.get("title", {}).get("rendered", ""))
@@ -5731,11 +5745,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 data_upd = {
                     "title":      title,
-                    "text":       combined_text,
-                    "excerpt":    combined_text[:200],
+                    "text":       body_text,
+                    "excerpt":    body_text[:200],
                     "source_url": source_url,
                     "image_url":  "",
-                    "hilo":       detect_hilo({"title": title, "text": combined_text, "excerpt": combined_text[:200]}),
+                    "hilo":       detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]}),
                 }
                 if redactor_instr:
                     data_upd["_redactor_instructions"] = redactor_instr
