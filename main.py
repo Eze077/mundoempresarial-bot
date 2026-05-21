@@ -1947,8 +1947,11 @@ def _cmd_c_plan_sync(user_input: str, history: list | None = None) -> dict:
     instruccion = plan_raw.get("INSTRUCCION", "NINGUNA")
     redactor_instructions = None if instruccion.upper() == "NINGUNA" else instruccion
 
+    url_raw = plan_raw.get("URL", "").strip()
+    url_clean = url_raw if url_raw.lower().startswith("http") else ""
+
     return {
-        "url":                  plan_raw.get("URL", ""),
+        "url":                  url_clean,
         "modo":                 modo,
         "override_title":       override_title,
         "override_categories":  override_categories,
@@ -5649,8 +5652,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cmdc_exec":
         plan = context.user_data.pop("cmd_c_plan", None)
-        if not plan or not plan.get("url"):
-            await query.edit_message_text("Plan inválido o expirado. Usá /c de nuevo.")
+        if not plan or not plan.get("url") or not plan["url"].startswith("http"):
+            await query.edit_message_text(
+                "No se detectó una URL válida en el mensaje. "
+                "Incluí el link a la nota que querés publicar y volvé a intentar con /c."
+            )
             return
 
         url = plan["url"]
