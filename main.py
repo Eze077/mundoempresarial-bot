@@ -5744,26 +5744,51 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "No hay URL ni texto para procesar. Pegá el contenido junto con /c."
                 )
                 return
-            # Si hay una URL de referencia en el texto, usarla como source_url
+            # Detectar URL de referencia en el texto
             ref_match = re.search(r'https?://\S+', raw_input)
-            source_url = ref_match.group(0).rstrip(".,;)>") if ref_match else "https://mundoempresarial.ar"
+            ref_url = ref_match.group(0).rstrip(".,;)>") if ref_match else ""
             # Limpiar el texto: quitar URLs y prefijo del comando
             clean_text = re.sub(r'https?://\S+', '', raw_input).strip()
             clean_text = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_text).strip()
-            # Título: override del plan o primera oración del texto
-            if plan.get("override_title"):
-                title = plan["override_title"]
+
+            MIN_WORDS = 60
+            if len(clean_text.split()) < MIN_WORDS:
+                # Texto insuficiente — intentar scrapeando la URL de referencia
+                if ref_url:
+                    await query.edit_message_text(
+                        f"Texto muy corto para generar una nota. "
+                        f"Intentando extraer contenido de {ref_url}…"
+                    )
+                    try:
+                        data = await asyncio.to_thread(scrape, ref_url)
+                    except Exception as e:
+                        await query.edit_message_text(
+                            f"No pude extraer contenido de {ref_url}: {e}\n\n"
+                            "Pegá el texto completo del artículo junto con /c."
+                        )
+                        return
+                else:
+                    await query.edit_message_text(
+                        "El texto es muy corto para generar una nota \\(mínimo 60 palabras\\)\\. "
+                        "Pegá el contenido completo del artículo junto con /c\\.",
+                        parse_mode="MarkdownV2"
+                    )
+                    return
             else:
-                first_sent = re.split(r'(?<=[.!?])\s+', clean_text)[0]
-                title = (first_sent[:80] if first_sent else clean_text[:80]).strip()
-            data = {
-                "title":      title,
-                "text":       clean_text,
-                "excerpt":    clean_text[:200],
-                "source_url": source_url,
-                "image_url":  "",
-                "hilo":       2,
-            }
+                source_url = ref_url or "https://mundoempresarial.ar"
+                if plan.get("override_title"):
+                    title = plan["override_title"]
+                else:
+                    first_sent = re.split(r'(?<=[.!?])\s+', clean_text)[0]
+                    title = (first_sent[:80] if first_sent else clean_text[:80]).strip()
+                data = {
+                    "title":      title,
+                    "text":       clean_text,
+                    "excerpt":    clean_text[:200],
+                    "source_url": source_url,
+                    "image_url":  "",
+                    "hilo":       2,
+                }
 
         # Aplicar overrides del plan
         if plan.get("override_title"):
