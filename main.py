@@ -910,7 +910,7 @@ def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dic
     """Envuelve contenido en formato nota desplegable (bullets + ToC + expand btn + div oculto + JS)."""
     # 1. Extraer bloque ToC generado por _build_rank_math_toc
     toc_match = re.search(
-        r'<!-- wp:rank-math/toc-block[^-]*-->\s*(<div class="wp-block-rank-math-toc-block".*?</div>)\s*<!-- /wp:rank-math/toc-block -->',
+        r'<!-- wp:rank-math/toc-block[^\n]*-->\s*(<div class="wp-block-rank-math-toc-block".*?</div>)\s*<!-- /wp:rank-math/toc-block -->',
         content_html, re.DOTALL
     )
     toc_raw = toc_match.group(1).strip() if toc_match else ""
