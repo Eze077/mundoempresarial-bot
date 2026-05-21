@@ -5663,10 +5663,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = plan.get("url", "")
         modo = plan.get("modo", "crear")
 
-        # ── MODO ACTUALIZAR: patch directo sobre post existente de ME ──────────
+        # ── MODO ACTUALIZAR: patch sobre post existente de ME ───────────────────
         if modo == "actualizar":
             await query.edit_message_text("Actualizando post existente...")
-            # Buscar ID del post por slug
             slug = url.rstrip("/").rsplit("/", 1)[-1]
             r = await asyncio.to_thread(
                 requests.get,
@@ -5679,14 +5678,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"No encontré el post en WP para: {url}")
                 context.user_data.pop("cmd_c_photo_bytes", None)
                 return
-            post_id = posts[0]["id"]
+            post_id   = posts[0]["id"]
+            post_data = posts[0]
             patch: dict = {}
 
             # Foto adjunta → subir y usar como portada
             photo_bytes = context.user_data.pop("cmd_c_photo_bytes", None)
             if photo_bytes:
                 await query.edit_message_text("Subiendo imagen adjunta...")
-                alt = plan.get("override_title") or posts[0].get("title", {}).get("rendered", "")
+                alt = plan.get("override_title") or post_data.get("title", {}).get("rendered", "")
                 media_id = await asyncio.to_thread(upload_image_bytes, photo_bytes, "jpg", alt)
                 if media_id:
                     patch["featured_media"] = media_id
@@ -5699,6 +5699,65 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if plan.get("override_categories"):
                 patch["categories"] = plan["override_categories"]
 
+            # ── Actualizar contenido si hay texto nuevo o instrucciones de reescritura ──
+            raw_input      = plan.get("raw_input", "")
+            redactor_instr = plan.get("redactor_instructions") or ""
+            # Extraer texto limpio (sin URL ni prefijo de comando)
+            clean_new_text = re.sub(r'https?://\S+', '', raw_input).strip()
+            clean_new_text = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_new_text).strip()
+            has_new_text   = len(clean_new_text.split()) >= 60
+            has_content_instr = bool(re.search(
+                r'mejora|reescrib|agreg|desplegable|nota|contenido|texto', redactor_instr, re.I
+            ))
+
+            if has_new_text or has_content_instr:
+                await query.edit_message_text("Reformateando contenido...")
+
+                # Extraer source_url del contenido existente
+                existing_raw = post_data.get("content", {}).get("raw", "")
+                src_match = re.search(r'href="(https?://[^"]+)"[^>]*>Ver nota original', existing_raw)
+                source_url = src_match.group(1) if src_match else url
+
+                # Texto base: limpiar Gutenberg blocks del contenido existente
+                existing_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
+                existing_text = re.sub(r'<[^>]+>', ' ', existing_text)
+                existing_text = re.sub(r'\s+', ' ', existing_text).strip()
+
+                combined_text = (existing_text + "\n\n" + clean_new_text).strip() if has_new_text else existing_text
+
+                existing_title = (post_data.get("title", {}).get("raw")
+                                  or post_data.get("title", {}).get("rendered", ""))
+                title = plan.get("override_title") or existing_title
+
+                data_upd = {
+                    "title":      title,
+                    "text":       combined_text,
+                    "excerpt":    combined_text[:200],
+                    "source_url": source_url,
+                    "image_url":  "",
+                    "hilo":       detect_hilo({"title": title, "text": combined_text, "excerpt": combined_text[:200]}),
+                }
+                if redactor_instr:
+                    data_upd["_redactor_instructions"] = redactor_instr
+
+                kw          = focus_keyword(title)
+                new_content = format_content(data_upd, kw=kw)
+
+                # Aplicar nota desplegable si fue pedida
+                desp_requested = bool(re.search(r'desplegable', redactor_instr, re.I))
+                if desp_requested:
+                    new_content = _wrap_nota_desplegable(post_id, slug, new_content, data_upd)
+
+                patch["content"] = new_content
+                s_desc = get_excerpt(data_upd, kw=kw)
+                patch.setdefault("meta", {})
+                patch["meta"].update({
+                    "rank_math_focus_keyword": kw,
+                    "rank_math_description":   s_desc,
+                })
+                if plan.get("override_title"):
+                    patch["meta"]["rank_math_title"] = plan["override_title"]
+
             if not patch:
                 await query.edit_message_text("No hay cambios que aplicar.")
                 return
@@ -5707,16 +5766,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 requests.post,
                 f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
                 headers={**wp_auth(), "Content-Type": "application/json"},
-                json=patch, timeout=20
+                json=patch, timeout=30
             )
             if rp.ok:
                 post_link = rp.json().get("link", url)
                 cambios = []
                 if "featured_media" in patch: cambios.append("imagen")
-                if "title" in patch: cambios.append("título")
-                if "categories" in patch: cambios.append("categorías")
+                if "title"          in patch: cambios.append("título")
+                if "categories"     in patch: cambios.append("categorías")
+                if "content"        in patch:
+                    cambios.append("contenido" + (" + desplegable" if desp_requested else ""))
                 await query.edit_message_text(
-                    f"Post actualizado ({', '.join(cambios)}):\n{post_link}"
+                    f"✅ Post actualizado ({', '.join(cambios)}):\n{post_link}"
                 )
             else:
                 await query.edit_message_text(f"Error WP {rp.status_code}: {rp.text[:200]}")
