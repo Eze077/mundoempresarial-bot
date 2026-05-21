@@ -568,6 +568,38 @@ TEXTO A FORMATEAR:
         return None
 
 
+def _gpt_html_to_gutenberg(html: str) -> str:
+    """Convierte HTML crudo de GPT a bloques Gutenberg nativos (para notas NO desplegables)."""
+    blocks = []
+    remaining = html.strip()
+    _PAT = [
+        (re.compile(r'^(<h2\b[^>]*>.*?</h2>)', re.DOTALL | re.IGNORECASE),
+         '<!-- wp:heading {{"level":2}} -->\n{}\n<!-- /wp:heading -->'),
+        (re.compile(r'^(<p\b[^>]*>.*?</p>)', re.DOTALL | re.IGNORECASE),
+         '<!-- wp:paragraph -->\n{}\n<!-- /wp:paragraph -->'),
+        (re.compile(r'^(<ul\b[^>]*>.*?</ul>)', re.DOTALL | re.IGNORECASE),
+         '<!-- wp:list -->\n{}\n<!-- /wp:list -->'),
+        (re.compile(r'^(<div\b.*?</div>)', re.DOTALL | re.IGNORECASE),
+         '<!-- wp:html -->\n{}\n<!-- /wp:html -->'),
+    ]
+    while remaining:
+        matched = False
+        for pat, tpl in _PAT:
+            m = pat.match(remaining)
+            if m:
+                blocks.append(tpl.format(m.group(1)))
+                remaining = remaining[m.end():].strip()
+                matched = True
+                break
+        if not matched:
+            nxt = re.search(r'<(?:h2|p\b|ul|div)\b', remaining[1:], re.IGNORECASE)
+            if nxt:
+                remaining = remaining[1 + nxt.start():]
+            else:
+                break
+    return '\n\n'.join(blocks)
+
+
 def get_excerpt(data: dict, kw: str = "") -> str:
     """Devuelve la bajada a usar según los flags del preview.
 
@@ -5819,7 +5851,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ── Actualizar contenido si hay texto nuevo o instrucciones de reescritura ──
             raw_input      = plan.get("raw_input", "")
             redactor_instr = plan.get("redactor_instructions") or ""
-            desp_requested = False
+
+            # Detectar si el post existente ya es desplegable (preservarlo siempre)
+            existing_raw = post_data.get("content", {}).get("raw", "")
+            is_existing_desplegable = bool(re.search(r'id="nota-ampliada-\d+', existing_raw))
+            desp_requested = is_existing_desplegable
 
             # Quitar URL y prefijo de comando del raw_input
             clean_input = re.sub(r'https?://\S+', '', raw_input).strip()
@@ -5836,11 +5872,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 clean_new_text = clean_input
 
             has_new_text = len(clean_new_text.split()) >= 60
+            # "nota" y "texto" se sacan: demasiado genéricos, disparaban reformat por cualquier mención
             has_content_instr = bool(re.search(
-                r'mejora|reescrib|agreg|desplegable|nota|contenido|texto', redactor_instr, re.I
+                r'mejora|reescrib|agreg|desplegable|estructura|reformate', redactor_instr, re.I
             ))
+            # Si la instrucción es solo un fix menor (tildes, encoding), no reescribir
+            is_minor_fix = bool(re.search(
+                r'\b(corrig|tilde|acento|caracter|codif|encod)\b', redactor_instr, re.I
+            )) and not has_content_instr
 
-            if has_new_text or has_content_instr:
+            if (has_new_text or has_content_instr) and not is_minor_fix:
                 await query.edit_message_text("Reformateando contenido...")
 
                 # source_url: extraer del contenido existente o usar la URL del plan
@@ -5872,7 +5913,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data_upd["_redactor_instructions"] = redactor_instr
 
                 kw = focus_keyword(title)
-                desp_requested = bool(re.search(r'desplegable', redactor_instr, re.I))
+                # desp_requested ya fue seteado arriba (auto-detect + keyword)
+                desp_requested = desp_requested or bool(re.search(r'desplegable', redactor_instr, re.I))
 
                 # Intentar formatear con GPT (mejor calidad para texto estructurado)
                 gpt_result = await asyncio.to_thread(
@@ -5891,9 +5933,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f'rel="noopener noreferrer">Ver nota original</a></em></p>\n'
                         f'<!-- /wp:paragraph -->'
                     )
-                    new_content = (toc_block + "\n" if toc_block else "") + \
-                                  f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->' + \
-                                  "\n" + fuente_html
+                    if desp_requested:
+                        # Para desplegable: todo el cuerpo en wp:html (necesita JS + inline styles)
+                        body_block = f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->'
+                    else:
+                        # Para nota estándar: bloques Gutenberg nativos (sin wp:html wrapper)
+                        body_block = _gpt_html_to_gutenberg(gpt_result["html"])
+                    new_content = (toc_block + "\n" if toc_block else "") + body_block + "\n" + fuente_html
                     data_upd["hilo"] = hilo
                 else:
                     # Fallback a format_content()
