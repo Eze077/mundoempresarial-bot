@@ -931,18 +931,34 @@ def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dic
         body = body[:last_f.start()] + body[last_f.end():]
     body = re.sub(r'<!-- /?wp:[^>]+ -->\n?', '', body).strip()
 
-    # 4. Bullets desde excerpt (3-5 oraciones clave)
-    raw = (data.get("excerpt") or data.get("text", ""))[:700]
-    sentences = re.split(r'(?<=[.!?])\s+', raw.strip())
-    bullets = []
-    for s in sentences:
-        s = s.strip()
-        if len(s) > 25:
-            bullets.append(f'<li>{s}</li>')
-        if len(bullets) >= 5:
-            break
-    if not bullets:
-        bullets = [f'<li>{raw[:200]}</li>']
+    # 4. Bullets: si hay HTML de GPT usarlo (evita garbage de existing post stripeado)
+    gpt_html_src = data.get("_gpt_html", "")
+    if gpt_html_src:
+        bullets = []
+        for m in re.finditer(r'<p(?:\s[^>]*)?>(.+?)</p>', gpt_html_src, re.DOTALL):
+            p_text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if len(p_text) < 30:
+                continue
+            first_sent = re.match(r'([^.!?]+[.!?])', p_text)
+            bullet_text = first_sent.group(1).strip() if first_sent else p_text[:200]
+            if len(bullet_text) > 25:
+                bullets.append(f'<li>{bullet_text}</li>')
+            if len(bullets) >= 5:
+                break
+        if not bullets:
+            bullets = [f'<li>{p_text[:200]}</li>']
+    else:
+        raw = (data.get("excerpt") or data.get("text", ""))[:700]
+        sentences = re.split(r'(?<=[.!?])\s+', raw.strip())
+        bullets = []
+        for s in sentences:
+            s = s.strip()
+            if len(s) > 25:
+                bullets.append(f'<li>{s}</li>')
+            if len(bullets) >= 5:
+                break
+        if not bullets:
+            bullets = [f'<li>{raw[:200]}</li>']
     bullets_html = '<ul>\n' + '\n'.join(bullets) + '\n</ul>'
 
     # 5. Reconstruir ToC con <p><strong>, estilos bordó y onclick expandir
@@ -5841,6 +5857,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if gpt_result:
                     # Construir contenido desde el HTML de GPT
                     hilo       = detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]})
+                    data_upd["_gpt_html"] = gpt_result["html"]   # para bullets en _wrap_nota_desplegable
                     toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
                     fuente_html = (
                         f'<!-- wp:paragraph -->\n'
