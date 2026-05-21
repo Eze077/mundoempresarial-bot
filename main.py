@@ -471,6 +471,82 @@ def rewrite_excerpt_with_gpt(title: str, text: str, original_excerpt: str, keywo
     return meta_description(original_excerpt, text, kw=keyword)
 
 
+def _gpt_format_article(title: str, text: str, source_url: str,
+                        kw: str = "", redactor_instr: str = "") -> dict | None:
+    """
+    Usa GPT-4o-mini para formatear texto libre en HTML estructurado para WP.
+    Devuelve {"html": str, "h2_headings": list} o None si falla.
+    """
+    if not OPENAI_API_KEY:
+        return None
+
+    instr_extra = f"\nINSTRUCCIÓN ADICIONAL DEL EDITOR: {redactor_instr}" if redactor_instr else ""
+    pyme_box_template = (
+        '<div style="background:#eaf4fb;border-left:5px solid #1a6fa8;padding:16px 20px;'
+        'margin:32px 0 16px 0;border-radius:0 6px 6px 0;">'
+        '<p style="margin:0 0 8px 0;font-size:13px;font-weight:700;letter-spacing:1px;'
+        'color:#1a6fa8;text-transform:uppercase;">&#128196; Resumen para Pymes</p>'
+        '<p style="margin:0;font-size:15px;line-height:1.6;color:#222;">RESUMEN_AQUI</p></div>'
+    )
+
+    prompt = f"""Sos el redactor de MundoEmpresarial.ar. Formateá el siguiente texto en HTML limpio para WordPress.
+El lector es un empresario pyme, monotributista o profesional independiente argentino con poco tiempo.
+
+REGLAS OBLIGATORIAS:
+1. Dividí el contenido en secciones con <h2 id="slug-en-kebab-case">Título descriptivo</h2>
+   — el id debe ser único, en minúsculas, sin tildes, con guiones.
+2. Cada párrafo en <p>...</p>
+3. Datos numéricos, porcentajes y cifras clave en <strong>dato</strong>
+4. Al menos 1 link interno a otra nota de mundoempresarial.ar si el contexto lo permite
+5. Al final incluí este bloque exacto (reemplazá RESUMEN_AQUI con máx. 200 caracteres):
+{pyme_box_template}
+6. Tono: directo, informativo, español rioplatense. Sin "cabe destacar", "en el marco de", "en pos de".
+7. NO incluyas: bullets, ToC, fuente, scripts, comentarios HTML — eso lo agrega el sistema.
+8. Devolvé SOLO el HTML del cuerpo (H2s + párrafos + pyme-box). Nada más.{instr_extra}
+
+TÍTULO: {title}
+KEYWORD SEO: {kw}
+FUENTE: {source_url}
+
+TEXTO A FORMATEAR:
+{text[:6000]}"""
+
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model":       "gpt-4o-mini",
+                "messages":    [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+            },
+            timeout=45,
+        )
+        if r.status_code != 200:
+            logger.warning(f"_gpt_format_article {r.status_code}: {r.text[:200]}")
+            return None
+
+        html = r.json()["choices"][0]["message"]["content"].strip()
+        # Limpiar markdown fences si GPT los puso
+        html = re.sub(r'^```(?:html)?\s*', '', html)
+        html = re.sub(r'\s*```$', '', html).strip()
+
+        # Extraer H2 headings para el ToC
+        h2_headings = []
+        for m in re.finditer(r'<h2[^>]*\s+id="([^"]+)"[^>]*>(.*?)</h2>', html, re.DOTALL | re.IGNORECASE):
+            anchor = m.group(1).strip()
+            label  = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if anchor and label:
+                h2_headings.append({"content": label, "anchor": anchor})
+
+        logger.info(f"_gpt_format_article OK: {len(html)} chars, {len(h2_headings)} H2s")
+        return {"html": html, "h2_headings": h2_headings}
+
+    except Exception as e:
+        logger.warning(f"_gpt_format_article error: {e}")
+        return None
+
+
 def get_excerpt(data: dict, kw: str = "") -> str:
     """Devuelve la bajada a usar según los flags del preview.
 
@@ -5754,11 +5830,33 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if redactor_instr:
                     data_upd["_redactor_instructions"] = redactor_instr
 
-                kw          = focus_keyword(title)
-                new_content = format_content(data_upd, kw=kw)
-
-                # Aplicar nota desplegable si fue pedida
+                kw = focus_keyword(title)
                 desp_requested = bool(re.search(r'desplegable', redactor_instr, re.I))
+
+                # Intentar formatear con GPT (mejor calidad para texto estructurado)
+                gpt_result = await asyncio.to_thread(
+                    _gpt_format_article, title, body_text, source_url, kw, redactor_instr
+                )
+
+                if gpt_result:
+                    # Construir contenido desde el HTML de GPT
+                    hilo       = detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]})
+                    toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
+                    fuente_html = (
+                        f'<!-- wp:paragraph -->\n'
+                        f'<p><em>Fuente: <a href="{source_url}" target="_blank" '
+                        f'rel="noopener noreferrer">Ver nota original</a></em></p>\n'
+                        f'<!-- /wp:paragraph -->'
+                    )
+                    new_content = (toc_block + "\n" if toc_block else "") + \
+                                  f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->' + \
+                                  "\n" + fuente_html
+                    data_upd["hilo"] = hilo
+                else:
+                    # Fallback a format_content()
+                    logger.warning("_gpt_format_article falló, usando format_content() como fallback")
+                    new_content = format_content(data_upd, kw=kw)
+
                 if desp_requested:
                     new_content = _wrap_nota_desplegable(post_id, slug, new_content, data_upd)
 
