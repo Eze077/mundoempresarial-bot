@@ -5890,17 +5890,35 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Reformateando contenido...")
 
                 # source_url: extraer del contenido existente o usar la URL del plan
-                existing_raw = post_data.get("content", {}).get("raw", "")
                 src_match = re.search(r'href="(https?://[^"]+)"[^>]*>Ver nota original', existing_raw)
                 source_url = src_match.group(1) if src_match else url
 
-                # Usar el texto nuevo directamente (reemplaza, no combina con el contenido anterior)
+                # Detectar si el usuario quiere trabajar sobre el post actual (no la fuente original)
+                use_current_post = bool(re.search(
+                    r'\b(nota actual|la que hiciste|la actual|lo actual|lo que hiciste|post actual)\b',
+                    redactor_instr, re.I
+                ))
+
+                # Construir body_text: texto nuevo > fuente original (default) > post existente
                 body_text = clean_new_text if has_new_text else ""
                 if not body_text:
-                    # Sin texto nuevo: extraer texto limpio del post existente
-                    body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
-                    body_text = re.sub(r'<[^>]+>', ' ', body_text)
-                    body_text = re.sub(r'\s+', ' ', body_text).strip()
+                    if use_current_post:
+                        # "modifica la nota actual" → stripear HTML del post existente
+                        body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
+                        body_text = re.sub(r'<[^>]+>', ' ', body_text)
+                        body_text = re.sub(r'\s+', ' ', body_text).strip()
+                    else:
+                        # Default: re-scrapear la fuente original para evitar degradación iterativa
+                        await query.edit_message_text("Leyendo fuente original...")
+                        scraped = await asyncio.to_thread(scrape, source_url)
+                        if scraped and scraped.get("text", "").strip():
+                            body_text = scraped["text"]
+                        else:
+                            # Fallback si la fuente no responde
+                            logger.warning(f"Re-scrape de fuente falló ({source_url}), usando post existente")
+                            body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
+                            body_text = re.sub(r'<[^>]+>', ' ', body_text)
+                            body_text = re.sub(r'\s+', ' ', body_text).strip()
 
                 existing_title = (post_data.get("title", {}).get("raw")
                                   or post_data.get("title", {}).get("rendered", ""))
