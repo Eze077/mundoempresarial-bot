@@ -471,11 +471,27 @@ def rewrite_excerpt_with_gpt(title: str, text: str, original_excerpt: str, keywo
     return meta_description(original_excerpt, text, kw=keyword)
 
 
+def detect_content_type(title: str) -> tuple:
+    """Detecta si el título es un listicle con cantidad explícita. Retorna ('listicle', N) o ('standard', 0)."""
+    m = re.search(
+        r'\b(\d+)\s+(?:lugares|tips|consejos|formas|claves|razones|errores|pasos|ideas|opciones|'
+        r'recursos|platos|bodegas|vinos|recetas|herramientas|apps|productos|empresas|marcas|'
+        r'tendencias|datos|destinos|ciudades|barrios|restaurantes|actividades|propuestas|'
+        r'cosas|puntos|aspectos|ventajas|beneficios|museos|hoteles|cafés|cafes)\b',
+        title, re.I
+    )
+    if m:
+        return ('listicle', int(m.group(1)))
+    return ('standard', 0)
+
+
 def _gpt_format_article(title: str, text: str, source_url: str,
-                        kw: str = "", redactor_instr: str = "") -> dict | None:
+                        kw: str = "", redactor_instr: str = "",
+                        content_type: str = "standard", expected_count: int = 0) -> dict | None:
     """
     Usa GPT-4o-mini para formatear texto libre en HTML estructurado para WP.
-    Devuelve {"html": str, "h2_headings": list} o None si falla.
+    Devuelve {"html": str, "h2_headings": list, "bullets": list} o None si falla.
+    content_type: 'standard' o 'listicle'. expected_count: nro de items esperados en listicle.
     """
     if not OPENAI_API_KEY:
         return None
@@ -489,7 +505,38 @@ def _gpt_format_article(title: str, text: str, source_url: str,
         '<p style="margin:0;font-size:15px;line-height:1.6;color:#222;">RESUMEN_AQUI</p></div>'
     )
 
-    prompt = f"""Sos el redactor de MundoEmpresarial.ar. Formateá el siguiente texto en HTML limpio para WordPress.
+    if content_type == "listicle" and expected_count > 0:
+        prompt = f"""Sos el redactor de MundoEmpresarial.ar. El siguiente texto es un LISTADO de {expected_count} items.
+Formatealo en HTML limpio para WordPress preservando TODOS los items del texto fuente.
+El lector es un empresario pyme, monotributista o profesional independiente argentino con poco tiempo.
+
+REGLAS OBLIGATORIAS:
+0. ANTES del HTML, generá 3 a 5 bullets que destaquen las mejores opciones o categorías del listado.
+   Encerralos entre estas marcas exactas (JSON array, strings sin HTML):
+   BULLETS_START
+   ["bullet sobre categoría o top pick 1", "bullet 2", "bullet 3"]
+   BULLETS_END
+1. Incluí TODOS los {expected_count} items del texto fuente, numerados. NO omitas ninguno.
+   Formato de cada item: <p><strong>N. Nombre</strong>: descripción basada en el texto fuente.</p>
+2. Agrupalos en MÍNIMO 4 secciones temáticas con <h2 id="slug-kebab-case">Título temático</h2>
+   Los H2 son categorías reales (no "Items 1-5"). Cada H2 agrupa items relacionados.
+3. NO inventés datos no presentes en el texto fuente (teléfono, dirección, precio, horario, etc.).
+   Si el texto original no los tiene, no los incluyas.
+4. Datos numéricos relevantes en <strong>dato</strong>.
+5. Al final incluí este bloque exacto (reemplazá RESUMEN_AQUI con máx. 200 caracteres):
+{pyme_box_template}
+6. Tono: directo, informativo, español rioplatense. Sin "cabe destacar", "en el marco de".
+7. NO incluyas: ToC, fuente, scripts, comentarios HTML.
+8. Devolvé: BULLETS_START...BULLETS_END y luego el HTML del cuerpo. Nada más.{instr_extra}
+
+TÍTULO: {title}
+KEYWORD SEO: {kw}
+FUENTE: {source_url}
+
+TEXTO A FORMATEAR:
+{text[:8000]}"""
+    else:
+        prompt = f"""Sos el redactor de MundoEmpresarial.ar. Formateá el siguiente texto en HTML limpio para WordPress.
 El lector es un empresario pyme, monotributista o profesional independiente argentino con poco tiempo.
 
 REGLAS OBLIGATORIAS:
@@ -552,6 +599,42 @@ TEXTO A FORMATEAR:
         else:
             html = raw_response
 
+        # Block 2: verificar completitud para listicles — reintentar si faltan items
+        if content_type == "listicle" and expected_count > 0:
+            found_count = len(re.findall(r'<strong>\s*\d+\s*\.', html))
+            if found_count < int(expected_count * 0.8):
+                logger.warning(f"_gpt_format_article listicle incompleto: {found_count}/{expected_count}, reintentando")
+                retry_prompt = (
+                    prompt
+                    + f"\n\n⚠️ VERIFICACIÓN: el texto fuente tiene {expected_count} items numerados. "
+                    f"Tu respuesta anterior incluye solo ~{found_count}. "
+                    f"Incluí TODOS los {expected_count} items, sin excepción."
+                )
+                r2 = openai_post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": retry_prompt}],
+                          "temperature": 0.3},
+                    timeout=60,
+                )
+                if r2.status_code == 200:
+                    raw2 = r2.json()["choices"][0]["message"]["content"].strip()
+                    raw2 = re.sub(r'^```(?:html|json)?\s*', '', raw2)
+                    raw2 = re.sub(r'\s*```$', '', raw2).strip()
+                    bm2 = re.search(r'BULLETS_START\s*(\[.*?\])\s*BULLETS_END', raw2, re.DOTALL)
+                    if bm2:
+                        try:
+                            bl2 = json.loads(bm2.group(1))
+                            bullets_list = bl2 if isinstance(bl2, list) else bullets_list
+                        except Exception:
+                            pass
+                        html = raw2[:bm2.start()].strip() + "\n" + raw2[bm2.end():].strip()
+                        html = html.strip()
+                    else:
+                        html = raw2
+                    found_after = len(re.findall(r'<strong>\s*\d+\s*\.', html))
+                    logger.info(f"_gpt_format_article retry listicle: {found_after}/{expected_count} items")
+
         # Extraer H2 headings para el ToC
         h2_headings = []
         for m in re.finditer(r'<h2[^>]*\s+id="([^"]+)"[^>]*>(.*?)</h2>', html, re.DOTALL | re.IGNORECASE):
@@ -598,6 +681,37 @@ def _gpt_html_to_gutenberg(html: str) -> str:
             else:
                 break
     return '\n\n'.join(blocks)
+
+
+def _build_upd_preview(patch: dict, gpt_result: dict | None, desp_requested: bool) -> str:
+    """Genera texto de preview (Markdown Telegram) antes de confirmar la actualización."""
+    def _esc(s: str) -> str:
+        return s.replace("*", "").replace("_", "").replace("`", "").replace("[", "").replace("]", "")
+
+    lines = ["*Vista previa — ¿publicamos?*\n"]
+    if "title" in patch:
+        lines.append(f"*Título:* {_esc(str(patch['title']))}")
+    if "featured_media" in patch:
+        lines.append("*Imagen:* nueva portada subida")
+    if "categories" in patch:
+        lines.append(f"*Categorías:* {patch['categories']}")
+    if "content" in patch:
+        if gpt_result:
+            h2s    = gpt_result.get("h2_headings", [])
+            buls   = gpt_result.get("bullets", [])
+            fmt    = "desplegable" if desp_requested else "estándar"
+            lines.append(f"*Formato:* {fmt} · {len(h2s)} secciones · {len(buls)} bullets")
+            if buls:
+                lines.append("\n*Lo que tenés que saber:*")
+                for b in buls[:3]:
+                    lines.append(f"• {_esc(b)}")
+            if h2s:
+                lines.append("\n*Secciones:*")
+                for h in h2s[:5]:
+                    lines.append(f"— {_esc(h['content'])}")
+        else:
+            lines.append("*Contenido:* actualizado")
+    return "\n".join(lines)
 
 
 def get_excerpt(data: dict, kw: str = "") -> str:
@@ -5444,6 +5558,72 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg_edit.edit_text(_cmd_c_plan_text(plan), parse_mode="Markdown", reply_markup=kb)
         return
 
+    # ── Corregir actualización pendiente ────────────────────────────────────
+    if context.user_data.get("waiting_for_upd_correct"):
+        context.user_data["waiting_for_upd_correct"] = False
+        pend = context.user_data.get("pending_update")
+        if not pend:
+            await update.message.reply_text("No hay actualización pendiente.")
+            return
+        corr_instr = text_in.strip()
+        # Combinar con instrucción anterior para contexto acumulativo
+        prev_instr = pend.get("redactor_instr", "")
+        new_instr  = (prev_instr + ". " + corr_instr).strip(". ") if prev_instr else corr_instr
+        msg = await update.message.reply_text("Refinando con GPT...")
+        try:
+            gpt_result = await asyncio.to_thread(
+                _gpt_format_article,
+                pend["title"], pend["body_text"], pend["source_url"],
+                pend["kw"], new_instr,
+                pend.get("content_type", "standard"), pend.get("expected_count", 0)
+            )
+        except Exception as e:
+            await msg.edit_text(f"Error al refinar: {e}")
+            return
+        if not gpt_result:
+            await msg.edit_text("GPT no pudo refinar. Intentá de nuevo o cancelá.")
+            return
+        # Reconstruir contenido
+        data_upd      = pend.get("data_upd", {})
+        desp_req      = pend["desp_requested"]
+        hilo          = detect_hilo({"title": pend["title"], "text": pend["body_text"], "excerpt": pend["body_text"][:200]})
+        data_upd["_gpt_html"]    = gpt_result["html"]
+        data_upd["_gpt_bullets"] = gpt_result.get("bullets", [])
+        data_upd["hilo"]         = hilo
+        toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
+        fuente_html = (
+            f'<!-- wp:paragraph -->\n'
+            f'<p><em>Fuente: <a href="{pend["source_url"]}" target="_blank" '
+            f'rel="noopener noreferrer">Ver nota original</a></em></p>\n'
+            f'<!-- /wp:paragraph -->'
+        )
+        if desp_req:
+            body_block = f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->'
+        else:
+            body_block = _gpt_html_to_gutenberg(gpt_result["html"])
+        new_content = (toc_block + "\n" if toc_block else "") + body_block + "\n" + fuente_html
+        if desp_req:
+            new_content = _wrap_nota_desplegable(pend["post_id"], pend["slug"], new_content, data_upd)
+        pend["patch"]["content"] = new_content
+        s_desc = get_excerpt(data_upd, kw=pend["kw"])
+        pend["patch"].setdefault("meta", {})
+        pend["patch"]["meta"].update({
+            "rank_math_focus_keyword": pend["kw"],
+            "rank_math_description":   s_desc,
+        })
+        pend["gpt_result"]     = gpt_result
+        pend["redactor_instr"] = new_instr
+        pend["data_upd"]       = data_upd
+        context.user_data["pending_update"] = pend
+        preview_text = _build_upd_preview(pend["patch"], gpt_result, desp_req)
+        kb_upd = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirmar", callback_data="upd_confirm"),
+            InlineKeyboardButton("✏️ Corregir",  callback_data="upd_correct"),
+            InlineKeyboardButton("❌ Cancelar",  callback_data="upd_cancel"),
+        ]])
+        await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb_upd)
+        return
+
     # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
     url = extract_url_from_text(text_in)
     if not url:
@@ -5799,6 +5979,45 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Cancelado.")
         return
 
+    # ── Actualizar post — confirmar / corregir / cancelar ───────────────────
+    if query.data == "upd_confirm":
+        pend = context.user_data.pop("pending_update", None)
+        if not pend:
+            await query.edit_message_text("No hay actualización pendiente.")
+            return
+        await query.edit_message_text("Publicando...")
+        rp = await asyncio.to_thread(
+            requests.post,
+            f"{WP_URL}/wp-json/wp/v2/posts/{pend['post_id']}",
+            headers={**wp_auth(), "Content-Type": "application/json"},
+            json=pend["patch"], timeout=30
+        )
+        if rp.ok:
+            post_link = rp.json().get("link", pend["post_url"])
+            cambios = []
+            if "featured_media" in pend["patch"]: cambios.append("imagen")
+            if "title"          in pend["patch"]: cambios.append("título")
+            if "categories"     in pend["patch"]: cambios.append("categorías")
+            if "content"        in pend["patch"]:
+                cambios.append("contenido" + (" + desplegable" if pend["desp_requested"] else ""))
+            await query.edit_message_text(f"✅ Post actualizado ({', '.join(cambios)}):\n{post_link}")
+        else:
+            await query.edit_message_text(f"Error WP {rp.status_code}: {rp.text[:200]}")
+        return
+
+    if query.data == "upd_correct":
+        if not context.user_data.get("pending_update"):
+            await query.edit_message_text("No hay actualización pendiente.")
+            return
+        context.user_data["waiting_for_upd_correct"] = True
+        await query.edit_message_text("✏️ ¿Qué querés corregir? Escribí la instrucción y lo proceso de nuevo.")
+        return
+
+    if query.data == "upd_cancel":
+        context.user_data.pop("pending_update", None)
+        await query.edit_message_text("Actualización cancelada.")
+        return
+
     if query.data == "cmdc_adjust":
         context.user_data["waiting_for_cmdc_adjust"] = True
         await query.edit_message_text(
@@ -5939,9 +6158,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # desp_requested ya fue seteado arriba (auto-detect + keyword)
                 desp_requested = desp_requested or bool(re.search(r'desplegable', redactor_instr, re.I))
 
+                # Block 1: detectar tipo de contenido para adaptar el prompt de GPT
+                content_type, expected_count = detect_content_type(title)
+
                 # Intentar formatear con GPT (mejor calidad para texto estructurado)
                 gpt_result = await asyncio.to_thread(
-                    _gpt_format_article, title, body_text, source_url, kw, redactor_instr
+                    _gpt_format_article, title, body_text, source_url, kw, redactor_instr,
+                    content_type, expected_count
                 )
 
                 if gpt_result:
@@ -5986,25 +6209,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("No hay cambios que aplicar.")
                 return
 
-            rp = await asyncio.to_thread(
-                requests.post,
-                f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
-                headers={**wp_auth(), "Content-Type": "application/json"},
-                json=patch, timeout=30
-            )
-            if rp.ok:
-                post_link = rp.json().get("link", url)
-                cambios = []
-                if "featured_media" in patch: cambios.append("imagen")
-                if "title"          in patch: cambios.append("título")
-                if "categories"     in patch: cambios.append("categorías")
-                if "content"        in patch:
-                    cambios.append("contenido" + (" + desplegable" if desp_requested else ""))
-                await query.edit_message_text(
-                    f"✅ Post actualizado ({', '.join(cambios)}):\n{post_link}"
-                )
-            else:
-                await query.edit_message_text(f"Error WP {rp.status_code}: {rp.text[:200]}")
+            # Block 3: mostrar preview y pedir confirmación antes de publicar
+            pending_gpt = locals().get("gpt_result") if "content" in patch else None
+            context.user_data["pending_update"] = {
+                "patch":          patch,
+                "post_id":        post_id,
+                "post_url":       url,
+                "slug":           slug,
+                "desp_requested": desp_requested,
+                "gpt_result":     pending_gpt,
+                # para re-run en Corregir
+                "title":          locals().get("title", ""),
+                "body_text":      locals().get("body_text", ""),
+                "source_url":     locals().get("source_url", url),
+                "kw":             locals().get("kw", ""),
+                "redactor_instr": locals().get("redactor_instr", ""),
+                "data_upd":       locals().get("data_upd", {}),
+                "content_type":   locals().get("content_type", "standard"),
+                "expected_count": locals().get("expected_count", 0),
+            }
+            preview_text = _build_upd_preview(patch, pending_gpt, desp_requested)
+            kb_upd = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Confirmar", callback_data="upd_confirm"),
+                InlineKeyboardButton("✏️ Corregir",  callback_data="upd_correct"),
+                InlineKeyboardButton("❌ Cancelar",  callback_data="upd_cancel"),
+            ]])
+            await query.edit_message_text(preview_text, parse_mode="Markdown", reply_markup=kb_upd)
             return
         # ── fin modo actualizar ────────────────────────────────────────────────
 
