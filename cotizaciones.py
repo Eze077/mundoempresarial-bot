@@ -369,14 +369,17 @@ def build_alert(asset: str, current: float, baseline: float) -> str:
     )
 
 
-def _to_tweet(md_text: str) -> str:
+def _to_tweet(md_text: str, cta: str = "") -> str:
     """Convierte markdown TG a texto plano apto para Twitter (≤280 chars)."""
     clean = (md_text
              .replace("*", "")
              .replace("_", "")
              .replace("`", ""))
-    # Queda la URL sin markdown link
     lines = [l for l in clean.split("\n") if l.strip()]
+    # Quitar línea con URL si vamos a agregar CTA propio
+    if cta:
+        lines = [l for l in lines if not l.startswith("http")]
+        lines.append(cta)
     tweet = "\n".join(lines)
     if len(tweet) > 280:
         tweet = tweet[:277] + "…"
@@ -384,30 +387,20 @@ def _to_tweet(md_text: str) -> str:
 
 
 # ── Publisher ────────────────────────────────────────────────────────────────
-async def _publish(bot, tg_text: str, tweet_text: str | None = None) -> None:
-    # Canal público
-    try:
-        await bot.send_message(
-            chat_id=_CHANNEL,
-            text=tg_text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logger.error(f"cotiz canal TG: {e}")
-
-    # Chat privado del admin
-    if _ADMIN_CHAT_ID:
+async def _publish(bot, tg_text: str, tweet_text: str | None = None, canal: bool = False) -> None:
+    # Canal público — solo cuando canal=True (resúmenes)
+    if canal and _CHANNEL:
         try:
             await bot.send_message(
-                chat_id=int(_ADMIN_CHAT_ID),
+                chat_id=_CHANNEL,
                 text=tg_text,
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.error(f"cotiz admin TG: {e}")
+            logger.error(f"cotiz canal TG: {e}")
 
+    # Twitter — siempre
     if _TW_KEY and tweet_text:
         try:
             auth = OAuth1(_TW_KEY, _TW_SECRET, _TW_TOKEN, _TW_TSECRET)
@@ -438,24 +431,30 @@ async def job_baseline_btc(context: ContextTypes.DEFAULT_TYPE) -> None:
     await asyncio.to_thread(capture_baseline, ["btc"])
 
 
+_CTA_URL = "https://mundoempresarial.ar/cotizaciones/?utm_source=twitter&utm_medium=cotizaciones&utm_campaign="
+
+
 async def job_apertura(context: ContextTypes.DEFAULT_TYPE) -> None:
     cotiz = await asyncio.to_thread(fetch_all)
     text  = build_apertura(cotiz)
-    await _publish(context.bot, text, _to_tweet(text))
+    cta   = f"Seguí las cotizaciones en tiempo real 👉 {_CTA_URL}apertura"
+    await _publish(context.bot, text, _to_tweet(text, cta))
 
 
 async def job_cierre(context: ContextTypes.DEFAULT_TYPE) -> None:
     cotiz = await asyncio.to_thread(fetch_all)
     state = load_state()
     text  = build_cierre(cotiz, state.get("baselines", {}))
-    await _publish(context.bot, text, _to_tweet(text))
+    cta   = f"Histórico completo 👉 {_CTA_URL}cierre"
+    await _publish(context.bot, text, _to_tweet(text, cta))
 
 
 async def job_resumen(context: ContextTypes.DEFAULT_TYPE) -> None:
     slot  = (context.job.data or {}).get("slot", "")
     cotiz = await asyncio.to_thread(fetch_all)
     text  = build_resumen(cotiz, slot)
-    await _publish(context.bot, text, _to_tweet(text))
+    cta   = f"Cotizaciones en tiempo real 👉 {_CTA_URL}resumen"
+    await _publish(context.bot, text, _to_tweet(text, cta), canal=True)
 
 
 async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -503,7 +502,8 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
         text = build_alert(asset, current, bl["price"])
-        await _publish(context.bot, text, _to_tweet(text))
+        cta  = f"Ver cotizaciones 👉 {_CTA_URL}variacion_{asset}"
+        await _publish(context.bot, text, _to_tweet(text, cta))
         state.setdefault("last_alert_ts", {})[asset] = now.isoformat()
         changed = True
 
