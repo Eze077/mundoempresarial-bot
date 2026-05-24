@@ -542,123 +542,143 @@ async def cmd_cotizaciones(update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ── Panel config ─────────────────────────────────────────────────────────────
+# ── Config panel — un botón por asset ───────────────────────────────────────
+
+_ASSETS_ORDER = ["oficial", "blue", "mep", "ccl", "euro", "real", "yuan", "oro", "btc"]
+
+# Assets que tienen horario de apertura/cierre
+_DOLAR_ASSETS = {"oficial", "blue", "mep", "ccl"}
+
+# Opciones de umbral
+_TH_OPTIONS = [1.0, 2.0, 3.0, 5.0, 10.0]
+
+# Opciones de hora por tipo (HHMM sin ":" para callback_data)
+_HORA_OPTIONS = {
+    "apertura": [("09:00","0900"), ("09:30","0930"), ("10:00","1000"), ("10:30","1030"), ("11:00","1100")],
+    "cierre":   [("14:00","1400"), ("14:30","1430"), ("15:00","1500"), ("15:30","1530"), ("16:00","1600")],
+    "res_man":  [("07:00","0700"), ("07:30","0730"), ("08:00","0800"), ("08:30","0830"), ("09:00","0900")],
+    "res_med":  [("12:00","1200"), ("12:30","1230"), ("13:00","1300"), ("13:30","1330"), ("14:00","1400")],
+    "res_noc":  [("19:00","1900"), ("19:30","1930"), ("20:00","2000"), ("20:30","2030"), ("21:00","2100")],
+}
+
+def _hhmm(key: str) -> str:
+    """Convierte HHMM→HH:MM."""
+    return f"{key[:2]}:{key[2:]}"
+
+
 def _config_text() -> str:
-    cfg = load_config()
-    th  = cfg.get("thresholds", _DEFAULT_CONFIG["thresholds"])
-    rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
-    return (
-        "⚙️ *Config Cotizaciones*\n\n"
-        "*Umbrales de variación:*\n"
-        f"  • Dólar:    {th.get('blue', 2.0)}%\n"
-        f"  • Euro/Real: {th.get('euro', 3.0)}%\n"
-        f"  • Oro:      {th.get('oro', 2.0)}%\n"
-        f"  • BTC:      {th.get('btc', 5.0)}%\n\n"
-        f"*Apertura:* {cfg.get('apertura_time', '10:00')} \\| "
-        f"*Cierre:* {cfg.get('cierre_time', '15:00')}\n"
-        f"*Resúmenes:* {' · '.join(rt)}\n"
-        f"*Cooldown alertas:* {cfg.get('cooldown_min', 60)} min\n\n"
-        "Seleccioná qué cambiar:"
-    )
+    return "⚙️ *Config Cotizaciones*\n\nElegí una moneda o el resumen para configurar horario y variación:"
 
 
 def _config_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💵 Umbral Dólar",  callback_data="cotiz_cfg_dolar"),
-            InlineKeyboardButton("💶 Umbral Fiat",   callback_data="cotiz_cfg_fiat"),
-        ],
-        [
-            InlineKeyboardButton("🥇 Umbral Oro",    callback_data="cotiz_cfg_oro"),
-            InlineKeyboardButton("₿  Umbral BTC",    callback_data="cotiz_cfg_btc"),
-        ],
-        [
-            InlineKeyboardButton("⏰ Horarios",      callback_data="cotiz_cfg_horarios"),
-            InlineKeyboardButton("↩️ Volver",        callback_data="cotiz_refresh"),
-        ],
-    ])
-
-
-_THRESHOLD_OPTIONS = [1.0, 2.0, 3.0, 5.0, 10.0]
-_GROUP_META = {
-    "dolar": ("Dólar (oficial/blue/mep/ccl)", ["oficial", "blue", "mep", "ccl"]),
-    "fiat":  ("Euro / Real / Yuan",            ["euro", "real", "yuan"]),
-    "oro":   ("Oro",                          ["oro"]),
-    "btc":   ("Bitcoin",                      ["btc"]),
-}
-
-
-def _threshold_text(group: str) -> str:
-    label, keys = _GROUP_META[group]
-    th  = load_config().get("thresholds", _DEFAULT_CONFIG["thresholds"])
-    cur = th.get(keys[0], 2.0)
-    return f"⚙️ Umbral variación — *{label}*\n\nActual: *{cur}%*\nElegí el nuevo umbral:"
-
-
-def _threshold_kb(group: str) -> InlineKeyboardMarkup:
-    _, keys = _GROUP_META[group]
-    th  = load_config().get("thresholds", _DEFAULT_CONFIG["thresholds"])
-    cur = th.get(keys[0], 2.0)
-    row = []
+    cfg = load_config()
+    th  = cfg.get("thresholds", _DEFAULT_CONFIG["thresholds"])
+    active = cfg.get("active", _DEFAULT_CONFIG["active"])
     rows = []
-    for opt in _THRESHOLD_OPTIONS:
-        mark = "✅ " if cur == opt else ""
-        row.append(InlineKeyboardButton(
-            f"{mark}{opt:.0f}%",
-            callback_data=f"cotiz_th_{group}_{opt:.1f}",
-        ))
-        if len(row) == 3:
+    row  = []
+    for asset in _ASSETS_ORDER:
+        em    = _EMOJI.get(asset, "💱")
+        name  = _NOMBRES.get(asset, asset)
+        pct   = th.get(asset, 2.0)
+        on    = "✅" if active.get(asset, True) else "❌"
+        label = f"{on} {em} {name} ({pct:.0f}%)"
+        row.append(InlineKeyboardButton(label, callback_data=f"cotiz_asset_{asset}"))
+        if len(row) == 2:
             rows.append(row); row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("📊 Resumen diario", callback_data="cotiz_asset_resumen")])
+    rows.append([InlineKeyboardButton("↩️ Cerrar",         callback_data="cotiz_refresh")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _asset_text(asset: str) -> str:
+    cfg  = load_config()
+    th   = cfg.get("thresholds", _DEFAULT_CONFIG["thresholds"])
+    act  = cfg.get("active",     _DEFAULT_CONFIG["active"])
+    name = _NOMBRES.get(asset, asset.upper())
+    em   = _EMOJI.get(asset, "💱")
+    pct  = th.get(asset, 2.0)
+    on   = "✅ Activo" if act.get(asset, True) else "❌ Pausado"
+
+    lines = [f"{em} *{name}*\n", f"Variación: *{pct:.0f}%* | {on}"]
+
+    if asset in _DOLAR_ASSETS:
+        apertura = cfg.get("apertura_time", "10:00")
+        cierre   = cfg.get("cierre_time",   "15:00")
+        lines.append(f"Apertura: *{apertura}* | Cierre: *{cierre}* _(Lun-Vie)_")
+
+    lines.append("\nElegí qué configurar:")
+    return "\n".join(lines)
+
+
+def _asset_kb(asset: str) -> InlineKeyboardMarkup:
+    cfg  = load_config()
+    th   = cfg.get("thresholds", _DEFAULT_CONFIG["thresholds"])
+    act  = cfg.get("active",     _DEFAULT_CONFIG["active"])
+    cur  = th.get(asset, 2.0)
+    on   = act.get(asset, True)
+
+    # Fila de thresholds
+    th_row = []
+    for opt in _TH_OPTIONS:
+        mark = "✅" if cur == opt else ""
+        th_row.append(InlineKeyboardButton(
+            f"{mark}{opt:.0f}%",
+            callback_data=f"cotiz_th_{asset}_{opt:.1f}",
+        ))
+
+    rows = [th_row]
+
+    # Toggle activo
+    toggle_label = "⏸ Pausar" if on else "▶️ Activar"
+    rows.append([InlineKeyboardButton(toggle_label, callback_data=f"cotiz_toggle_{asset}")])
+
+    # Horarios (solo para dólar)
+    if asset in _DOLAR_ASSETS:
+        apertura = cfg.get("apertura_time", "10:00")
+        cierre   = cfg.get("cierre_time",   "15:00")
+        rows.append([
+            InlineKeyboardButton(f"🔓 Apertura: {apertura}", callback_data=f"cotiz_hora_pick_apertura_{asset}"),
+            InlineKeyboardButton(f"🔒 Cierre: {cierre}",     callback_data=f"cotiz_hora_pick_cierre_{asset}"),
+        ])
+
     rows.append([InlineKeyboardButton("↩️ Volver", callback_data="cotiz_config")])
     return InlineKeyboardMarkup(rows)
 
 
-_HORA_OPTIONS = {
-    "apertura": ["09:00", "09:30", "10:00", "10:30", "11:00"],
-    "cierre":   ["14:00", "14:30", "15:00", "15:30", "16:00"],
-    "res_man":  ["07:00", "07:30", "08:00", "08:30", "09:00"],
-    "res_med":  ["12:00", "12:30", "13:00", "13:30", "14:00"],
-    "res_noc":  ["19:00", "19:30", "20:00", "20:30", "21:00"],
-}
-
-_HORA_LABEL = {
-    "apertura": "Apertura Dólar (Lun-Vie)",
-    "cierre":   "Cierre Dólar (Lun-Vie)",
-    "res_man":  "Resumen Mañana",
-    "res_med":  "Resumen Mediodía",
-    "res_noc":  "Resumen Noche",
-}
-
-
-def _horarios_menu_text() -> str:
+def _resumen_text() -> str:
     cfg = load_config()
     rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+    man = rt[0] if rt else "08:00"
+    med = rt[1] if len(rt) > 1 else "13:00"
+    noc = rt[2] if len(rt) > 2 else "20:00"
     return (
-        "⏰ *Horarios de Cotizaciones*\n\n"
-        f"  • Apertura dólar: *{cfg.get('apertura_time', '10:00')}* (Lun-Vie)\n"
-        f"  • Cierre dólar:   *{cfg.get('cierre_time', '15:00')}* (Lun-Vie)\n"
-        f"  • Resumen mañana: *{rt[0] if rt else '08:00'}* (todos los días)\n"
-        f"  • Resumen mediodía: *{rt[1] if len(rt)>1 else '13:00'}* (todos los días)\n"
-        f"  • Resumen noche:  *{rt[2] if len(rt)>2 else '20:00'}* (todos los días)\n\n"
-        "_Los cambios de apertura/cierre reinician los jobs automáticamente._"
+        "📊 *Resumen Diario*\n\n"
+        f"🌅 Mañana:   *{man}*\n"
+        f"☀️ Mediodía: *{med}*\n"
+        f"🌙 Noche:    *{noc}*\n\n"
+        "Todos los días. Elegí un horario para cambiar:"
     )
 
 
-def _horarios_menu_kb() -> InlineKeyboardMarkup:
+def _resumen_kb() -> InlineKeyboardMarkup:
+    cfg = load_config()
+    rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+    man = rt[0] if rt else "08:00"
+    med = rt[1] if len(rt) > 1 else "13:00"
+    noc = rt[2] if len(rt) > 2 else "20:00"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔓 Apertura Dólar",   callback_data="cotiz_cfg_hora_apertura")],
-        [InlineKeyboardButton("🔒 Cierre Dólar",     callback_data="cotiz_cfg_hora_cierre")],
-        [InlineKeyboardButton("🌅 Resumen Mañana",   callback_data="cotiz_cfg_hora_res_man")],
-        [InlineKeyboardButton("☀️ Resumen Mediodía", callback_data="cotiz_cfg_hora_res_med")],
-        [InlineKeyboardButton("🌙 Resumen Noche",    callback_data="cotiz_cfg_hora_res_noc")],
+        [InlineKeyboardButton(f"🌅 Mañana: {man}",   callback_data="cotiz_hora_pick_res_man_resumen")],
+        [InlineKeyboardButton(f"☀️ Mediodía: {med}", callback_data="cotiz_hora_pick_res_med_resumen")],
+        [InlineKeyboardButton(f"🌙 Noche: {noc}",    callback_data="cotiz_hora_pick_res_noc_resumen")],
         [InlineKeyboardButton("↩️ Volver",           callback_data="cotiz_config")],
     ])
 
 
-def _hora_picker_text(tipo: str) -> str:
-    cfg   = load_config()
-    rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+def _hora_pick_text(tipo: str) -> str:
+    cfg = load_config()
+    rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
     cur_map = {
         "apertura": cfg.get("apertura_time", "10:00"),
         "cierre":   cfg.get("cierre_time",   "15:00"),
@@ -666,14 +686,19 @@ def _hora_picker_text(tipo: str) -> str:
         "res_med":  rt[1] if len(rt) > 1 else "13:00",
         "res_noc":  rt[2] if len(rt) > 2 else "20:00",
     }
-    label  = _HORA_LABEL.get(tipo, tipo)
-    actual = cur_map.get(tipo, "—")
-    return f"⏰ *{label}*\n\nActual: *{actual}*\nElegí el nuevo horario:"
+    label_map = {
+        "apertura": "Apertura Dólar (Lun-Vie)",
+        "cierre":   "Cierre Dólar (Lun-Vie)",
+        "res_man":  "Resumen Mañana",
+        "res_med":  "Resumen Mediodía",
+        "res_noc":  "Resumen Noche",
+    }
+    return f"⏰ *{label_map.get(tipo, tipo)}*\n\nActual: *{cur_map.get(tipo, '—')}*\nElegí el nuevo horario:"
 
 
-def _hora_picker_kb(tipo: str) -> InlineKeyboardMarkup:
-    cfg   = load_config()
-    rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+def _hora_pick_kb(tipo: str, back: str) -> InlineKeyboardMarkup:
+    cfg = load_config()
+    rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
     cur_map = {
         "apertura": cfg.get("apertura_time", "10:00"),
         "cierre":   cfg.get("cierre_time",   "15:00"),
@@ -682,22 +707,22 @@ def _hora_picker_kb(tipo: str) -> InlineKeyboardMarkup:
         "res_noc":  rt[2] if len(rt) > 2 else "20:00",
     }
     current = cur_map.get(tipo, "")
-    options = _HORA_OPTIONS.get(tipo, [])
-    rows = []
-    row  = []
-    for opt in options:
-        mark = "✅ " if opt == current else ""
-        # Usar HH_MM para que no rompa el callback_data (no se permite ":")
-        opt_key = opt.replace(":", "_")
+    opts    = _HORA_OPTIONS.get(tipo, [])
+    rows    = []
+    row     = []
+    for label, key in opts:
+        mark = "✅" if label == current else ""
         row.append(InlineKeyboardButton(
-            f"{mark}{opt}",
-            callback_data=f"cotiz_hora_{tipo}_{opt_key}",
+            f"{mark}{label}",
+            callback_data=f"cotiz_set_hora_{tipo}_{key}_{back}",
         ))
         if len(row) == 3:
             rows.append(row); row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("↩️ Volver", callback_data="cotiz_cfg_horarios")])
+    # Volver al origen (asset o resumen)
+    back_cb = f"cotiz_asset_{back}" if back != "resumen" else "cotiz_asset_resumen"
+    rows.append([InlineKeyboardButton("↩️ Volver", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
 
@@ -718,70 +743,84 @@ async def handle_cotiz_button(update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _config_text(), parse_mode="Markdown", reply_markup=_config_kb()
         )
 
-    elif data == "cotiz_cfg_horarios":
+    elif data == "cotiz_asset_resumen":
         await query.edit_message_text(
-            _horarios_menu_text(), parse_mode="Markdown", reply_markup=_horarios_menu_kb()
+            _resumen_text(), parse_mode="Markdown", reply_markup=_resumen_kb()
         )
 
-    elif data.startswith("cotiz_cfg_hora_"):
-        tipo = data[len("cotiz_cfg_hora_"):]
-        await query.edit_message_text(
-            _hora_picker_text(tipo), parse_mode="Markdown", reply_markup=_hora_picker_kb(tipo)
-        )
-
-    elif data.startswith("cotiz_hora_"):
-        # cotiz_hora_{tipo}_{HH_MM}  e.g. cotiz_hora_apertura_10_00
-        rest  = data[len("cotiz_hora_"):]
-        # tipo puede ser: apertura, cierre, res_man, res_med, res_noc
-        # la hora tiene formato HH_MM (2 segmentos al final)
-        parts = rest.rsplit("_", 2)   # ["apertura", "10", "00"]
-        tipo  = parts[0]
-        hhmm  = f"{parts[1]}:{parts[2]}"
-        cfg   = load_config()
-        rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
-        if tipo == "apertura":
-            cfg["apertura_time"] = hhmm
-        elif tipo == "cierre":
-            cfg["cierre_time"] = hhmm
-        elif tipo == "res_man":
-            rt[0] = hhmm; cfg["resumen_times"] = rt
-        elif tipo == "res_med":
-            while len(rt) < 2: rt.append("13:00")
-            rt[1] = hhmm; cfg["resumen_times"] = rt
-        elif tipo == "res_noc":
-            while len(rt) < 3: rt.append("20:00")
-            rt[2] = hhmm; cfg["resumen_times"] = rt
-        save_config(cfg)
-        await query.edit_message_text(
-            _hora_picker_text(tipo), parse_mode="Markdown", reply_markup=_hora_picker_kb(tipo)
-        )
-
-    elif data.startswith("cotiz_cfg_"):
-        group = data[len("cotiz_cfg_"):]
-        if group in _GROUP_META:
+    elif data.startswith("cotiz_asset_"):
+        asset = data[len("cotiz_asset_"):]
+        if asset in _ASSETS_ORDER:
             await query.edit_message_text(
-                _threshold_text(group),
-                parse_mode="Markdown",
-                reply_markup=_threshold_kb(group),
+                _asset_text(asset), parse_mode="Markdown", reply_markup=_asset_kb(asset)
+            )
+
+    elif data.startswith("cotiz_toggle_"):
+        asset = data[len("cotiz_toggle_"):]
+        if asset in _ASSETS_ORDER:
+            cfg = load_config()
+            cfg.setdefault("active", {})[asset] = not cfg.get("active", {}).get(asset, True)
+            save_config(cfg)
+            await query.edit_message_text(
+                _asset_text(asset), parse_mode="Markdown", reply_markup=_asset_kb(asset)
             )
 
     elif data.startswith("cotiz_th_"):
-        # cotiz_th_{group}_{value}  e.g. cotiz_th_dolar_2.0
-        parts = data.split("_")
-        group = parts[2]
-        value = float(parts[3])
-        if group in _GROUP_META:
+        # cotiz_th_{asset}_{value}  e.g. cotiz_th_blue_2.0
+        parts = data[len("cotiz_th_"):].rsplit("_", 1)
+        asset = parts[0]
+        value = float(parts[1])
+        if asset in _ASSETS_ORDER:
             cfg = load_config()
-            th  = cfg.setdefault("thresholds", {})
-            _, keys = _GROUP_META[group]
-            for k in keys:
-                th[k] = value
+            cfg.setdefault("thresholds", {})[asset] = value
             save_config(cfg)
             await query.edit_message_text(
-                _threshold_text(group),
-                parse_mode="Markdown",
-                reply_markup=_threshold_kb(group),
+                _asset_text(asset), parse_mode="Markdown", reply_markup=_asset_kb(asset)
             )
+
+    elif data.startswith("cotiz_hora_pick_"):
+        # cotiz_hora_pick_{tipo}_{back}  e.g. cotiz_hora_pick_apertura_blue
+        rest = data[len("cotiz_hora_pick_"):]
+        # tipo puede tener underscore (res_man), back también puede (asset name)
+        # tipos posibles: apertura, cierre, res_man, res_med, res_noc
+        for tipo in ("apertura", "cierre", "res_man", "res_med", "res_noc"):
+            if rest.startswith(tipo + "_"):
+                back = rest[len(tipo) + 1:]
+                await query.edit_message_text(
+                    _hora_pick_text(tipo), parse_mode="Markdown",
+                    reply_markup=_hora_pick_kb(tipo, back)
+                )
+                break
+
+    elif data.startswith("cotiz_set_hora_"):
+        # cotiz_set_hora_{tipo}_{HHMM}_{back}
+        rest  = data[len("cotiz_set_hora_"):]
+        for tipo in ("apertura", "cierre", "res_man", "res_med", "res_noc"):
+            if rest.startswith(tipo + "_"):
+                remainder = rest[len(tipo) + 1:]          # "1000_blue"
+                key, back = remainder.rsplit("_", 1)      # "1000", "blue"
+                hhmm = _hhmm(key)                          # "10:00"
+                cfg  = load_config()
+                rt   = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+                if tipo == "apertura":
+                    cfg["apertura_time"] = hhmm
+                elif tipo == "cierre":
+                    cfg["cierre_time"] = hhmm
+                elif tipo == "res_man":
+                    rt[0] = hhmm; cfg["resumen_times"] = rt
+                elif tipo == "res_med":
+                    while len(rt) < 2: rt.append("13:00")
+                    rt[1] = hhmm; cfg["resumen_times"] = rt
+                elif tipo == "res_noc":
+                    while len(rt) < 3: rt.append("20:00")
+                    rt[2] = hhmm; cfg["resumen_times"] = rt
+                save_config(cfg)
+                # Volver al picker actualizado
+                await query.edit_message_text(
+                    _hora_pick_text(tipo), parse_mode="Markdown",
+                    reply_markup=_hora_pick_kb(tipo, back)
+                )
+                break
 
 
 # ── Comando /cotiz_horario ───────────────────────────────────────────────────
