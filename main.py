@@ -8,6 +8,7 @@ import base64
 import unicodedata
 import uuid
 from datetime import datetime, time as dtime
+import cotizaciones
 import requests
 from requests_oauthlib import OAuth1
 from bs4 import BeautifulSoup
@@ -5942,6 +5943,30 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # ── 2FA Redacción web ────────────────────────────────────────────────────
+    if query.data.startswith("redaccion_2fa_"):
+        # formato: redaccion_2fa_<token>  o  redaccion_2fa_deny_<token>
+        if query.data.startswith("redaccion_2fa_deny_"):
+            token = query.data[len("redaccion_2fa_deny_"):]
+            action = "deny"
+            label = "❌ Acceso rechazado"
+        else:
+            token = query.data[len("redaccion_2fa_"):]
+            action = "confirm"
+            label = "✅ Acceso confirmado"
+        try:
+            requests.post(
+                f"http://127.0.0.1:5050/api/tg-2fa/{token}/{action}",
+                timeout=5
+            )
+        except Exception as e:
+            logger.warning(f"2FA callback error: {e}")
+        await query.edit_message_text(
+            f"🔐 *Redacción ME.ar*\n\n{label}.",
+            parse_mode="Markdown"
+        )
+        return
+
     # ── Media buttons ──
     if query.data == "media_include_video":
         data = context.user_data.get("article")
@@ -7684,15 +7709,17 @@ def _build_edit_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _build_publish_social_kb(tw_on: bool, tg_on: bool, wa_on: bool) -> InlineKeyboardMarkup:
+def _build_publish_social_kb(tw_on: bool, tg_on: bool, wa_on: bool, li_on: bool = False) -> InlineKeyboardMarkup:
     """Teclado para republicar una nota existente en redes."""
     tw_label = ("✅" if tw_on else "❌") + " Twitter"
     tg_label = ("✅" if tg_on else "❌") + " Canal TG"
     wa_label = ("✅" if wa_on else "❌") + " WhatsApp"
+    li_label = ("✅" if li_on else "❌") + " LinkedIn"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(tw_label, callback_data="pubtoggle_tw")],
         [InlineKeyboardButton(tg_label, callback_data="pubtoggle_tg")],
         [InlineKeyboardButton(wa_label, callback_data="pubtoggle_wa")],
+        [InlineKeyboardButton(li_label, callback_data="pubtoggle_li")],
         [
             InlineKeyboardButton("📡 Publicar", callback_data="pub_execute"),
             InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
@@ -8001,6 +8028,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["pub_tw"] = not has_tw
         context.user_data["pub_tg"] = not has_tg
         context.user_data["pub_wa"] = False
+        context.user_data["pub_li"] = False
 
         status_lines = []
         if has_tw:
@@ -8018,6 +8046,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data["pub_tw"],
                 context.user_data["pub_tg"],
                 context.user_data["pub_wa"],
+                context.user_data["pub_li"],
             ),
         )
         return
@@ -8030,6 +8059,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data["pub_tw"],
                 context.user_data.get("pub_tg", False),
                 context.user_data.get("pub_wa", False),
+                context.user_data.get("pub_li", False),
             )
         )
         return
@@ -8041,6 +8071,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data.get("pub_tw", False),
                 context.user_data["pub_tg"],
                 context.user_data.get("pub_wa", False),
+                context.user_data.get("pub_li", False),
             )
         )
         return
@@ -8052,6 +8083,19 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data.get("pub_tw", False),
                 context.user_data.get("pub_tg", False),
                 context.user_data["pub_wa"],
+                context.user_data.get("pub_li", False),
+            )
+        )
+        return
+
+    if query.data == "pubtoggle_li":
+        context.user_data["pub_li"] = not context.user_data.get("pub_li", False)
+        await query.edit_message_reply_markup(
+            reply_markup=_build_publish_social_kb(
+                context.user_data.get("pub_tw", False),
+                context.user_data.get("pub_tg", False),
+                context.user_data.get("pub_wa", False),
+                context.user_data["pub_li"],
             )
         )
         return
@@ -8060,8 +8104,9 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pub_tw = context.user_data.get("pub_tw", False)
         pub_tg = context.user_data.get("pub_tg", False)
         pub_wa = context.user_data.get("pub_wa", False)
+        pub_li = context.user_data.get("pub_li", False)
 
-        if not any([pub_tw, pub_tg, pub_wa]):
+        if not any([pub_tw, pub_tg, pub_wa, pub_li]):
             await query.edit_message_text("Nada seleccionado. Cancelado.")
             return
 
@@ -8103,6 +8148,13 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.message.reply_text(f"— Copiá y pegá en WhatsApp —\n\n{wa_text}")
             results.append("✅ Texto para WhatsApp preparado")
 
+        if pub_li:
+            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
+            if li_url:
+                results.append(f"✅ Publicado en LinkedIn: {li_url}")
+            else:
+                results.append("❌ Error al publicar en LinkedIn")
+
         # Persistir ids nuevos en el post
         if (pub_tg and new_tg_msg) or (pub_tw and new_tweet_id):
             await asyncio.to_thread(
@@ -8116,6 +8168,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("pub_tw", None)
         context.user_data.pop("pub_tg", None)
         context.user_data.pop("pub_wa", None)
+        context.user_data.pop("pub_li", None)
 
         await query.edit_message_text("\n".join(results) or "Nada ejecutado.")
         return
@@ -10555,6 +10608,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("feedback_ver", "Ver lo que aprendió el curador"),
         BotCommand("borrar", "Eliminar una nota publicada"),
         BotCommand("editar", "Editar una nota publicada"),
+        BotCommand("cotizaciones", "Panel de cotizaciones en tiempo real"),
         BotCommand("comandos", "Ver todos los comandos"),
     ])
     logger.info("BotCommands registrados en Telegram")
@@ -10584,6 +10638,8 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("frases", cmd_frases))
     app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
+    app.add_handler(CommandHandler("cotizaciones", cotizaciones.cmd_cotizaciones))
+    app.add_handler(CommandHandler("cotiz_horario", cotizaciones.cmd_cotiz_horario))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"(?i)^/[Cc]laude"), handle_claude_photo))
@@ -10595,7 +10651,18 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
+    app.add_handler(CallbackQueryHandler(cotizaciones.handle_cotiz_button, pattern="^cotiz_"))
     app.add_handler(CallbackQueryHandler(handle_button))
+
+    # Inicializar módulo cotizaciones con credenciales del entorno
+    cotizaciones.init(
+        channel=TELEGRAM_CHANNEL,
+        tw_key=TWITTER_API_KEY,
+        tw_secret=TWITTER_API_SECRET,
+        tw_token=TWITTER_TOKEN,
+        tw_tsecret=TWITTER_SECRET,
+        paused_fn=lambda: BOT_PAUSED,
+    )
 
     # Programar tareas automáticas en Argentina (UTC-3)
     from datetime import timezone, timedelta
@@ -10640,6 +10707,9 @@ def main():
         name="weekly_credits",
     )
     logger.info("Weekly credits check programado para los lunes 09:00 ARG")
+
+    # Cotizaciones: jobs de monitoring, alertas y resúmenes
+    cotizaciones.register_jobs(job_queue, tz_arg)
 
     # Re-registrar scheduled jobs persistidos (sobreviven redeploys)
     try:
