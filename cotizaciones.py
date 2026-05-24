@@ -885,6 +885,6 @@ def register_jobs(job_queue, tz_arg) -> None:
         job_queue.run_daily(job_resumen, time=t, name=name, data={"slot": slot})
 
     # Poll cada 5 minutos
-    job_queue.run_repeating(job_poll, interval=300, first=30, name="cotiz_poll")
+    job_queue.run_repeating(job_poll, interval=3600, first=60, name="cotiz_poll")
 
     logger.info(f"Cotizaciones jobs registrados — apertura {cfg.get('apertura_time')} / cierre {cfg.get('cierre_time')}")
