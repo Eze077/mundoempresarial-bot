@@ -1,8 +1,8 @@
 """
 cotizaciones.py — Monitor y publicador de cotizaciones para MundoEmpresarial.ar
 
-Assets: Dólar (Oficial/Blue/MEP/CCL), Euro, Real, Oro, BTC
-Fuentes: dolarapi.com · metals.live · Binance
+Assets: Dólar (Oficial/Blue/MEP/CCL), Euro, Real, Yuan, Oro (PAXG), BTC
+Fuentes: dolarapi.com · ambito.com (yuan) · Binance (PAXGUSDT + BTCUSDT)
 Jobs:    apertura (Lun-Vie 10:00) · cierre (Lun-Vie 15:00) · resumen x3 diarios
          · poll cada 5 min (variación ±X%) · baselines por asset
 
@@ -38,6 +38,7 @@ _DEFAULT_CONFIG = {
         "ccl":     2.0,
         "euro":    3.0,
         "real":    3.0,
+        "yuan":    3.0,
         "oro":     2.0,
         "btc":     5.0,
     },
@@ -52,6 +53,7 @@ _DEFAULT_CONFIG = {
         "ccl":     True,
         "euro":    True,
         "real":    True,
+        "yuan":    True,
         "oro":     True,
         "btc":     True,
     },
@@ -161,21 +163,36 @@ def _fetch_dolarapi() -> dict:
     return result
 
 
-def _fetch_oro() -> dict | None:
+def _fetch_yuan() -> dict | None:
+    """Yuan chino (CNY) desde Ambito mercados."""
     try:
-        r = requests.get("https://api.metals.live/v1/spot", timeout=10)
+        r = requests.get(
+            "https://mercados.ambito.com/dolar/yuan/variacion",
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
         if r.status_code == 200:
-            data = r.json()
-            # Puede ser list o dict
-            price = None
-            if isinstance(data, list) and data:
-                price = data[0].get("gold")
-            elif isinstance(data, dict):
-                price = data.get("gold")
-            if price:
-                return {"precio": float(price), "moneda": "USD/oz"}
+            d = r.json()
+            compra = float(str(d.get("compra", "0")).replace(",", "."))
+            venta  = float(str(d.get("venta",  "0")).replace(",", "."))
+            if venta:
+                return {"compra": compra, "venta": venta}
     except Exception as e:
-        logger.warning(f"metals.live: {e}")
+        logger.warning(f"ambito yuan: {e}")
+    return None
+
+
+def _fetch_oro() -> dict | None:
+    """Oro via PAXG/USDT en Binance (1 PAXG = 1 troy oz de oro)."""
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return {"precio": float(r.json()["price"]), "moneda": "USD/oz"}
+    except Exception as e:
+        logger.warning(f"binance paxg: {e}")
     return None
 
 
@@ -194,7 +211,10 @@ def _fetch_btc() -> dict | None:
 
 def fetch_all() -> dict:
     data = _fetch_dolarapi()
-    oro  = _fetch_oro()
+    yuan = _fetch_yuan()
+    if yuan:
+        data["yuan"] = yuan
+    oro = _fetch_oro()
     if oro:
         data["oro"] = oro
     btc = _fetch_btc()
@@ -228,7 +248,7 @@ def capture_baseline(assets: list[str]) -> None:
 # ── Formatters ───────────────────────────────────────────────────────────────
 _EMOJI = {
     "oficial": "💵", "blue": "💵", "mep": "💵", "ccl": "💵",
-    "euro": "💶", "real": "🇧🇷", "oro": "🥇", "btc": "₿",
+    "euro": "💶", "real": "🇧🇷", "yuan": "🇨🇳", "oro": "🥇", "btc": "₿",
 }
 _NOMBRES = {
     "oficial": "Dólar Oficial",
@@ -237,7 +257,8 @@ _NOMBRES = {
     "ccl":     "Dólar CCL",
     "euro":    "Euro",
     "real":    "Real",
-    "oro":     "Oro",
+    "yuan":    "Yuan",
+    "oro":     "Oro (PAXG)",
     "btc":     "Bitcoin",
 }
 _URLS = {
@@ -247,6 +268,7 @@ _URLS = {
     "ccl":     "https://mundoempresarial.ar/cotizaciones/dolar-ccl/",
     "euro":    "https://mundoempresarial.ar/cotizaciones/euro/",
     "real":    "https://mundoempresarial.ar/cotizaciones/real/",
+    "yuan":    "https://mundoempresarial.ar/cotizaciones/",
     "oro":     "https://mundoempresarial.ar/cotizaciones/",
     "btc":     "https://mundoempresarial.ar/cotizaciones/",
 }
@@ -318,7 +340,7 @@ def build_resumen(cotiz: dict, slot: str = "") -> str:
         if key in cotiz:
             lines.append(_fmt_price(key, cotiz[key]))
     lines.append("")
-    for key in ("euro", "real", "oro", "btc"):
+    for key in ("euro", "real", "yuan", "oro", "btc"):
         if key in cotiz:
             lines.append(_fmt_price(key, cotiz[key]))
 
@@ -390,7 +412,7 @@ async def _publish(bot, tg_text: str, tweet_text: str | None = None) -> None:
 
 # ── Job callbacks ────────────────────────────────────────────────────────────
 async def job_baseline_fiat(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await asyncio.to_thread(capture_baseline, ["oficial", "blue", "euro", "real", "oro"])
+    await asyncio.to_thread(capture_baseline, ["oficial", "blue", "euro", "real", "yuan", "oro"])
 
 
 async def job_baseline_mep(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -482,7 +504,7 @@ def _panel_text(cotiz: dict) -> str:
         if key in cotiz:
             lines.append(_fmt_price(key, cotiz[key]))
     lines.append("")
-    for key in ("euro", "real", "oro", "btc"):
+    for key in ("euro", "real", "yuan", "oro", "btc"):
         if key in cotiz:
             lines.append(_fmt_price(key, cotiz[key]))
     return "\n".join(lines)
@@ -544,7 +566,7 @@ def _config_kb() -> InlineKeyboardMarkup:
 _THRESHOLD_OPTIONS = [1.0, 2.0, 3.0, 5.0, 10.0]
 _GROUP_META = {
     "dolar": ("Dólar (oficial/blue/mep/ccl)", ["oficial", "blue", "mep", "ccl"]),
-    "fiat":  ("Euro / Real",                  ["euro", "real"]),
+    "fiat":  ("Euro / Real / Yuan",            ["euro", "real", "yuan"]),
     "oro":   ("Oro",                          ["oro"]),
     "btc":   ("Bitcoin",                      ["btc"]),
 }
