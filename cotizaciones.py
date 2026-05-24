@@ -61,21 +61,23 @@ _DEFAULT_CONFIG = {
 
 # ── Runtime deps (inyectados desde main.py via init()) ───────────────────────
 _CHANNEL:    str = ""
-_TW_KEY:     str = ""
-_TW_SECRET:  str = ""
-_TW_TOKEN:   str = ""
-_TW_TSECRET: str = ""
+_TW_KEY:        str = ""
+_TW_SECRET:     str = ""
+_TW_TOKEN:      str = ""
+_TW_TSECRET:    str = ""
+_ADMIN_CHAT_ID: str = ""
 _paused_fn = lambda: False
 
 
 def init(channel: str, tw_key: str, tw_secret: str, tw_token: str,
-         tw_tsecret: str, paused_fn=None) -> None:
-    global _CHANNEL, _TW_KEY, _TW_SECRET, _TW_TOKEN, _TW_TSECRET, _paused_fn
-    _CHANNEL    = channel
-    _TW_KEY     = tw_key
-    _TW_SECRET  = tw_secret
-    _TW_TOKEN   = tw_token
-    _TW_TSECRET = tw_tsecret
+         tw_tsecret: str, admin_chat_id: str = "", paused_fn=None) -> None:
+    global _CHANNEL, _TW_KEY, _TW_SECRET, _TW_TOKEN, _TW_TSECRET, _ADMIN_CHAT_ID, _paused_fn
+    _CHANNEL        = channel
+    _TW_KEY         = tw_key
+    _TW_SECRET      = tw_secret
+    _TW_TOKEN       = tw_token
+    _TW_TSECRET     = tw_tsecret
+    _ADMIN_CHAT_ID  = admin_chat_id
     if paused_fn:
         _paused_fn = paused_fn
 
@@ -383,6 +385,7 @@ def _to_tweet(md_text: str) -> str:
 
 # ── Publisher ────────────────────────────────────────────────────────────────
 async def _publish(bot, tg_text: str, tweet_text: str | None = None) -> None:
+    # Canal público
     try:
         await bot.send_message(
             chat_id=_CHANNEL,
@@ -392,6 +395,18 @@ async def _publish(bot, tg_text: str, tweet_text: str | None = None) -> None:
         )
     except Exception as e:
         logger.error(f"cotiz canal TG: {e}")
+
+    # Chat privado del admin
+    if _ADMIN_CHAT_ID:
+        try:
+            await bot.send_message(
+                chat_id=int(_ADMIN_CHAT_ID),
+                text=tg_text,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"cotiz admin TG: {e}")
 
     if _TW_KEY and tweet_text:
         try:
@@ -599,16 +614,91 @@ def _threshold_kb(group: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-_HORARIOS_HELP = (
-    "⏰ *Horarios de Cotizaciones*\n\n"
-    "Usá el comando:\n"
-    "`/cotiz_horario apertura HH:MM`\n"
-    "`/cotiz_horario cierre HH:MM`\n"
-    "`/cotiz_horario resumen HH:MM HH:MM HH:MM`\n\n"
-    "Ejemplo:\n"
-    "`/cotiz_horario resumen 08:00 13:00 21:00`\n\n"
-    "_Los cambios de apertura/cierre requieren reiniciar el bot para reprogramar los jobs._"
-)
+_HORA_OPTIONS = {
+    "apertura": ["09:00", "09:30", "10:00", "10:30", "11:00"],
+    "cierre":   ["14:00", "14:30", "15:00", "15:30", "16:00"],
+    "res_man":  ["07:00", "07:30", "08:00", "08:30", "09:00"],
+    "res_med":  ["12:00", "12:30", "13:00", "13:30", "14:00"],
+    "res_noc":  ["19:00", "19:30", "20:00", "20:30", "21:00"],
+}
+
+_HORA_LABEL = {
+    "apertura": "Apertura Dólar (Lun-Vie)",
+    "cierre":   "Cierre Dólar (Lun-Vie)",
+    "res_man":  "Resumen Mañana",
+    "res_med":  "Resumen Mediodía",
+    "res_noc":  "Resumen Noche",
+}
+
+
+def _horarios_menu_text() -> str:
+    cfg = load_config()
+    rt  = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+    return (
+        "⏰ *Horarios de Cotizaciones*\n\n"
+        f"  • Apertura dólar: *{cfg.get('apertura_time', '10:00')}* (Lun-Vie)\n"
+        f"  • Cierre dólar:   *{cfg.get('cierre_time', '15:00')}* (Lun-Vie)\n"
+        f"  • Resumen mañana: *{rt[0] if rt else '08:00'}* (todos los días)\n"
+        f"  • Resumen mediodía: *{rt[1] if len(rt)>1 else '13:00'}* (todos los días)\n"
+        f"  • Resumen noche:  *{rt[2] if len(rt)>2 else '20:00'}* (todos los días)\n\n"
+        "_Los cambios de apertura/cierre reinician los jobs automáticamente._"
+    )
+
+
+def _horarios_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔓 Apertura Dólar",   callback_data="cotiz_cfg_hora_apertura")],
+        [InlineKeyboardButton("🔒 Cierre Dólar",     callback_data="cotiz_cfg_hora_cierre")],
+        [InlineKeyboardButton("🌅 Resumen Mañana",   callback_data="cotiz_cfg_hora_res_man")],
+        [InlineKeyboardButton("☀️ Resumen Mediodía", callback_data="cotiz_cfg_hora_res_med")],
+        [InlineKeyboardButton("🌙 Resumen Noche",    callback_data="cotiz_cfg_hora_res_noc")],
+        [InlineKeyboardButton("↩️ Volver",           callback_data="cotiz_config")],
+    ])
+
+
+def _hora_picker_text(tipo: str) -> str:
+    cfg   = load_config()
+    rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+    cur_map = {
+        "apertura": cfg.get("apertura_time", "10:00"),
+        "cierre":   cfg.get("cierre_time",   "15:00"),
+        "res_man":  rt[0] if rt else "08:00",
+        "res_med":  rt[1] if len(rt) > 1 else "13:00",
+        "res_noc":  rt[2] if len(rt) > 2 else "20:00",
+    }
+    label  = _HORA_LABEL.get(tipo, tipo)
+    actual = cur_map.get(tipo, "—")
+    return f"⏰ *{label}*\n\nActual: *{actual}*\nElegí el nuevo horario:"
+
+
+def _hora_picker_kb(tipo: str) -> InlineKeyboardMarkup:
+    cfg   = load_config()
+    rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+    cur_map = {
+        "apertura": cfg.get("apertura_time", "10:00"),
+        "cierre":   cfg.get("cierre_time",   "15:00"),
+        "res_man":  rt[0] if rt else "08:00",
+        "res_med":  rt[1] if len(rt) > 1 else "13:00",
+        "res_noc":  rt[2] if len(rt) > 2 else "20:00",
+    }
+    current = cur_map.get(tipo, "")
+    options = _HORA_OPTIONS.get(tipo, [])
+    rows = []
+    row  = []
+    for opt in options:
+        mark = "✅ " if opt == current else ""
+        # Usar HH_MM para que no rompa el callback_data (no se permite ":")
+        opt_key = opt.replace(":", "_")
+        row.append(InlineKeyboardButton(
+            f"{mark}{opt}",
+            callback_data=f"cotiz_hora_{tipo}_{opt_key}",
+        ))
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ Volver", callback_data="cotiz_cfg_horarios")])
+    return InlineKeyboardMarkup(rows)
 
 
 # ── Callback handler ─────────────────────────────────────────────────────────
@@ -628,17 +718,47 @@ async def handle_cotiz_button(update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _config_text(), parse_mode="Markdown", reply_markup=_config_kb()
         )
 
+    elif data == "cotiz_cfg_horarios":
+        await query.edit_message_text(
+            _horarios_menu_text(), parse_mode="Markdown", reply_markup=_horarios_menu_kb()
+        )
+
+    elif data.startswith("cotiz_cfg_hora_"):
+        tipo = data[len("cotiz_cfg_hora_"):]
+        await query.edit_message_text(
+            _hora_picker_text(tipo), parse_mode="Markdown", reply_markup=_hora_picker_kb(tipo)
+        )
+
+    elif data.startswith("cotiz_hora_"):
+        # cotiz_hora_{tipo}_{HH_MM}  e.g. cotiz_hora_apertura_10_00
+        rest  = data[len("cotiz_hora_"):]
+        # tipo puede ser: apertura, cierre, res_man, res_med, res_noc
+        # la hora tiene formato HH_MM (2 segmentos al final)
+        parts = rest.rsplit("_", 2)   # ["apertura", "10", "00"]
+        tipo  = parts[0]
+        hhmm  = f"{parts[1]}:{parts[2]}"
+        cfg   = load_config()
+        rt    = cfg.get("resumen_times", ["08:00", "13:00", "20:00"])
+        if tipo == "apertura":
+            cfg["apertura_time"] = hhmm
+        elif tipo == "cierre":
+            cfg["cierre_time"] = hhmm
+        elif tipo == "res_man":
+            rt[0] = hhmm; cfg["resumen_times"] = rt
+        elif tipo == "res_med":
+            while len(rt) < 2: rt.append("13:00")
+            rt[1] = hhmm; cfg["resumen_times"] = rt
+        elif tipo == "res_noc":
+            while len(rt) < 3: rt.append("20:00")
+            rt[2] = hhmm; cfg["resumen_times"] = rt
+        save_config(cfg)
+        await query.edit_message_text(
+            _hora_picker_text(tipo), parse_mode="Markdown", reply_markup=_hora_picker_kb(tipo)
+        )
+
     elif data.startswith("cotiz_cfg_"):
         group = data[len("cotiz_cfg_"):]
-        if group == "horarios":
-            await query.edit_message_text(
-                _HORARIOS_HELP,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("↩️ Volver", callback_data="cotiz_config")
-                ]]),
-            )
-        elif group in _GROUP_META:
+        if group in _GROUP_META:
             await query.edit_message_text(
                 _threshold_text(group),
                 parse_mode="Markdown",

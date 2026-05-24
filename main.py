@@ -10661,6 +10661,7 @@ def main():
         tw_secret=TWITTER_API_SECRET,
         tw_token=TWITTER_TOKEN,
         tw_tsecret=TWITTER_SECRET,
+        admin_chat_id=ADMIN_CHAT_ID,
         paused_fn=lambda: BOT_PAUSED,
     )
 
