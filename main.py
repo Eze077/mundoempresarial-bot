@@ -13555,9 +13555,10 @@ async def _post_init(application: Application) -> None:
         BotCommand("borrar",            "Eliminar una nota publicada"),
         # ── Información ───────────────────────────────────────────────────────
         BotCommand("stats",             "Estadísticas del día (publicadas, errores)"),
-        BotCommand("feedback_ver",      "Ver pesos aprendidos por el EDITOR"),
+        BotCommand("creditos",          "Estado de servicios pagos (OpenAI, Twitter, etc.)"),
         # ── Configuración ─────────────────────────────────────────────────────
-        BotCommand("fuentes",           "Gestionar fuentes RSS del EDITOR"),
+        BotCommand("fuentes",           "Gestionar fuentes RSS del editor"),
+        BotCommand("reglas",            "Reglas editoriales activas del lector QA"),
     ])
     logger.info("BotCommands registrados en Telegram")
 
