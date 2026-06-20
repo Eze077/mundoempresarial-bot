@@ -24,7 +24,7 @@
     "confiabilidad": 7,
     "notas": "Buen stock de notas de coyuntura económica. Fuente frecuente pero hay que filtrar sesgo al reescribir.",
     "quirks": "JSON-LD con articleBody completo. Funciona OK.",
-    "rss_url": "https://www.infobae.com/feeds/rss/"
+    "rss_url": ""
   },
 
   "lapoliticaonline.com": {
@@ -36,10 +36,10 @@
     "confiabilidad": 8,
     "notas": "Buen material para Hilo 3 (posición política). Notas con ángulo analítico.",
     "quirks": "Bloquea IPs cloud con 403 sin headers completos. Requiere Sec-Fetch-* + Referer google.com (ya configurado en HEADERS_BROWSER).",
-    "rss_url": "https://www.lapoliticaonline.com/feed/"
+    "rss_url": "https://www.lapoliticaonline.com/files/rss/ultimasnoticias-es.xml"
   },
 
-  "somospymes.com": {
+  "somospymes.com.ar": {
     "name": "Somos Pymes",
     "tipo": "Pyme",
     "orientacion": "Alineado con pymes productivas. Afín a la línea ENAC / desarrollismo nacional.",
@@ -48,7 +48,7 @@
     "confiabilidad": 8,
     "notas": "Fuente natural para Hilo 2 (voz de las pymes). Se puede citar sin mucho reframe.",
     "quirks": "",
-    "rss_url": "https://somospymes.com/feed/"
+    "rss_url": "https://www.somospymes.com.ar/rss/pages/tecnologia.xml"
   },
 
   "ambito.com": {
@@ -72,7 +72,7 @@
     "confiabilidad": 7,
     "notas": "Buena cobertura de empresas grandes. Filtra por interés pyme antes de reescribir.",
     "quirks": "",
-    "rss_url": "https://www.cronista.com/files/rss/ultimas.xml"
+    "rss_url": ""
   },
 
   "baenegocios.com": {
@@ -84,7 +84,7 @@
     "confiabilidad": 7,
     "notas": "Tono alineado con la línea MundoEmpresarial. Citas de sindicatos y pymes frecuentes.",
     "quirks": "",
-    "rss_url": "https://www.baenegocios.com/rss/pages/home.xml"
+    "rss_url": "https://www.baenegocios.com/feed/"
   },
 
   "perfil.com": {
@@ -108,7 +108,7 @@
     "confiabilidad": 7,
     "notas": "Fuente afín a la línea editorial. Buen material para Hilo 3 en posición política.",
     "quirks": "",
-    "rss_url": "https://www.pagina12.com.ar/rss/portada"
+    "rss_url": ""
   },
 
   "eldestapeweb.com": {
@@ -120,7 +120,7 @@
     "confiabilidad": 6,
     "notas": "Fuente afín. Tono militante, reescribir con filtro informativo.",
     "quirks": "",
-    "rss_url": "https://www.eldestapeweb.com/rss/home.xml"
+    "rss_url": ""
   },
 
   "clarin.com": {
@@ -144,7 +144,7 @@
     "confiabilidad": 8,
     "notas": "Muy amplia en cobertura. Filtrar fuerte antes de reescribir desde la línea MundoEmpresarial.",
     "quirks": "",
-    "rss_url": "https://servicios.lanacion.com.ar/herramientas/rss/origen=2"
+    "rss_url": "https://www.lanacion.com.ar/arc/outboundfeeds/rss/"
   },
 
   "letrap.com.ar": {
