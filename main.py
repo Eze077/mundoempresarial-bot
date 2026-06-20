@@ -3879,7 +3879,6 @@ def _build_commands_text() -> str:
         "• `/borrar <URL o ID>` → mandar una nota directo a la papelera de WP.\n"
         "\n"
         "📰 *Curaduría diaria*\n"
-        "• `/curador` → briefing on-demand de las noticias top de las últimas 24h.\n"
         "• `/horarios` → ver y configurar cuántas veces por día y a qué hora se envía el curador.\n"
         "• `/feedback_ver` → ver qué dominios y keywords aprendió el curador a "
         "favorecer/penalizar en base a tus 👍👎 sobre las notas.\n"
@@ -4407,58 +4406,6 @@ async def send_weekly_credits_check(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"weekly_credits_check: {e}")
 
 
-async def cmd_feedback_ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra los pesos aprendidos por el curador."""
-    fb = await asyncio.to_thread(_load_feedback)
-
-    dw = fb.get("domain_weights", {})
-    kw = fb.get("keyword_weights", {})
-    hh = fb.get("hilo_hints", {})
-    inter = fb.get("interactions", [])
-
-    lines = ["🧠 *Feedback store del curador*", ""]
-
-    # Dominios — top 5 positivos y negativos
-    if dw:
-        pos_dw = sorted(dw.items(), key=lambda x: -x[1])[:5]
-        neg_dw = sorted(dw.items(), key=lambda x: x[1])[:5]
-        lines.append("*Dominios favorecidos:*")
-        for d, w in pos_dw:
-            if w > 0:
-                lines.append(f"  • {md_escape(d)} `{w:+d}`")
-        lines.append("")
-        lines.append("*Dominios penalizados:*")
-        for d, w in neg_dw:
-            if w < 0:
-                lines.append(f"  • {md_escape(d)} `{w:+d}`")
-        lines.append("")
-
-    # Keywords — top 10 favoritas, top 5 penalizadas
-    if kw:
-        pos_kw = sorted(kw.items(), key=lambda x: -x[1])[:10]
-        neg_kw = sorted(kw.items(), key=lambda x: x[1])[:5]
-        lines.append("*Keywords favoritas:*")
-        for k, w in pos_kw:
-            if w > 0:
-                lines.append(f"  • {md_escape(k)} `{w:+d}`")
-        lines.append("")
-        lines.append("*Keywords penalizadas:*")
-        for k, w in neg_kw:
-            if w < 0:
-                lines.append(f"  • {md_escape(k)} `{w:+d}`")
-        lines.append("")
-
-    # Hilo hints
-    if hh:
-        lines.append(f"*Hilos sugeridos por keyword* ({len(hh)} aprendidos):")
-        for k, h in list(hh.items())[:15]:
-            lines.append(f"  • {md_escape(k)} → hilo {h}")
-        lines.append("")
-
-    lines.append(f"_Interacciones registradas:_ {len(inter)}")
-    lines.append(f"_Última actualización:_ {fb.get('updated_at', '-')}")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_reglas(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11043,10 +10990,6 @@ _FEEDBACK_CACHE: dict | None = None
 _FEEDBACK_POST_ID: int | None = None
 _FEEDBACK_POST_SLUG = "mebot-feedback-store"
 
-_CURADOR_CONFIG_CACHE: dict | None = None
-_CURADOR_CONFIG_POST_ID: int | None = None
-_CURADOR_CONFIG_POST_SLUG = "mebot-curador-config"
-_DEFAULT_CURADOR_SLOTS = [{"hh": 7, "mm": 30}, {"hh": 11, "mm": 30}, {"hh": 17, "mm": 30}]
 
 
 def _find_or_create_feedback_post() -> int | None:
@@ -11385,85 +11328,10 @@ def _save_feedback(data: dict) -> bool:
         return False
 
 
-def _find_or_create_curador_config_post() -> int | None:
-    global _CURADOR_CONFIG_POST_ID
-    if _CURADOR_CONFIG_POST_ID:
-        return _CURADOR_CONFIG_POST_ID
-    h = wp_auth()
-    try:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts?slug={_CURADOR_CONFIG_POST_SLUG}&status=private,draft",
-            headers=h, timeout=10,
-        )
-        if r.status_code == 200 and r.json():
-            _CURADOR_CONFIG_POST_ID = r.json()[0]["id"]
-            return _CURADOR_CONFIG_POST_ID
-    except Exception as e:
-        logger.warning(f"Buscando curador config post: {e}")
-    try:
-        payload = {
-            "title": "MEBot Curador Config",
-            "slug": _CURADOR_CONFIG_POST_SLUG,
-            "status": "private",
-            "content": "{}",
-            "excerpt": "Config de horarios del curador. No tocar manualmente.",
-        }
-        r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/posts",
-            headers={**h, "Content-Type": "application/json"},
-            json=payload, timeout=10,
-        )
-        if r.status_code in (200, 201):
-            _CURADOR_CONFIG_POST_ID = r.json()["id"]
-            logger.info(f"Curador config post creado: ID {_CURADOR_CONFIG_POST_ID}")
-            return _CURADOR_CONFIG_POST_ID
-    except Exception as e:
-        logger.error(f"Creando curador config post: {e}")
-    return None
 
 
-def _load_curador_config() -> dict:
-    global _CURADOR_CONFIG_CACHE
-    if _CURADOR_CONFIG_CACHE is not None:
-        return _CURADOR_CONFIG_CACHE
-    post_id = _find_or_create_curador_config_post()
-    if not post_id:
-        _CURADOR_CONFIG_CACHE = {"slots": list(_DEFAULT_CURADOR_SLOTS)}
-        return _CURADOR_CONFIG_CACHE
-    try:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit",
-            headers=wp_auth(), timeout=10,
-        )
-        if r.status_code == 200:
-            raw = r.json().get("content", {}).get("raw", "") or ""
-            clean = re.sub(r'<[^>]+>', '', raw).strip()
-            if clean and clean != "{}":
-                _CURADOR_CONFIG_CACHE = json.loads(clean)
-                return _CURADOR_CONFIG_CACHE
-    except Exception as e:
-        logger.warning(f"Load curador config: {e}")
-    _CURADOR_CONFIG_CACHE = {"slots": list(_DEFAULT_CURADOR_SLOTS)}
-    return _CURADOR_CONFIG_CACHE
 
 
-def _save_curador_config(data: dict) -> bool:
-    global _CURADOR_CONFIG_CACHE
-    _CURADOR_CONFIG_CACHE = data
-    post_id = _find_or_create_curador_config_post()
-    if not post_id:
-        return False
-    try:
-        r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
-            headers={**wp_auth(), "Content-Type": "application/json"},
-            json={"content": json.dumps(data, ensure_ascii=False)},
-            timeout=15,
-        )
-        return r.status_code in (200, 201)
-    except Exception as e:
-        logger.error(f"Save curador config: {e}")
-        return False
 
 
 def _title_keywords(title: str) -> list[str]:
@@ -11475,600 +11343,36 @@ def _title_keywords(title: str) -> list[str]:
     ]
 
 
-def feedback_record(action: str, article: dict, hilo_override: int | None = None):
-    """
-    Registra una acción del usuario sobre un artículo del curador.
-    action: 'up' | 'down' | 'hilo' | 'publish'
-    """
-    fb = _load_feedback()
-    domain = article.get("domain", "")
-    title = article.get("title", "")
-    kws = _title_keywords(title)
 
-    if action == "up" or action == "publish":
-        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) + 2
-        for kw in kws:
-            fb["keyword_weights"][kw] = fb["keyword_weights"].get(kw, 0) + 1
-        if action == "publish":
-            # Extra bonus por publicar (decisión fuerte)
-            fb["domain_weights"][domain] += 2
-    elif action == "down":
-        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) - 2
-        for kw in kws:
-            fb["keyword_weights"][kw] = fb["keyword_weights"].get(kw, 0) - 1
-    elif action == "hilo" and hilo_override in (1, 2, 3):
-        # Si cambió el hilo, registrar que esas keywords apuntan al nuevo hilo
-        for kw in kws:
-            fb["hilo_hints"][kw] = hilo_override
-        # Además considerar relevante (+1 domain)
-        fb["domain_weights"][domain] = fb["domain_weights"].get(domain, 0) + 1
 
-    from datetime import datetime
-    fb["interactions"].append({
-        "ts": datetime.utcnow().isoformat() + "Z",
-        "action": action + (f"->h{hilo_override}" if hilo_override else ""),
-        "domain": domain,
-        "title": title[:80],
-    })
 
-    _save_feedback(fb)
 
 
-def _apply_feedback_score(base: int, domain: str, title: str, summary: str) -> int:
-    """Aplica los pesos aprendidos sobre el score base del curador."""
-    fb = _load_feedback()
-    if not fb:
-        return base
 
-    adjustment = 0
-    # Dominio: bonus/malus completo
-    adjustment += fb["domain_weights"].get(domain, 0)
 
-    # Keywords: medio peso (el bonus acumulativo de título)
-    kws = _title_keywords(title) + _title_keywords(summary[:200])
-    for kw in set(kws):
-        w = fb["keyword_weights"].get(kw, 0)
-        adjustment += int(w * 0.5)
 
-    return max(0, base + adjustment)
 
 
-def _apply_feedback_hilo(title: str, summary: str, default_hilo: int) -> int:
-    """Si hay hilo_hints fuertes en las keywords del título, los respeta."""
-    fb = _load_feedback()
-    if not fb or not fb.get("hilo_hints"):
-        return default_hilo
 
-    kws = _title_keywords(title)
-    hilo_votes = {1: 0, 2: 0, 3: 0}
-    for kw in kws:
-        if kw in fb["hilo_hints"]:
-            hilo_votes[fb["hilo_hints"][kw]] += 1
 
-    if max(hilo_votes.values()) >= 2:  # requerir consenso mínimo
-        return max(hilo_votes, key=hilo_votes.get)
-    return default_hilo
 
 
-def _score_article(title: str, summary: str, source_meta: dict, published_dt) -> int:
-    """Calcula score de relevancia para curador. Ver SKILL curador-mundo-empresarial."""
-    title_low = (title or "").lower()
-    summary_low = (summary or "").lower()
 
-    # 1. Keyword match — título pesa triple
-    kw_score = 0
-    for kw in KW_PYME:
-        kw_score += title_low.count(kw) * 3
-        kw_score += summary_low.count(kw)
 
-    if kw_score == 0:
-        return 0  # descarta notas sin interés pyme
 
-    # 2. Afinidad de la fuente
-    dist = source_meta.get("distancia_editorial", 5)
-    if isinstance(dist, int):
-        if dist <= 3:
-            kw_score += 3
-        elif dist <= 6:
-            kw_score += 1
 
-    # 3. Recencia
-    if published_dt:
-        from datetime import datetime, timezone as tz
-        now = datetime.now(tz.utc)
-        if published_dt.tzinfo is None:
-            published_dt = published_dt.replace(tzinfo=tz.utc)
-        age_hours = (now - published_dt).total_seconds() / 3600
-        if age_hours < 3:
-            kw_score += 2
-        elif age_hours < 6:
-            kw_score += 1
-        elif age_hours > 12:
-            kw_score -= 0
 
-    # 4. Confiabilidad bonus
-    conf = source_meta.get("confiabilidad", 5)
-    if isinstance(conf, int):
-        kw_score += conf // 5
 
-    return kw_score
 
 
-def _dedupe_articles(articles: list) -> list:
-    """
-    Elimina duplicados. Dos pasadas:
-    1. Jaccard por palabras significativas (>55% match = duplicado obvio).
-    2. Si hay OPENAI_API_KEY, una pasada final agrupa por evento semántico
-       con embeddings (notas sobre el mismo hecho pero distinto ángulo/titular).
-    """
-    def _normalize(t: str) -> set:
-        t = re.sub(r'[^\w\sáéíóúñ]', ' ', (t or "").lower())
-        words = {w for w in t.split() if len(w) > 3 and w not in STOP_WORDS}
-        return words
 
-    # Pasada 1: Jaccard
-    unique = []
-    for art in articles:
-        art_words = _normalize(art["title"])
-        if not art_words:
-            continue
-        dupe_of = None
-        for u in unique:
-            u_words = _normalize(u["title"])
-            if not u_words:
-                continue
-            shared = art_words & u_words
-            ratio = len(shared) / max(len(art_words), len(u_words))
-            if ratio > 0.55 or art["title"].strip().lower() == u["title"].strip().lower():
-                dupe_of = u
-                break
-        if dupe_of:
-            dupe_of.setdefault("also_in", []).append(art["source_name"])
-            if art["score"] > dupe_of["score"]:
-                art["also_in"] = dupe_of.get("also_in", []) + [dupe_of["source_name"]]
-                unique[unique.index(dupe_of)] = art
-        else:
-            unique.append(art)
 
-    # Pasada 2: embeddings semánticos (si hay OPENAI_API_KEY)
-    if OPENAI_API_KEY and len(unique) > 1:
-        unique = _dedupe_with_embeddings(unique)
 
-    return unique
 
 
-def _dedupe_with_embeddings(articles: list, similarity_threshold: float = 0.82) -> list:
-    """
-    Usa text-embedding-3-small para detectar notas sobre el mismo evento
-    con títulos distintos entre medios distintos. Costo ~$0.00001 por nota.
-    """
-    if not articles:
-        return articles
-    try:
-        texts = [f"{a['title']}. {a.get('summary','')[:200]}" for a in articles]
-        r = openai_post(
-            "https://api.openai.com/v1/embeddings",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={"model": "text-embedding-3-small", "input": texts},
-            timeout=30,
-        )
-        if r.status_code != 200:
-            logger.warning(f"Embeddings {r.status_code}: {r.text[:200]}")
-            return articles
-        embeddings = [d["embedding"] for d in r.json()["data"]]
-    except Exception as e:
-        logger.warning(f"Embeddings dedup: {e}")
-        return articles
 
-    # Similitud coseno (embeddings ya vienen normalizados de OpenAI)
-    def cosine(a, b):
-        return sum(x * y for x, y in zip(a, b))
 
-    # Agrupar: cada artículo se queda o se absorbe por el de mayor score
-    kept_idxs = []
-    absorbed_into = {}  # idx → idx_del_que_absorbe
 
-    for i, art in enumerate(articles):
-        found_cluster = None
-        for j in kept_idxs:
-            sim = cosine(embeddings[i], embeddings[j])
-            if sim >= similarity_threshold:
-                found_cluster = j
-                break
-        if found_cluster is not None:
-            # Absorber: el de mayor score queda, el otro se suma al also_in
-            if art["score"] > articles[found_cluster]["score"]:
-                # Reemplazar en kept_idxs + mover el viejo al also_in del nuevo
-                old = articles[found_cluster]
-                art.setdefault("also_in", []).append(old["source_name"])
-                if old.get("also_in"):
-                    art["also_in"].extend(old["also_in"])
-                articles[found_cluster] = art
-            else:
-                kept = articles[found_cluster]
-                kept.setdefault("also_in", []).append(art["source_name"])
-                if art.get("also_in"):
-                    kept["also_in"].extend(art.get("also_in", []))
-        else:
-            kept_idxs.append(i)
-
-    result = [articles[i] for i in kept_idxs]
-    # Deduplicate also_in entries
-    for art in result:
-        if art.get("also_in"):
-            art["also_in"] = list(dict.fromkeys(art["also_in"]))[:5]
-    return result
-
-
-def _google_news_rss(domain: str) -> str:
-    """Arma URL de Google News RSS filtrado por dominio (fallback universal)."""
-    from urllib.parse import quote
-    q = quote(f"site:{domain}")
-    return f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=AR&ceid=AR:es-419"
-
-
-def _fetch_feed(url: str):
-    """Baja y parsea un feed RSS. Devuelve (feed, 'ok'/'error msg')."""
-    try:
-        import feedparser
-        r = requests.get(url, headers=HEADERS_BROWSER, timeout=10)
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}"
-        feed = feedparser.parse(r.content)
-        if not feed.entries:
-            return None, "no entries"
-        return feed, "ok"
-    except Exception as e:
-        return None, str(e)
-
-
-def curar_noticias(max_results: int = 15, lookback_hours: int = 24) -> list:
-    """Scanea los feeds RSS de sources.json y devuelve las más relevantes.
-    lookback_hours: ventana hacia atrás (24 por default, 8 para los slots del día).
-    Si el feed directo falla, cae a Google News RSS filtrado por dominio."""
-    try:
-        import feedparser
-    except ImportError:
-        logger.error("feedparser no instalado")
-        return []
-
-    from datetime import datetime, timezone as tz, timedelta
-
-    sources = _load_sources()
-    results = []
-    now = datetime.now(tz.utc)
-    window = now - timedelta(hours=lookback_hours)
-
-    for domain, meta in sources.items():
-        rss_url = meta.get("rss_url", "")
-        feed = None
-
-        # 1) Feed directo si existe
-        if rss_url:
-            feed, status = _fetch_feed(rss_url)
-            if not feed:
-                logger.warning(f"RSS directo {domain}: {status}, cayendo a Google News")
-
-        # 2) Fallback Google News si no hay feed directo o falló
-        if not feed:
-            feed, status = _fetch_feed(_google_news_rss(domain))
-            if not feed:
-                logger.warning(f"Google News RSS {domain}: {status}")
-                continue
-
-        for entry in feed.entries[:50]:
-            # Parsear fecha
-            pub_dt = None
-            for key in ("published_parsed", "updated_parsed"):
-                struct = entry.get(key)
-                if struct:
-                    pub_dt = datetime(*struct[:6], tzinfo=tz.utc)
-                    break
-
-            if pub_dt and pub_dt < window:
-                continue  # Fuera de la ventana 24h
-
-            title = (entry.get("title") or "").strip()
-            summary = re.sub(
-                r'<[^>]+>', '',
-                (entry.get("summary") or entry.get("description") or "")
-            ).strip()
-            link = (entry.get("link") or "").strip()
-            # Categorías/tags del RSS (feedparser las devuelve en entry.tags)
-            rss_cats = " ".join(
-                (t.get("term") or "") for t in (entry.get("tags") or [])
-            ).strip()
-
-            if not title or not link:
-                continue
-
-            base_score = _score_article(title, summary, meta, pub_dt)
-            if base_score <= 0:
-                continue
-            # Aplicar aprendizaje acumulado del usuario
-            score = _apply_feedback_score(base_score, domain, title, summary)
-            if score <= 0:
-                continue
-
-            results.append({
-                "title":       title,
-                "summary":     summary[:300],
-                "rss_cats":    rss_cats,
-                "link":        link,
-                "published":   pub_dt,
-                "score":       score,
-                "source_name": meta.get("name", domain),
-                "domain":      domain,
-                "distancia":   meta.get("distancia_editorial", 5),
-            })
-
-    # Dedupe (Jaccard + embeddings semánticos si hay OPENAI_API_KEY)
-    unique = _dedupe_articles(results)
-    unique.sort(key=lambda x: -x["score"])
-
-    # Asignar hilo a cada nota por contenido (título + categorías RSS + summary)
-    for art in unique:
-        fake_data = {
-            "title":   art["title"],
-            "text":    art["rss_cats"] + " " + art["summary"],
-            "excerpt": art["rss_cats"] + " " + art["summary"],
-        }
-        base_hilo = detect_hilo(fake_data)
-        art["hilo"] = _apply_feedback_hilo(art["title"], art["summary"], base_hilo)
-
-    # Tomar hasta 5 por hilo (sin padding: si hay menos, hay menos)
-    # Umbral mínimo de score para considerar "significativa": base ≥ 4
-    MIN_SCORE_SIGNIFICATIVA = 4
-    per_hilo = {1: [], 2: [], 3: []}
-    for art in unique:
-        if art["score"] < MIN_SCORE_SIGNIFICATIVA:
-            continue
-        h = art.get("hilo", 2)
-        if len(per_hilo.setdefault(h, [])) < 5:
-            per_hilo[h].append(art)
-
-    # Armar resultado final: intercalar hilos en orden de score
-    final = []
-    for h in (1, 2, 3):
-        final.extend(per_hilo.get(h, []))
-    return final
-
-
-def _format_curador_report(articles: list, suggestion_line: str = "") -> str:
-    """Arma el briefing en formato Telegram Markdown."""
-    from datetime import datetime
-    if not articles:
-        return "📰 *Curador diario*\n\nNo encontré noticias relevantes de las últimas 24h."
-
-    today = datetime.now().strftime("%d/%m/%Y")
-    header = f"📰 *Curador diario — {today}*\n_{len(articles)} notas relevantes de las últimas 24h_"
-
-    groups = {1: [], 2: [], 3: []}
-    for art in articles:
-        groups.setdefault(art.get("hilo", 2), []).append(art)
-
-    hilo_labels = {
-        1: "📋 *Informarse es respetarse*",
-        2: "🗣️ *Voz de las pymes*",
-        3: "💭 *Opinión / Análisis*",
-    }
-
-    parts = [header]
-    idx = 1
-    for h in (1, 2, 3):
-        items = groups.get(h) or []
-        if not items:
-            continue
-        parts.append("")
-        parts.append(hilo_labels[h])
-        for art in items:
-            age_h = ""
-            if art.get("published"):
-                from datetime import datetime, timezone as tz
-                now = datetime.now(tz.utc)
-                delta = now - art["published"]
-                hours = int(delta.total_seconds() / 3600)
-                age_h = f"hace {hours}h" if hours > 0 else "reciente"
-            also = ""
-            if art.get("also_in"):
-                also = f" · también: {', '.join(art['also_in'][:2])}"
-            parts.append(
-                f"*{idx}.* {md_escape(art['title'][:120])}\n"
-                f"   _{md_escape(art['source_name'])} · {age_h}{also}_\n"
-                f"   {art['link']}"
-            )
-            idx += 1
-
-    if suggestion_line:
-        parts.append("")
-        parts.append(f"💡 *Mi sugerencia:* {suggestion_line}")
-
-    return "\n".join(parts)
-
-
-def _suggest_top3_with_gpt(articles: list) -> str:
-    """Usa GPT para pedir cuáles 3 notas son las más publicables hoy."""
-    if not OPENAI_API_KEY or not articles:
-        return ""
-
-    lines = []
-    for i, art in enumerate(articles, 1):
-        lines.append(
-            f"{i}. [{art['source_name']}, hilo {art.get('hilo', 2)}, dist "
-            f"{art.get('distancia', '?')}/10] {art['title']}"
-        )
-    block = "\n".join(lines)
-
-    prompt = (
-        "Sos el editor de MundoEmpresarial.ar (medio económico argentino para pymes, "
-        "alineado con ENAC: desarrollismo nacional, pyme, mercado interno, crítico del "
-        "ajuste neoliberal). Te paso el ranking de noticias de las últimas 24h que "
-        "procesó el curador.\n\n"
-        "Elegí las 3 más publicables hoy, IDEALMENTE una por hilo (1=info útil, 2=voz "
-        "de las pymes, 3=opinión política). Criterios: relevancia para el lector pyme, "
-        "novedad, afinidad editorial, impacto.\n\n"
-        "Ranking:\n"
-        f"{block}\n\n"
-        "Devolvé SOLO una línea en este formato, sin explicaciones ni saltos:\n"
-        "#N (hilo X — razón breve) · #M (hilo Y — razón breve) · #K (hilo Z — razón breve)"
-    )
-
-    try:
-        r = openai_post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-            },
-            timeout=40,
-        )
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.warning(f"GPT suggest: {e}")
-    return ""
-
-
-def _build_feedback_kb(article_idx: int, selected: bool = False) -> InlineKeyboardMarkup:
-    """Botones por artículo del curador."""
-    tog_label = "✅ Sugerida" if selected else "⬜ Sugerida"
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("👍", callback_data=f"cf_up_{article_idx}"),
-            InlineKeyboardButton("👎", callback_data=f"cf_down_{article_idx}"),
-            InlineKeyboardButton("🧵1", callback_data=f"cf_h1_{article_idx}"),
-            InlineKeyboardButton("🧵2", callback_data=f"cf_h2_{article_idx}"),
-            InlineKeyboardButton("🧵3", callback_data=f"cf_h3_{article_idx}"),
-            InlineKeyboardButton("📰", callback_data=f"cf_pub_{article_idx}"),
-        ],
-        [
-            InlineKeyboardButton(tog_label, callback_data=f"cf_tog_{article_idx}"),
-            InlineKeyboardButton("🔴 Publicar auto", callback_data=f"cf_auto_{article_idx}"),
-        ],
-    ])
-
-
-async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: str, context: ContextTypes.DEFAULT_TYPE):
-    """Envía el briefing con un mensaje por artículo para poder meter botones de feedback."""
-    from datetime import datetime
-    now = datetime.now()
-    today = now.strftime("%d/%m/%Y %H:%M")
-
-    # Contadores por hilo
-    from collections import Counter
-    by_hilo = Counter(art.get("hilo", 2) for art in articles)
-    counts_str = " · ".join(
-        f"{n} hilo {h}" for h, n in sorted(by_hilo.items()) if n > 0
-    )
-
-    # Parsear sugerencia antes de enviar artículos para poder marcarlos ya activados
-    import re as _re
-    _sug_indices = [int(x) - 1 for x in _re.findall(r'#(\d+)', suggestion)] if suggestion else []
-    _sug_indices = [i for i in _sug_indices if 0 <= i < len(articles)]
-    _sug_selected = set(_sug_indices)
-
-    # Guardar artículos en chat_data para que los callbacks puedan resolver el idx
-    if not hasattr(context, 'chat_data') or context.chat_data is None:
-        pass
-    context.chat_data["curador_articles"] = articles
-    context.chat_data["sug_indices"]  = _sug_indices
-    context.chat_data["sug_selected"] = _sug_selected
-
-    # Header
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"📰 *Curador — {today}*\n"
-            f"_{len(articles)} notas significativas · {counts_str}_\n\n"
-            "Feedback: 👍 relevante · 👎 irrelevante · 🧵N reclasificar · 📰 publicar"
-        ),
-        parse_mode="Markdown",
-    )
-
-    hilo_labels = {
-        1: "📋 *Informarse es respetarse*",
-        2: "🗣️ *Voz de las pymes*",
-        3: "💭 *Opinión / Análisis*",
-    }
-    grouped = {1: [], 2: [], 3: []}
-    for i, art in enumerate(articles):
-        grouped.setdefault(art.get("hilo", 2), []).append((i, art))
-
-    for h in (1, 2, 3):
-        items = grouped.get(h) or []
-        if not items:
-            continue
-        await bot.send_message(
-            chat_id=chat_id, text=hilo_labels[h], parse_mode="Markdown",
-        )
-        for idx, art in items:
-            age_h = ""
-            if art.get("published"):
-                from datetime import datetime, timezone as tz
-                now = datetime.now(tz.utc)
-                hours = int((now - art["published"]).total_seconds() / 3600)
-                age_h = f"hace {hours}h" if hours > 0 else "reciente"
-            also = ""
-            if art.get("also_in"):
-                also = f" · también: {', '.join(art['also_in'][:2])}"
-            text = (
-                f"*{idx+1}.* {md_escape(art['title'][:120])}\n"
-                f"_{md_escape(art['source_name'])} · {age_h}{also} · score {art['score']}_\n"
-                f"{art['link']}"
-            )
-            await bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="Markdown",
-                disable_web_page_preview=True,
-                reply_markup=_build_feedback_kb(idx, selected=(idx in _sug_selected)),
-            )
-
-    if suggestion:
-        sug_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📰 Publicar una a una", callback_data="sug_pub"),
-            InlineKeyboardButton("⚡ Auto todo",          callback_data="sug_auto"),
-        ]]) if _sug_indices else None
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"💡 *Mi sugerencia:* {suggestion}",
-            parse_mode="Markdown",
-            reply_markup=sug_kb,
-        )
-
-
-
-
-
-
-async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scanea las fuentes RSS de las últimas 24h y devuelve las más relevantes."""
-    msg = await update.message.reply_text("🔍 Scaneando fuentes...")
-    articles = await asyncio.to_thread(curar_noticias, 15)
-
-    if not articles:
-        await msg.edit_text(
-            "❌ No encontré noticias relevantes. Puede ser que los feeds RSS no "
-            "respondan o que no haya matches de pyme en las últimas 24h."
-        )
-        return
-
-    # Sugerencia con GPT (opcional)
-    suggestion = ""
-    if OPENAI_API_KEY:
-        await msg.edit_text(f"🔍 Scaneo OK ({len(articles)} notas). Generando sugerencia…")
-        suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
-
-    await msg.delete()
-    await _send_curador_briefing(
-        context.bot, update.message.chat_id, articles, suggestion, context,
-    )
 
 
 async def cmd_ingesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12425,290 +11729,8 @@ async def _auto_publish_url(bot, context, url: str, chat_id: int):
     return await _publish_processed(bot, context, data, chat_id)
 
 
-async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los callbacks cf_up / cf_down / cf_h1 / cf_h2 / cf_h3 / cf_pub / cf_auto / sug_pub / sug_auto."""
-    query = update.callback_query
-    await query.answer()
-
-    # ── Sugerencia: publicar una a una o auto todo ──
-    if query.data in ("sug_pub", "sug_auto"):
-        selected = context.chat_data.get("sug_selected") or set(context.chat_data.get("sug_indices", []))
-        articles = context.chat_data.get("curador_articles", [])
-        urls = [articles[i]["link"] for i in sorted(selected) if i < len(articles) and articles[i].get("link")]
-        if not urls:
-            await query.answer("❌ No encontré artículos en la sugerencia.", show_alert=True)
-            return
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        if query.data == "sug_pub":
-            # Procesar primera URL con preview pub_auto, cola con el resto
-            context.chat_data["sug_queue"] = urls[1:]
-            context.user_data["curador_auto"] = True
-            async def _sug_reply(text, **kw):
-                return await context.bot.send_message(chat_id=query.message.chat_id, text=text, **kw)
-            fake_msg = type("FM", (), {"text": urls[0], "chat_id": query.message.chat_id, "reply_text": _sug_reply})()
-            fake_upd = type("FU", (), {"message": fake_msg})()
-            asyncio.create_task(handle_link(fake_upd, context))
-
-        else:  # sug_auto — primero procesar, luego mostrar preview para revisión
-            status = await query.message.reply_text(f"⚡ Preparando revisión de {len(urls)} notas…")
-            processed = []
-            for i, url in enumerate(urls):
-                await status.edit_text(f"⚡ Procesando {i+1}/{len(urls)}…")
-                d = await _process_url_for_review(url)
-                processed.append({"url": url, "data": d})
-            context.chat_data["auto_todo_processed"] = processed
-            try:
-                await status.delete()
-            except Exception:
-                pass
-
-            from datetime import datetime, timezone, timedelta
-            _tz_arg = timezone(timedelta(hours=-3))
-            _now = datetime.now(_tz_arg)
-            dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-            fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
-
-            ok_count = 0
-            for i, item in enumerate(processed):
-                if item["data"]:
-                    d = item["data"]
-                    s_title  = get_title(d)
-                    s_slug   = url_slug(d["title"])
-                    cat_ids  = detect_categories(d["title"], d["text"], d["excerpt"])
-                    cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
-                    tags_str = " · ".join(extract_tags(d["title"])[:4])
-                    hts      = _build_hashtags(d)
-                    preview = (
-                        f"*#{i+1} — {md_escape(s_title)}*\n"
-                        f"🔗 `/{s_slug}`\n"
-                        f"🗂 {cats_str}\n"
-                        f"🏷 {tags_str}\n"
-                        f"🐦 `{md_escape(hts)}`\n"
-                        f"🕐 {fecha_str}"
-                    )
-                    kb_edit = InlineKeyboardMarkup([[
-                        InlineKeyboardButton(f"✏️ Editar #{i+1}", callback_data=f"auto_edit_{i}"),
-                    ]])
-                    await query.message.reply_text(preview, parse_mode="Markdown", reply_markup=kb_edit)
-                    ok_count += 1
-                else:
-                    await query.message.reply_text(
-                        f"❌ *#{i+1}* No se pudo procesar:\n`{md_escape(item['url'][:80])}`",
-                        parse_mode="Markdown",
-                    )
-
-            if ok_count:
-                kb_confirm = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"⚡ Publicar auto todo ({ok_count})", callback_data="sug_auto_confirm"),
-                    InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
-                ]])
-                await query.message.reply_text(
-                    f"Revisá las {ok_count} notas. ¿Publicar todo?",
-                    reply_markup=kb_confirm,
-                )
-        return
-
-    # ── Confirmar publicación de auto todo (luego de revisar) ──
-    if query.data == "sug_auto_confirm":
-        processed = context.chat_data.get("auto_todo_processed", [])
-        to_pub = [(i, p) for i, p in enumerate(processed) if p.get("data") and not p.get("done")]
-        if not to_pub:
-            await query.answer("❌ No hay notas para publicar.", show_alert=True)
-            return
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        status = await query.message.reply_text(f"⚡ Publicando {len(to_pub)} notas…")
-        results = []
-        for n, (i, item) in enumerate(to_pub):
-            await status.edit_text(f"⚡ Publicando… {n+1}/{len(to_pub)}")
-            title, result = await _publish_processed(context.bot, context, item["data"], query.message.chat_id)
-            if title:
-                results.append(f"✅ {md_escape(title[:80])}\n🔗 {md_escape(result)}")
-                processed[i]["done"] = True
-            else:
-                results.append(f"❌ #{i+1}: {md_escape(str(result)[:100])}")
-        context.chat_data["auto_todo_processed"] = processed
-        await status.edit_text(
-            "⚡ *Publicación completa*\n\n" + "\n\n".join(results),
-            parse_mode="Markdown",
-        )
-        return
-
-    # ── Editar un artículo individual del auto todo ──
-    if query.data.startswith("auto_edit_"):
-        edit_idx = int(query.data[10:])
-        processed = context.chat_data.get("auto_todo_processed", [])
-        if edit_idx >= len(processed) or not processed[edit_idx].get("data"):
-            await query.answer("⚠️ Artículo no disponible.", show_alert=True)
-            return
-        d = processed[edit_idx]["data"]
-        context.user_data["article"] = d
-        context.user_data["auto_todo_edit_idx"] = edit_idx
-        await query.message.reply_text(
-            build_preview(d),
-            parse_mode="Markdown",
-            reply_markup=_preview_kb_from_ctx(context),
-        )
-        return
-
-    parts = query.data.split("_", 2)
-    if len(parts) != 3:
-        return
-    _, action, idx_str = parts
-    try:
-        idx = int(idx_str)
-    except ValueError:
-        return
-
-    articles = context.chat_data.get("curador_articles", [])
-    if idx >= len(articles):
-        await query.answer("⚠️ Artículo ya no está en el briefing.", show_alert=True)
-        return
-    article = articles[idx]
-
-    if action == "up":
-        await asyncio.to_thread(feedback_record, "up", article)
-        await query.answer("👍 Registrado: este estilo de nota sube en el ranking.", show_alert=False)
-        # Actualizar texto para indicar feedback recibido
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    elif action == "down":
-        await asyncio.to_thread(feedback_record, "down", article)
-        await query.answer("👎 Registrado: este estilo baja en el ranking.", show_alert=False)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    elif action in ("h1", "h2", "h3"):
-        new_hilo = int(action[1])
-        await asyncio.to_thread(feedback_record, "hilo", article, new_hilo)
-        hilo_name = {1: "Info útil", 2: "Voz pymes", 3: "Opinión"}[new_hilo]
-        await query.answer(
-            f"🧵 Reclasificada al hilo {new_hilo} ({hilo_name}).",
-            show_alert=False,
-        )
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    elif action == "tog":
-        sug_selected = context.chat_data.setdefault("sug_selected", set())
-        if idx in sug_selected:
-            sug_selected.discard(idx)
-            now_on = False
-        else:
-            sug_selected.add(idx)
-            now_on = True
-        context.chat_data["sug_selected"] = sug_selected
-        await query.edit_message_reply_markup(reply_markup=_build_feedback_kb(idx, selected=now_on))
-        await query.answer("✅ Marcada" if now_on else "⬜ Desmarcada", show_alert=False)
-        return
-
-    elif action == "pub":
-        # Disparar el flujo normal de publicación con el URL del artículo
-        await asyncio.to_thread(feedback_record, "publish", article)
-        link = article.get("link", "")
-        if not link:
-            await query.answer("❌ No tengo el URL del artículo.", show_alert=True)
-            return
-        await query.answer("📰 Disparando flujo de publicación…", show_alert=False)
-
-        # Sacar los botones del mensaje del curador: ya se eligió esta nota
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        # Simular que el usuario pegó el link — ejecutar handle_link
-        _fake_chat = type("FakeChat", (), {"type": "private", "id": query.message.chat_id})()
-        fake_message = type("FakeMsg", (), {
-            "text": link,
-            "chat_id": query.message.chat_id,
-            "chat": _fake_chat,
-            "reply_text": query.message.reply_text,
-        })()
-        fake_update = type("FakeUpdate", (), {
-            "message": fake_message,
-        })()
-        # Usar el contexto actual para disparar handle_link
-        try:
-            await handle_link(fake_update, context)
-        except Exception as e:
-            logger.error(f"Publish shortcut: {e}")
-            await query.message.reply_text(f"❌ Error disparando publicación: {e}")
-
-    elif action == "auto":
-        # Igual que "pub" pero va directo al preview de Publicar auto
-        await asyncio.to_thread(feedback_record, "publish", article)
-        link = article.get("link", "")
-        if not link:
-            await query.answer("❌ No tengo el URL del artículo.", show_alert=True)
-            return
-        await query.answer("⚡ Preparando publicación auto…", show_alert=False)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        context.user_data["curador_auto"] = True
-        _fake_chat2 = type("FakeChat", (), {"type": "private", "id": query.message.chat_id})()
-        fake_message = type("FakeMsg", (), {
-            "text": link,
-            "chat_id": query.message.chat_id,
-            "chat": _fake_chat2,
-            "reply_text": query.message.reply_text,
-        })()
-        fake_update = type("FakeUpdate", (), {
-            "message": fake_message,
-        })()
-        try:
-            await handle_link(fake_update, context)
-        except Exception as e:
-            logger.error(f"Curador auto: {e}")
-            context.user_data.pop("curador_auto", None)
-            await query.message.reply_text(f"❌ Error: {e}")
 
 
-async def send_daily_curador(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Envía el briefing del curador. Se dispara en los 3 slots: 7:30, 11:30, 17:30 ARG.
-    Cada slot hace lookback de 8 horas (no 24) para que no se repitan notas
-    entre slots del mismo día.
-    """
-    chat_id = ADMIN_CHAT_ID
-    if not chat_id:
-        logger.warning("No hay ADMIN_CHAT_ID para enviar curador")
-        return
-    try:
-        # Lookback 8h para no pisar el slot anterior
-        articles = await asyncio.to_thread(curar_noticias, 15, 8)
-        if not articles:
-            logger.info(f"Curador slot: 0 artículos significativos, no envío (sin padding)")
-            return
-
-        suggestion = ""
-        if OPENAI_API_KEY:
-            suggestion = await asyncio.to_thread(_suggest_top3_with_gpt, articles)
-
-        chat_data = context.application.chat_data[int(chat_id)]
-        chat_data["curador_articles"] = articles
-
-        fake_ctx = type("SchedCtx", (), {
-            "chat_data": chat_data,
-            "bot":       context.bot,
-        })()
-
-        await _send_curador_briefing(context.bot, int(chat_id), articles, suggestion, fake_ctx)
-        logger.info(f"Curador slot enviado: {len(articles)} artículos")
-    except Exception as e:
-        logger.error(f"Error enviando curador: {type(e).__name__}: {e}")
 
 
 # ── Reporte diario programado ────────────────────────────────────────────────
@@ -12842,17 +11864,6 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     best_slots = _ga4_best_slots(hourly)
     slots_str = " / ".join(f"{h:02d}:00" for h in best_slots)
 
-    # Actualizar slots del curador si tenemos 3
-    if len(best_slots) == 3:
-        new_slots = [f"{h:02d}:30" for h in best_slots]
-        _reschedule_curador_jobs(context.job_queue, new_slots)
-        curador_cfg = _load_curador_config()
-        curador_cfg["slots"] = new_slots
-        _save_curador_config(curador_cfg)
-        slots_updated = True
-    else:
-        slots_updated = False
-
     # Fuentes top
     sources_text = "\n".join(
         f"  • {s['source']}/{s['medium']}: {s['sessions']} sesiones"
@@ -12896,7 +11907,7 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
 
     # Armar mensaje
     progress_bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-    slots_notice = f"\n⏰ _Slots del curador actualizados a {slots_str}_" if slots_updated else ""
+    slots_notice = ""
 
     msg = (
         f"📊 *Reporte semanal GA4 — MundoEmpresarial.ar*\n\n"
@@ -13452,133 +12463,14 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
 
 
-def _reschedule_curador_jobs(job_queue, slots: list[dict]):
-    """Cancela los jobs del curador y los vuelve a crear con los slots dados."""
-    from datetime import timezone, timedelta
-    tz_arg = timezone(timedelta(hours=-3))
-    for job in job_queue.jobs():
-        if job.name and job.name.startswith("curador_"):
-            job.schedule_removal()
-    for slot in slots:
-        hh, mm = slot["hh"], slot["mm"]
-        job_queue.run_daily(
-            send_daily_curador,
-            time=dtime(hour=hh, minute=mm, tzinfo=tz_arg),
-            name=f"curador_{hh:02d}_{mm:02d}",
-        )
-    slots_str = ", ".join(f"{s['hh']:02d}:{s['mm']:02d}" for s in slots)
-    logger.info(f"Curador rescheduled: [{slots_str}] ARG")
 
 
-def _horarios_text(slots: list[dict]) -> str:
-    slots_sorted = sorted(slots, key=lambda s: (s["hh"], s["mm"]))
-    if not slots_sorted:
-        return "⏰ *Horarios del curador*\n\n_Sin horarios activos. El curador solo responde a /curador manual._"
-    lines = ["⏰ *Horarios del curador automático*\n"]
-    for i, s in enumerate(slots_sorted, 1):
-        lines.append(f"  {i}. `{s['hh']:02d}:{s['mm']:02d}` ARG")
-    n = len(slots_sorted)
-    lines.append(f"\n_{n} envio(s) diario(s). Toca ❌ para quitar o ➕ para agregar._")
-    return "\n".join(lines)
 
 
-def _horarios_keyboard(slots: list[dict]) -> InlineKeyboardMarkup:
-    slots_sorted = sorted(slots, key=lambda s: (s["hh"], s["mm"]))
-    buttons = []
-    for s in slots_sorted:
-        buttons.append([InlineKeyboardButton(
-            f"❌ {s['hh']:02d}:{s['mm']:02d} ARG",
-            callback_data=f"ch_del_{s['hh']:02d}_{s['mm']:02d}",
-        )])
-    if len(slots) < 6:
-        buttons.append([InlineKeyboardButton("➕ Agregar horario", callback_data="ch_add")])
-    return InlineKeyboardMarkup(buttons)
 
 
-async def cmd_horarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra y permite configurar los horarios del curador automático."""
-    config = await asyncio.to_thread(_load_curador_config)
-    slots = config.get("slots", [])
-    await update.message.reply_text(
-        _horarios_text(slots),
-        parse_mode="Markdown",
-        reply_markup=_horarios_keyboard(slots),
-    )
 
 
-async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    config = await asyncio.to_thread(_load_curador_config)
-    slots = config.get("slots", [])
-
-    if data == "ch_add":
-        rows = []
-        row = []
-        for hh in range(6, 22):
-            row.append(InlineKeyboardButton(f"{hh:02d}h", callback_data=f"ch_hour_{hh:02d}"))
-            if len(row) == 4:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        rows.append([InlineKeyboardButton("↩ Volver", callback_data="ch_show")])
-        await query.edit_message_text(
-            "⏰ *Elegí la hora* (ARG):",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-
-    elif data.startswith("ch_hour_"):
-        hh = int(data.split("_")[2])
-        buttons = [
-            [
-                InlineKeyboardButton(f"{hh:02d}:00", callback_data=f"ch_min_{hh:02d}_00"),
-                InlineKeyboardButton(f"{hh:02d}:30", callback_data=f"ch_min_{hh:02d}_30"),
-            ],
-            [InlineKeyboardButton("↩ Volver", callback_data="ch_add")],
-        ]
-        await query.edit_message_text(
-            f"⏰ *{hh:02d}h — elegí el minuto:*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
-    elif data.startswith("ch_min_"):
-        parts = data.split("_")
-        hh, mm = int(parts[2]), int(parts[3])
-        if not any(s["hh"] == hh and s["mm"] == mm for s in slots):
-            slots.append({"hh": hh, "mm": mm})
-            config["slots"] = slots
-            await asyncio.to_thread(_save_curador_config, config)
-            _reschedule_curador_jobs(context.application.job_queue, slots)
-        await query.edit_message_text(
-            _horarios_text(slots),
-            parse_mode="Markdown",
-            reply_markup=_horarios_keyboard(slots),
-        )
-
-    elif data.startswith("ch_del_"):
-        parts = data.split("_")
-        hh, mm = int(parts[2]), int(parts[3])
-        slots = [s for s in slots if not (s["hh"] == hh and s["mm"] == mm)]
-        config["slots"] = slots
-        await asyncio.to_thread(_save_curador_config, config)
-        _reschedule_curador_jobs(context.application.job_queue, slots)
-        await query.edit_message_text(
-            _horarios_text(slots),
-            parse_mode="Markdown",
-            reply_markup=_horarios_keyboard(slots),
-        )
-
-    elif data == "ch_show":
-        await query.edit_message_text(
-            _horarios_text(slots),
-            parse_mode="Markdown",
-            reply_markup=_horarios_keyboard(slots),
-        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -14669,7 +13561,6 @@ async def _post_init(application: Application) -> None:
         BotCommand("borrar",            "Eliminar una nota publicada"),
         # ── Información ───────────────────────────────────────────────────────
         BotCommand("stats",             "Estadísticas del día (publicadas, errores)"),
-        BotCommand("feedback_ver",      "Ver pesos aprendidos por el EDITOR"),
         # ── Configuración ─────────────────────────────────────────────────────
         BotCommand("fuentes",           "Gestionar fuentes RSS del EDITOR"),
     ])
@@ -14690,14 +13581,11 @@ def main():
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
-    app.add_handler(CommandHandler("curador", cmd_curador))
     app.add_handler(CommandHandler("ingesta", cmd_ingesta))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("programadas", cmd_programadas))
     app.add_handler(CommandHandler("coladepublicacion", cmd_coladepublicacion))
     app.add_handler(CommandHandler("inst", cmd_inst))
-    app.add_handler(CommandHandler("horarios", cmd_horarios))
-    app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
     app.add_handler(CommandHandler("reglas", cmd_reglas))
     app.add_handler(CommandHandler("publinotas", cmd_publinotas))
     app.add_handler(CommandHandler("kwtemp", cmd_kwtemp))
@@ -14719,8 +13607,6 @@ def main():
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
-    app.add_handler(CallbackQueryHandler(handle_curador_feedback, pattern="^(cf_|sug_|auto_)"))
-    app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(handle_button))
@@ -14730,10 +13616,6 @@ def main():
     tz_arg = timezone(timedelta(hours=-3))
     job_queue = app.job_queue
 
-    # Curador: cargar horarios desde config persistida (o defaults si no existe)
-    curador_cfg = _load_curador_config()
-    curador_slots = curador_cfg.get("slots", _DEFAULT_CURADOR_SLOTS)
-    _reschedule_curador_jobs(job_queue, curador_slots)
 
 
     # Aprendizaje de hashtags a las 23:15 ARG
