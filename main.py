@@ -8,7 +8,6 @@ import base64
 import unicodedata
 import uuid
 from datetime import datetime, time as dtime
-import cotizaciones
 import requests
 from requests_oauthlib import OAuth1
 from bs4 import BeautifulSoup
@@ -269,61 +268,6 @@ def detect_categories(title: str, text: str, excerpt: str) -> list:
     return ranked[:3]
 
 
-# ── Estadísticas diarias ─────────────────────────────────────────────────────
-
-_daily_stats = {
-    "published": 0,
-    "cancelled": 0,
-    "errors": 0,
-    "sites": {},       # dominio → cantidad
-    "titles": [],      # títulos publicados
-    "date": datetime.now().strftime("%Y-%m-%d"),
-}
-
-
-def _reset_stats_if_new_day():
-    today = datetime.now().strftime("%Y-%m-%d")
-    if _daily_stats["date"] != today:
-        _daily_stats["published"] = 0
-        _daily_stats["cancelled"] = 0
-        _daily_stats["errors"] = 0
-        _daily_stats["sites"] = {}
-        _daily_stats["titles"] = []
-        _daily_stats["date"] = today
-
-
-def stat_publish(title: str, source_url: str):
-    _reset_stats_if_new_day()
-    _daily_stats["published"] += 1
-    _daily_stats["titles"].append(title[:60])
-    from urllib.parse import urlparse
-    domain = urlparse(source_url).netloc.replace("www.", "")
-    _daily_stats["sites"][domain] = _daily_stats["sites"].get(domain, 0) + 1
-
-
-def stat_cancel():
-    _reset_stats_if_new_day()
-    _daily_stats["cancelled"] += 1
-
-
-def stat_error():
-    _reset_stats_if_new_day()
-    _daily_stats["errors"] += 1
-
-
-def build_daily_report() -> str:
-    _reset_stats_if_new_day()
-    s = _daily_stats
-    sites_str = "\n".join(f"  • {d}: {c}" for d, c in sorted(s["sites"].items(), key=lambda x: -x[1])) or "  (ninguno)"
-    titles_str = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(s["titles"])) or "  (ninguna)"
-    return (
-        f"📊 *Reporte diario — {s['date']}*\n\n"
-        f"✅ Publicadas: *{s['published']}*\n"
-        f"❌ Canceladas: *{s['cancelled']}*\n"
-        f"⚠️ Errores scraping: *{s['errors']}*\n\n"
-        f"*Fuentes:*\n{sites_str}\n\n"
-        f"*Notas publicadas:*\n{titles_str}"
-    )
 
 
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
@@ -486,6 +430,19 @@ def detect_content_type(title: str) -> tuple:
     return ('standard', 0)
 
 
+def _is_valid_h2(content: str) -> bool:
+    """Verifica que un H2 heading sea válido para el ToC (filtra URLs, corchetes, vacíos)."""
+    if not content or len(content) < 3:
+        return False
+    if 'http' in content.lower():
+        return False
+    if '[' in content or ']' in content:
+        return False
+    if len(content) > 100:
+        return False
+    return True
+
+
 def _gpt_format_article(title: str, text: str, source_url: str,
                         kw: str = "", redactor_instr: str = "",
                         content_type: str = "standard", expected_count: int = 0) -> dict | None:
@@ -641,7 +598,7 @@ TEXTO A FORMATEAR:
         for m in re.finditer(r'<h2[^>]*\s+id="([^"]+)"[^>]*>(.*?)</h2>', html, re.DOTALL | re.IGNORECASE):
             anchor = m.group(1).strip()
             label  = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            if anchor and label:
+            if anchor and label and _is_valid_h2(label):
                 h2_headings.append({"content": label, "anchor": anchor})
 
         logger.info(f"_gpt_format_article OK: {len(html)} chars, {len(h2_headings)} H2s, {len(bullets_list)} bullets")
@@ -1160,19 +1117,23 @@ def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dic
                 f'<nav><ul>{items}</ul></nav></div>'
             )
 
-    # 6. JS compacto con toggle, GA4 y scroll-to-anchor
+    # 6. JS compacto con toggle, GA4 (expand + collapse) y scroll-to-anchor
     js = (
         f'function expandirNota{post_id}(){{'
         f'var el=document.getElementById("nota-ampliada-{post_id}");'
+        f'var btn=document.getElementById("btn-expandir-{post_id}");'
         f'if(el.style.display==="none"){{'
         f'el.style.display="block";'
-        f'if(typeof gtag!=="undefined")gtag("event","expand_nota",{{"event_category":"nota_completa","event_label":"{slug}"}});'
+        f'if(btn)btn.innerHTML="&#128214; Cerrar nota";'
+        f'if(typeof gtag!=="undefined")gtag("event","expand_nota",{{"event_category":"nota_completa","event_label":"{slug}","value":1}});'
         f'}}}}\n'
         f'function toggleNota{post_id}(){{'
         f'var el=document.getElementById("nota-ampliada-{post_id}");'
-        f'var a=el.style.display==="none";'
-        f'el.style.display=a?"block":"none";'
-        f'if(a&&typeof gtag!=="undefined")gtag("event","expand_nota",{{"event_category":"nota_completa","event_label":"{slug}"}});'
+        f'var btn=document.getElementById("btn-expandir-{post_id}");'
+        f'var abre=el.style.display==="none";'
+        f'el.style.display=abre?"block":"none";'
+        f'if(btn)btn.innerHTML=abre?"&#128214; Cerrar nota":"&#128214; Leer nota completa";'
+        f'if(typeof gtag!=="undefined")gtag("event",abre?"expand_nota":"collapse_nota",{{"event_category":"nota_completa","event_label":"{slug}","value":abre?1:0}});'
         f'}}\n'
         f'function irA{post_id}(id){{'
         f'expandirNota{post_id}();'
@@ -1184,11 +1145,9 @@ def _wrap_nota_desplegable(post_id: int, slug: str, content_html: str, data: dic
         f'<p><strong>Lo que tenés que saber:</strong></p>\n'
         f'{bullets_html}\n\n'
         + (f'{toc_html}\n\n' if toc_html else '')
-        + f'<style>#btn-expandir-{post_id} a{{pointer-events:none!important;color:#fff!important;text-decoration:none!important;}}</style>\n'
-        f'<div id="btn-expandir-{post_id}" onclick="toggleNota{post_id}()" '
-        f'style="background:#1a73e8;color:#fff;padding:14px 20px;cursor:pointer;font-weight:700;'
-        f'font-size:1em;text-align:center;border-radius:6px;margin:8px 0;user-select:none;">'
-        f'&#128269; Clickear acá para obtener el análisis completo</div>\n\n'
+        + f'<style>#btn-expandir-{post_id}{{background:#1a73e8;color:#fff;padding:14px 20px;cursor:pointer;font-weight:700;font-size:1em;text-align:center;border-radius:6px;margin:8px 0;user-select:none;}}</style>\n'
+        f'<div id="btn-expandir-{post_id}" onclick="toggleNota{post_id}()">'
+        f'&#128214; Leer nota completa</div>\n\n'
         f'<div id="nota-ampliada-{post_id}" style="display:none;margin-top:8px;">\n'
         f'{body}\n'
         f'</div>\n\n'
@@ -1294,6 +1253,8 @@ def format_content(data: dict, kw: str = "") -> str:
 
     def _append_h2(label):
         nonlocal h2_index
+        if not _is_valid_h2(label):
+            return
         anchor = _slugify_h2(label)
         h2_headings.append({'content': label, 'anchor': anchor})
         parts.append(
@@ -1550,6 +1511,43 @@ def _meta_safe(text: str, max_len: int = 160) -> str:
     return re.sub(r'[\U00010000-\U0010FFFF]', '', text or '')[:max_len].strip()
 
 
+def _enqueue_to_harness(data: dict, image_id: int | None = None,
+                        destacado: bool = False, scheduled_dt=None) -> int:
+    """Inserta job en harness.db stage='publicacion'. El publicador lo procesa automáticamente."""
+    import sqlite3 as _sq_h, json as _json_h
+    from datetime import datetime as _dt_h
+    _HARNESS_DB = "/opt/me-harness/harness.db"
+    source = data.get("source_url") or data.get("source", "")
+    content_json = {
+        "title":             data.get("title", ""),
+        "excerpt":           data.get("excerpt", "") or (data.get("text", "") or "")[:280],
+        "content_html":      data.get("html") or data.get("content_html", ""),
+        "bullets":           data.get("bullets", []),
+        "h2_headings":       data.get("h2_headings", []),
+        "image_url":         data.get("image_url"),
+        "image_id_override": image_id,
+        "category_ids":      data.get("category_ids") or detect_categories(
+                                 data.get("title", ""), data.get("text", ""),
+                                 data.get("excerpt", "")),
+        "matched_kw":        data.get("matched_kw", []),
+        "formato":           "continua",
+        "portada":           destacado,
+        "source":            source,
+        "source_url":        source,
+    }
+    instructions = f"programar:{scheduled_dt.isoformat()}" if scheduled_dt else None
+    source_key = source or f"bot_manual_{data.get('title','')[:50]}"
+    with _sq_h.connect(_HARNESS_DB) as conn:
+        cur = conn.execute(
+            "INSERT INTO jobs (stage, source_url, title, content_json, score, hilo, instructions, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("publicacion", source_key, data.get("title", ""),
+             _json_h.dumps(content_json, ensure_ascii=False),
+             0.0, 0, instructions, _dt_h.utcnow().isoformat())
+        )
+        return cur.lastrowid
+
+
 def publish_post(data: dict, image_id: int | None, destacado: bool = False,
                  scheduled_date=None) -> str | None:
     """
@@ -1721,10 +1719,32 @@ def build_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str:
     return tweet
 
 
+_TWITTER_MIME_MAP = {
+    b"\xff\xd8\xff": "image/jpeg",
+    b"\x89PNG":      "image/png",
+    b"GIF87":        "image/gif",
+    b"GIF89":        "image/gif",
+    b"RIFF":         "image/webp",   # magic bytes[0:4]; verificamos [8:12] == WEBP abajo
+}
+
+def _twitter_mime(img_bytes: bytes) -> str | None:
+    """
+    Detecta MIME por magic bytes.
+    Retorna el tipo soportado por Twitter, o None si no está soportado.
+    """
+    for magic, mime in _TWITTER_MIME_MAP.items():
+        if img_bytes[:len(magic)] == magic:
+            # WebP tiene 'WEBP' en offset 8
+            if mime == "image/webp" and img_bytes[8:12] != b"WEBP":
+                return None
+            return mime
+    return None  # AVIF, SVG, TIFF, etc.
+
+
 def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
     """
     Sube una imagen a Twitter via API v1.1 media/upload y devuelve el media_id.
-    Necesario para que los tweets muestren preview de imagen.
+    Solo formatos soportados: JPEG, PNG, GIF, WebP.
     """
     try:
         # Descargar imagen
@@ -1732,21 +1752,28 @@ def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
         img_resp.raise_for_status()
         img_bytes = img_resp.content
 
-        # Twitter acepta hasta 5MB por imagen. Si es más grande, intentar bajarla.
+        # Verificar tamaño
         if len(img_bytes) > 5 * 1024 * 1024:
             logger.warning(f"Imagen muy grande para Twitter ({len(img_bytes)} bytes), salteando")
+            return None
+
+        # Verificar formato soportado por Twitter (descarta AVIF, SVG, etc.)
+        mime = _twitter_mime(img_bytes)
+        if not mime:
+            ct = img_resp.headers.get("Content-Type", "desconocido")
+            logger.warning(f"Formato de imagen no soportado por Twitter: {ct} — salteando")
             return None
 
         # Subir a Twitter v1.1 media/upload
         r = requests.post(
             "https://upload.twitter.com/1.1/media/upload.json",
-            files={"media": img_bytes},
+            files={"media": ("image", img_bytes, mime)},
             auth=auth,
             timeout=30,
         )
         if r.status_code == 200:
             media_id = r.json().get("media_id_string")
-            logger.info(f"Twitter media uploaded: {media_id}")
+            logger.info(f"Twitter media uploaded: {media_id} ({mime})")
             return media_id
         logger.error(f"Twitter media upload {r.status_code}: {r.text[:300]}")
     except Exception as e:
@@ -2141,119 +2168,6 @@ def generate_thread_with_gpt(title: str, body_text: str, wp_url: str, hashtags: 
     tweets = [_fit_tweet(t, 280) for t in tweets]
     return tweets
 
-
-# ── Agente /c — planificador editorial ──────────────────────────────────────
-
-_CMD_C_SYSTEM = """Sos el asistente editorial del bot de MundoEmpresarial.ar.
-El operador te manda una URL + instrucciones en texto libre.
-Tu tarea: interpretar el pedido y armar un plan de acción.
-
-MODO:
-- Si la URL pertenece a mundoempresarial.ar → la nota YA EXISTE en el sitio. Usá MODO: actualizar.
-  En este modo solo se aplican los cambios pedidos (imagen, título, categorías). NO se republica a redes.
-- Si la URL es externa (otra fuente) → es una nota nueva. Usá MODO: crear.
-
-Categorías disponibles (ID: nombre):
-95:Impuestos/AFIP | 88:Agro | 1048:Seguros | 89:Comercio | 99:Legislativo
-239:Digitalización Pymes | 94:Economía | 96:Empresas | 100:Gobierno | 90:Industria
-103:Informes y estadísticas | 97:Internacional | 98:Nacional | 91:Opinión
-87:Política | 102:Provincias | 92:Servicios | 93:Sindical | 1139:Mundo del vino
-
-Respondé en este formato exacto (sin texto extra fuera de los bloques):
----PLAN---
-URL: <url extraída del mensaje>
-MODO: <crear | actualizar>
-TITULO: <título propuesto o AUTOMATICO>
-CATEGORIAS: <IDs separados por coma, ej: 1139,98 — o AUTOMATICO>
-CANALES: <lista de: wordpress,telegram,twitter,linkedin — los que correspondan; para MODO actualizar normalmente ninguno>
-INSTRUCCION: <instrucción concreta para el redactor, o NINGUNA>
----RESUMEN---
-<2-4 líneas en español explicando qué vas a hacer y por qué, para que el operador confirme o ajuste>"""
-
-
-def _cmd_c_plan_sync(user_input: str, history: list | None = None) -> dict:
-    """Llama a GPT-4o-mini para interpretar el pedido y devolver un plan estructurado."""
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY no configurada")
-
-    messages = [{"role": "system", "content": _CMD_C_SYSTEM}]
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_input})
-
-    r = openai_post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        json={"model": "gpt-4o-mini", "temperature": 0, "messages": messages},
-    )
-    text = r.json()["choices"][0]["message"]["content"]
-
-    plan_raw, resumen = {}, ""
-    plan_m   = re.search(r'---PLAN---\n(.*?)---RESUMEN---', text, re.DOTALL)
-    resumen_m = re.search(r'---RESUMEN---\n(.*?)$', text, re.DOTALL)
-    if plan_m:
-        for line in plan_m.group(1).strip().splitlines():
-            if ":" in line:
-                k, v = line.split(":", 1)
-                plan_raw[k.strip()] = v.strip()
-    if resumen_m:
-        resumen = resumen_m.group(1).strip()
-
-    modo = plan_raw.get("MODO", "crear").strip().lower()
-
-    titulo = plan_raw.get("TITULO", "AUTOMATICO")
-    override_title = None if titulo.upper() == "AUTOMATICO" else titulo
-
-    cats_raw = plan_raw.get("CATEGORIAS", "AUTOMATICO")
-    if cats_raw.upper() == "AUTOMATICO":
-        override_categories = None
-    else:
-        override_categories = [int(x.strip()) for x in cats_raw.split(",") if x.strip().isdigit()] or None
-
-    canales_raw = plan_raw.get("CANALES", "wordpress,telegram,twitter")
-    channels = [c.strip() for c in canales_raw.split(",") if c.strip()]
-
-    instruccion = plan_raw.get("INSTRUCCION", "NINGUNA")
-    redactor_instructions = None if instruccion.upper() == "NINGUNA" else instruccion
-
-    url_raw = plan_raw.get("URL", "").strip()
-    url_clean = url_raw if url_raw.lower().startswith("http") else ""
-
-    return {
-        "url":                  url_clean,
-        "modo":                 modo,
-        "override_title":       override_title,
-        "override_categories":  override_categories,
-        "channels":             channels,
-        "redactor_instructions": redactor_instructions,
-        "resumen":              resumen,
-        "gpt_reply":            text,
-        "history":              messages + [{"role": "assistant", "content": text}],
-        "raw_input":            user_input,
-    }
-
-
-def _cmd_c_plan_text(plan: dict) -> str:
-    """Formatea el plan para mostrar al operador."""
-    cats_str = ("Automático" if not plan["override_categories"]
-                else " · ".join(CAT_NAMES.get(c, str(c)) for c in plan["override_categories"]))
-    titulo_str = plan["override_title"] or "Automático"
-    ch_str = " + ".join(plan["channels"]) if plan["channels"] else "—"
-    instruccion_str = plan["redactor_instructions"] or "—"
-    modo = plan.get("modo", "crear")
-    modo_emoji = "✏️ Actualizar post existente" if modo == "actualizar" else "🆕 Crear nota nueva"
-    resumen = plan["resumen"]
-    url_display = f"`{md_escape(plan['url'])}`" if plan.get("url") else "_\\(texto directo, sin URL\\)_"
-    return (
-        f"*Plan de publicación*\n\n"
-        f"⚙️ Modo: {md_escape(modo_emoji)}\n"
-        f"🔗 Fuente: {url_display}\n"
-        f"📝 Título: {md_escape(titulo_str)}\n"
-        f"📂 Categorías: {md_escape(cats_str)}\n"
-        f"📣 Canales: {md_escape(ch_str)}\n"
-        f"✏️ Instrucción: {md_escape(instruccion_str)}\n\n"
-        f"_{md_escape(resumen)}_"
-    )
 
 
 def post_twitter_thread(tweets: list[str], image_url: str = "") -> list[str]:
@@ -4016,8 +3930,8 @@ async def cmd_comandos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra las estadísticas del día."""
-    await update.message.reply_text(build_daily_report(), parse_mode="Markdown")
+    """Estadísticas del día — migrado al harness."""
+    await update.message.reply_text("📊 Las estadísticas del pipeline están en el harness (/coladepublicacion).")
 
 
 async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4545,6 +4459,172 @@ async def cmd_feedback_ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"_Última actualización:_ {fb.get('updated_at', '-')}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_reglas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra el registro de reglas editoriales activas, desactivadas y patrones ignorados."""
+    import sys as _sys_r
+    _sys_r.path.insert(0, "/opt/me-harness")
+    try:
+        import broker as _br_r
+        reg = _br_r.get_rules_registry()
+    except Exception as _e_r:
+        await update.message.reply_text(f"Error cargando registro: {_e_r}")
+        return
+
+    active   = reg.get("active", [])
+    inactive = reg.get("inactive", [])
+    ignored  = reg.get("ignored", [])
+
+    parts = []
+
+    if active:
+        parts.append(f"<b>✅ Reglas activas ({len(active)})</b>")
+        for r in active:
+            cat = r.get("category", "")
+            rule = (r.get("rule") or "")[:120]
+            parts.append(f"  <b>#{r['id']}</b> <code>[{cat}]</code> {rule}")
+    else:
+        parts.append("<b>✅ Reglas activas</b>\n  <i>Ninguna</i>")
+
+    if inactive:
+        parts.append(f"\n<b>⏸ Reglas desactivadas ({len(inactive)})</b>")
+        for r in inactive:
+            cat  = r.get("category", "")
+            rule = (r.get("rule") or "")[:80]
+            parts.append(f"  <b>#{r['id']}</b> <code>[{cat}]</code> {rule}")
+
+    if ignored:
+        parts.append(f"\n<b>❌ Patrones ignorados para siempre ({len(ignored)})</b>")
+        for ig in ignored:
+            parts.append(f"  • <code>{ig['keyword']}</code>")
+    else:
+        parts.append("\n<b>❌ Patrones ignorados</b>\n  <i>Ninguno</i>")
+
+    msg = "\n".join(parts) or "Registro vacío."
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_publinotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista todas las notas marcadas como comerciales/publicitarias."""
+    import sys as _sys_pl
+    _sys_pl.path.insert(0, "/opt/me-harness")
+    try:
+        import broker as _br_pl
+        items = _br_pl.get_publinotas()
+    except Exception as _e_pl:
+        await update.message.reply_text(f"Error: {_e_pl}")
+        return
+
+    if not items:
+        await update.message.reply_text("📢 <b>Publinotas</b>\n\n<i>Sin registros aún.</i>",
+                                        parse_mode="HTML")
+        return
+
+    parts = [f"📢 <b>Publinotas registradas ({len(items)})</b>\n"]
+    for it in items:
+        date_str = (it.get("created_at") or "")[:10]
+        title    = (it.get("title") or "sin título")[:80]
+        url      = it.get("url") or ""
+        job_id   = it.get("job_id", "")
+        parts.append(f"<b>#{it['id']}</b> <i>{date_str}</i> — job {job_id}\n"
+                     f"  {title}\n"
+                     f"  <a href='{url}'>{url[:60]}</a>\n")
+
+    msg = "\n".join(parts)
+    # Telegram límite 4096 chars
+    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+        await update.message.reply_text(chunk, parse_mode="HTML",
+                                        disable_web_page_preview=True)
+
+
+# ── Keywords temporales de agenda ────────────────────────────────────────────
+
+async def cmd_kwtemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /kwtemp <keyword> [capa:N] [dias:N]  — agrega keyword temporal a la agenda
+    /kwtemp list                          — lista keywords activas del editor
+    /kwtemp del <id>                      — desactiva una keyword por ID
+    """
+    import sys as _sys_kw
+    _sys_kw.path.insert(0, "/opt/me-harness")
+    try:
+        import broker as _br_kw
+    except Exception as _e_kw:
+        await update.message.reply_text(f"Error importando broker: {_e_kw}")
+        return
+
+    args = (context.args or [])
+    text_args = " ".join(args).strip()
+
+    if not text_args or text_args.lower() == "list":
+        # Listar keywords activas del editor
+        items = _br_kw.get_agenda_keywords_editor()
+        if not items:
+            await update.message.reply_text(
+                "🔑 <b>Keywords temporales</b>\n\n<i>Sin keywords activas.</i>",
+                parse_mode="HTML")
+            return
+        lines = [f"🔑 <b>Keywords temporales ({len(items)})</b>\n"]
+        for it in items:
+            capa_str = f" CAPA {it['capa']}" if it['capa'] else ""
+            days_str = f" ({it['days_left']}d)" if it['days_left'] is not None else ""
+            lines.append(f"<b>#{it['id']}</b>{capa_str}{days_str} — {it['keyword']}")
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="HTML")
+        return
+
+    if text_args.lower().startswith("del "):
+        # Desactivar por ID
+        try:
+            kw_id = int(text_args[4:].strip())
+            _br_kw.deactivate_agenda_keyword(kw_id)
+            await update.message.reply_text(f"✅ Keyword #{kw_id} desactivada.")
+        except Exception as _e:
+            await update.message.reply_text(f"Error: {_e}\nUso: /kwtemp del <id>")
+        return
+
+    # Agregar keyword temporal
+    # Parsing: /kwtemp cheques rechazados capa:1 dias:7
+    import re as _re_kw
+    capa_match = _re_kw.search(r"capa:(\d)", text_args, _re_kw.IGNORECASE)
+    dias_match = _re_kw.search(r"dias?:(\d+)", text_args, _re_kw.IGNORECASE)
+
+    capa = int(capa_match.group(1)) if capa_match else None
+    dias = int(dias_match.group(1)) if dias_match else 7
+
+    keyword = text_args
+    if capa_match:
+        keyword = keyword[:capa_match.start()].strip()
+    if dias_match:
+        keyword = keyword[:dias_match.start()].strip()
+    keyword = keyword.strip()
+
+    if not keyword or len(keyword) < 3:
+        await update.message.reply_text(
+            "Uso: /kwtemp <keyword> [capa:1] [dias:7]\n"
+            "     /kwtemp list\n"
+            "     /kwtemp del <id>")
+        return
+
+    from datetime import datetime as _dt_kw, timedelta as _td_kw
+    expires_at = (_dt_kw.utcnow() + _td_kw(days=dias)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        _br_kw.add_agenda_keyword(
+            keyword=keyword,
+            capa=capa,
+            source="editor",
+            weight=1.0,
+            expires_at=expires_at,
+        )
+        capa_str = f" CAPA {capa}" if capa else " (cross-capa)"
+        await update.message.reply_text(
+            f"✅ Keyword agregada{capa_str} por {dias} días:\n"
+            f"<b>{keyword}</b>",
+            parse_mode="HTML")
+    except Exception as _e:
+        await update.message.reply_text(f"Error: {_e}")
 
 
 # ── Fuentes (sources.json) ───────────────────────────────────────────────────
@@ -5178,6 +5258,359 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
 
+    # ── Editor: esperando nuevo nombre para renombrar tema ───────────────────
+    rename_id = context.user_data.pop("edito_rename_id", None)
+    if rename_id:
+        await asyncio.to_thread(_edito_rename_tema, rename_id, text_in)
+        t         = await asyncio.to_thread(_edito_get_tema, rename_id)
+        nsub      = await asyncio.to_thread(_edito_count_subtemas, rename_id)
+        parent_id = t.get("parent_id") if t else None
+        pnombre   = ""
+        if parent_id:
+            p = await asyncio.to_thread(_edito_get_tema, parent_id)
+            pnombre = p["nombre"] if p else ""
+        await update.message.reply_text(
+            _edito_tema_detail_text(t, nsub, pnombre),
+            parse_mode="HTML",
+            reply_markup=_edito_tema_detail_kb(rename_id, nsub, parent_id),
+        )
+        return
+
+    # ── Editor: esperando nombre del nuevo tema ──────────────────────────────
+    if context.user_data.pop("edito_add_tema", None):
+        context.user_data["edito_add_nombre"] = text_in
+        await update.message.reply_text(
+            f"➕ <b>{text_in}</b>\n\nElegí el nivel temporal:",
+            parse_mode="HTML",
+            reply_markup=_edito_add_nivel_kb(),
+        )
+        return
+
+    # ── Harness: esperando fecha de programación para nota en cola ──────────
+    if context.user_data.get("awaiting_cola_prog_for"):
+        job_id = context.user_data.pop("awaiting_cola_prog_for")
+        import sys as _sys, re as _re
+        from datetime import datetime as _dt, timedelta as _td
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br_prog
+            txt = text_in.strip().lower()
+            now = _dt.now()
+            pub_dt = None
+
+            # Parsear "mañana HH:MM"
+            if "mañana" in txt or "manana" in txt:
+                base = now + _td(days=1)
+                m = _re.search(r'(\d{1,2}):(\d{2})', txt)
+                if m:
+                    pub_dt = base.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                                          second=0, microsecond=0)
+            # Parsear "DD/MM HH:MM" o "DD/MM/YYYY HH:MM"
+            if not pub_dt:
+                m = _re.search(r'(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\s+(\d{1,2}):(\d{2})', txt)
+                if m:
+                    d, mo, yr, hh, mm = (int(m.group(i)) for i in range(1, 6))
+                    yr = yr or now.year
+                    pub_dt = _dt(yr, mo, d, hh, mm)
+
+            if not pub_dt:
+                await update.message.reply_text(
+                    "⚠️ No entendí la fecha. Usá formato: <code>30/05 18:30</code>",
+                    parse_mode="HTML"
+                )
+                return
+
+            pub_date_str = pub_dt.strftime("%Y-%m-%dT%H:%M:00")
+            _br_prog.confirm_cola(job_id, "fecha", pub_date=pub_date_str)
+            await update.message.reply_text(
+                f"🗓 Programado para <b>{pub_dt.strftime('%d/%m %H:%M')}</b> — job #{job_id} → redacción.",
+                parse_mode="HTML"
+            )
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
+    # ── Harness: ajustar etiquetas desde panel de cola (Volver → cola) ─────
+    if context.user_data.get("awaiting_cola_kw_for"):
+        job_id        = context.user_data.pop("awaiting_cola_kw_for")
+        panel_msg_id  = context.user_data.pop("awaiting_cola_kw_panel_msg_id",  None)
+        panel_chat_id = context.user_data.pop("awaiting_cola_kw_panel_chat_id", None)
+        prompt_msg_id = context.user_data.pop("awaiting_cola_kw_prompt_msg_id", None)
+        import sys as _sys, sqlite3 as _sq, json as _js, re as _re
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br_ckw
+            kws = [k.strip().lower() for k in _re.split(r'[,.]| - ', text_in)
+                   if k.strip() and len(k.strip()) > 1]
+            if kws:
+                with _sq.connect("/opt/me-harness/harness.db") as _c:
+                    row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                    state = _js.loads(row[0]) if row and row[0] else {}
+                    current_kw = state.get("matched_kw", [])
+                    for kw in kws:
+                        if kw not in current_kw:
+                            current_kw.append(kw)
+                        _br_ckw.update_keyword_weight(kw, +0.5)
+                    state["matched_kw"] = current_kw
+                    _c.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                               (_js.dumps(state), job_id))
+                # Borrar el prompt
+                if prompt_msg_id:
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=update.message.chat_id, message_id=prompt_msg_id
+                        )
+                    except Exception:
+                        pass
+                # Actualizar el panel de keywords
+                if panel_msg_id and panel_chat_id:
+                    rows = []
+                    for k in current_kw:
+                        ww = _br_ckw.get_keyword_weight(k)
+                        em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                        rows.append([
+                            {"text": f"{em} {k}  {ww:+.1f}",
+                             "callback_data": f"h_cola_tags:{job_id}"},
+                            {"text": "👍",  "callback_data": f"h_cola_kw_up:{job_id}:{k}"},
+                            {"text": "👎",  "callback_data": f"h_cola_kw_dn:{job_id}:{k}"},
+                            {"text": "✖️",  "callback_data": f"h_cola_kw_rm:{job_id}:{k}"},
+                        ])
+                    rows.append([{"text": "✏️ Agregar etiquetas",
+                                  "callback_data": f"h_cola_kw_add:{job_id}"}])
+                    rows.append([{"text": "↩ Volver",
+                                  "callback_data": f"h_cola_back:{job_id}"}])
+                    try:
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=panel_chat_id, message_id=panel_msg_id,
+                            reply_markup={"inline_keyboard": rows}
+                        )
+                    except Exception:
+                        pass
+            else:
+                await update.message.reply_text("⚠️ No se reconoció ninguna etiqueta.")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
+    # ── Harness: esperando etiquetas para nota en cola de publicación ──────
+    if context.user_data.get("awaiting_cola_tags_for"):
+        job_id = context.user_data.pop("awaiting_cola_tags_for")
+        import sys as _sys, sqlite3 as _sq, json as _js, re as _re
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            tags = [t.strip().lower() for t in _re.split(r'[,.]| - ', text_in)
+                    if t.strip() and len(t.strip()) > 1]
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                state = _js.loads(row[0]) if row and row[0] else {}
+                state["matched_kw"] = tags
+                _c.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js.dumps(state), job_id))
+            await update.message.reply_text(
+                f"🏷 Etiquetas guardadas: <code>{', '.join(t.title() for t in tags)}</code>",
+                parse_mode="HTML"
+            )
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
+    # ── Harness: esperando keyword manual para agregar al panel de keywords ──
+    if context.user_data.get("awaiting_kw_for"):
+        job_id        = context.user_data.pop("awaiting_kw_for")
+        panel_msg_id  = context.user_data.pop("awaiting_kw_panel_msg_id",  None)
+        panel_chat_id = context.user_data.pop("awaiting_kw_panel_chat_id", None)
+        prompt_msg_id = context.user_data.pop("awaiting_kw_prompt_msg_id", None)
+        import sys as _sys, sqlite3 as _sq, json as _js, re as _re
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br_kw
+            kws = [k.strip().lower() for k in _re.split(r'[,.]| - ', text_in)
+                   if k.strip() and len(k.strip()) > 1]
+            if kws:
+                with _sq.connect("/opt/me-harness/harness.db") as _c:
+                    row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                    state = _js.loads(row[0]) if row and row[0] else {}
+                    current_kw = state.get("matched_kw", [])
+                    for kw in kws:
+                        if kw not in current_kw:
+                            current_kw.append(kw)
+                        _br_kw.update_keyword_weight(kw, +0.5)
+                    state["matched_kw"] = current_kw
+                    _c.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                               (_js.dumps(state), job_id))
+                # Borrar el prompt
+                if prompt_msg_id:
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=update.message.chat_id, message_id=prompt_msg_id
+                        )
+                    except Exception:
+                        pass
+                # Actualizar el panel de keywords con las nuevas etiquetas
+                if panel_msg_id and panel_chat_id:
+                    rows = []
+                    for k in current_kw:
+                        ww = _br_kw.get_keyword_weight(k)
+                        em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                        rows.append([
+                            {"text": f"{em} {k}  {ww:+.1f}",
+                             "callback_data": f"h_cur_kw:{job_id}"},
+                            {"text": "👍",  "callback_data": f"h_cola_kw_up:{job_id}:{k}"},
+                            {"text": "👎",  "callback_data": f"h_cola_kw_dn:{job_id}:{k}"},
+                            {"text": "✖️",  "callback_data": f"h_cola_kw_rm:{job_id}:{k}"},
+                        ])
+                    rows.append([{"text": "✏️ Agregar etiquetas",
+                                  "callback_data": f"h_cur_kw_add:{job_id}"}])
+                    rows.append([{"text": "↩ Volver",
+                                  "callback_data": f"h_cur_volver:{job_id}"}])
+                    try:
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=panel_chat_id, message_id=panel_msg_id,
+                            reply_markup={"inline_keyboard": rows}
+                        )
+                    except Exception:
+                        pass
+            else:
+                await update.message.reply_text("⚠️ No se reconoció ninguna etiqueta.")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
+    if context.user_data.get("awaiting_tags_for"):
+        job_id = context.user_data.pop("awaiting_tags_for")
+        import sys as _sys, sqlite3 as _sq, json as _js
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import curador as _cur
+            import re as _re
+            tags = [t.strip() for t in _re.split(r'[,.]| - ', text_in) if t.strip()]
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                state = _js.loads(row[0]) if row and row[0] else {}
+                state["tags"] = tags
+                _c.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js.dumps(state), job_id))
+            # Actualizar tarjeta original
+            card_msg_id = state.get("card_msg_id")
+            if card_msg_id:
+                try:
+                    new_kb = _cur.build_card_keyboard(job_id, state)
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=update.message.chat_id,
+                        message_id=card_msg_id,
+                        reply_markup=new_kb,
+                    )
+                except Exception:
+                    pass
+            tags_str = ", ".join(tags)
+            await update.message.reply_text(f"🏷 Etiquetas guardadas: {tags_str}")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error guardando etiquetas: {_e}")
+        return
+
+    # ── Harness: esperando instrucción editorial para nota del curador ──
+    if context.user_data.get("awaiting_inst_for"):
+        job_id = context.user_data.pop("awaiting_inst_for")
+        import sys as _sys, sqlite3 as _sq, json as _js
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import curador as _cur
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                state = _js.loads(row[0]) if row and row[0] else {}
+                state["instructions"] = text_in
+                _c.execute("UPDATE jobs SET content_json=?, instructions=? WHERE id=?",
+                           (_js.dumps(state), text_in, job_id))
+            # Actualizar tarjeta original
+            card_msg_id = state.get("card_msg_id")
+            if card_msg_id:
+                try:
+                    new_kb = _cur.build_card_keyboard(job_id, state)
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=update.message.chat_id,
+                        message_id=card_msg_id,
+                        reply_markup=new_kb,
+                    )
+                except Exception:
+                    pass
+            await update.message.reply_text(f"📝 Instrucción guardada. Usá ✅ Publicar para aprobar.")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error guardando instrucción: {_e}")
+        return
+
+    # ── Harness: consolidar fuentes manual — recibe números separados por coma ──
+    if context.user_data.get("awaiting_consolidar_manual"):
+        context.user_data.pop("awaiting_consolidar_manual")
+        jobs_ordered = context.user_data.pop("briefing_jobs_ordered", [])
+        import sys as _sys3, sqlite3 as _sq3, json as _js3
+        _sys3.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import curador as _cur3
+            nums = [int(x.strip()) for x in text_in.replace(" ", "").split(",") if x.strip().isdigit()]
+            if len(nums) < 2:
+                await update.message.reply_text("❌ Ingresá al menos 2 números. Ej: <code>3,7</code>", parse_mode="HTML")
+                return
+            pos_map = {pos: (jid, title) for pos, jid, title in jobs_ordered}
+            primary_pos  = nums[0]
+            secondary_nums = nums[1:]
+            if primary_pos not in pos_map:
+                await update.message.reply_text(f"❌ Nota {primary_pos} no encontrada en el briefing.")
+                return
+            primary_id, primary_title = pos_map[primary_pos]
+            secondary_ids, secondary_urls, missing = [], [], []
+            with _sq3.connect("/opt/me-harness/harness.db") as _c3:
+                primary_row = _c3.execute("SELECT content_json FROM jobs WHERE id=?", (primary_id,)).fetchone()
+                primary_state = _js3.loads(primary_row[0]) if primary_row and primary_row[0] else {}
+                for p in secondary_nums:
+                    if p not in pos_map:
+                        missing.append(p)
+                        continue
+                    sid = pos_map[p][0]
+                    row = _c3.execute("SELECT source_url, content_json FROM jobs WHERE id=?", (sid,)).fetchone()
+                    if row and row[0]:
+                        secondary_ids.append(sid)
+                        secondary_urls.append(row[0])
+                        # Borrar tarjeta TG del secundario
+                        try:
+                            sec_state = _js3.loads(row[1]) if row[1] else {}
+                            mid = sec_state.get("card_msg_id")
+                            if mid:
+                                await context.bot.delete_message(chat_id=update.message.chat_id, message_id=mid)
+                        except Exception:
+                            pass
+                # Guardar multi_source_urls en job primario
+                primary_state["multi_source_urls"] = secondary_urls
+                _c3.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                            (_js3.dumps(primary_state), primary_id))
+                # Rechazar secundarios
+                if secondary_ids:
+                    _c3.execute(
+                        f"UPDATE jobs SET stage='rejected', updated_at=datetime('now') "
+                        f"WHERE id IN ({','.join('?'*len(secondary_ids))})",
+                        secondary_ids,
+                    )
+            # Borrar tarjeta TG del primario y reenviarla como briefing
+            try:
+                pmid = primary_state.get("card_msg_id")
+                if pmid:
+                    await context.bot.delete_message(chat_id=update.message.chat_id, message_id=pmid)
+                    primary_state.pop("card_msg_id", None)
+            except Exception:
+                pass
+            # Guardar estado sin card_msg_id para que run_briefing_single envíe tarjeta nueva
+            with _sq3.connect("/opt/me-harness/harness.db") as _c3b:
+                _c3b.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                             (_js3.dumps(primary_state), primary_id))
+            # Reenviar como tarjeta del briefing (sigue en curado, Leo aprueba manualmente)
+            await asyncio.to_thread(_cur3.run_briefing_single, primary_id)
+            warn = f"\n⚠️ No encontradas: {missing}" if missing else ""
+            await update.message.reply_text(
+                f"🔀 <b>{len(secondary_ids)+1} fuentes consolidadas</b>{warn}\n"
+                f"La nota volvió al briefing — aprobala cuando esté lista.",
+                parse_mode="HTML",
+            )
+        except Exception as _e3:
+            await update.message.reply_text(f"❌ Error consolidando: {_e3}")
+        return
+
     # ── Si el bot espera hashtags nuevos ──
     if context.user_data.get("waiting_for_hashtags"):
         context.user_data["waiting_for_hashtags"] = False
@@ -5272,76 +5705,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Si el bot espera texto manual (scrape falló) ──
-    if context.user_data.get("waiting_for_manual_text"):
-        if len(text_in) < 150:
-            await update.message.reply_text(
-                "⚠️ El texto es muy corto (mínimo 150 caracteres). Pegá el cuerpo completo del artículo."
-            )
-            return
-        context.user_data["waiting_for_manual_text"] = False
-        m_url   = context.user_data.pop("manual_url", "")
-        m_title = context.user_data.pop("manual_title", "")
-        manual_text = text_in
-        data = {
-            "title":              m_title,
-            "original_title":     m_title,
-            "text":               manual_text,
-            "excerpt":            (manual_text[:200] + "…") if len(manual_text) > 200 else manual_text,
-            "original_excerpt":   "",
-            "image_url":          "",
-            "source_url":         m_url,
-            "media":              {},
-            "_extraction_method": "manual",
-            "_html_size":         0,
-        }
-        msg = await update.message.reply_text("Procesando texto ingresado manualmente…")
-        hilo = detect_hilo(data)
-        data["hilo"] = hilo
-        context.user_data["article"] = data
-        context.user_data.setdefault("tw_on", True)
-        context.user_data.setdefault("tg_on", True)
-        context.user_data.setdefault("wa_on", False)
-        context.user_data.setdefault("li_on", False)
-        context.user_data.setdefault("dest_on", False)
-        context.user_data.setdefault("orig_title_on", False)
-        context.user_data.setdefault("orig_excerpt_on", False)
-        context.user_data.setdefault("eco_on", False)
-        data["orig_title_on"]   = context.user_data["orig_title_on"]
-        data["orig_excerpt_on"] = context.user_data["orig_excerpt_on"]
-        kw = focus_keyword(data.get("original_title") or data.get("title", ""))
-        try:
-            data["rewritten_excerpt"] = await asyncio.to_thread(
-                rewrite_excerpt_with_gpt,
-                get_title(data),
-                data.get("text", ""),
-                data.get("original_excerpt") or data.get("excerpt", ""),
-                kw,
-            )
-        except Exception as _e:
-            logger.warning(f"rewrite_excerpt (manual) falló: {_e}")
-            data["rewritten_excerpt"] = ""
-        kb = _preview_kb_from_ctx(context)
-        await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
-        return
-
-    # ── Si el bot espera un nuevo título ──
-    if context.user_data.get("waiting_for_title"):
-        context.user_data["waiting_for_title"] = False
-        data = context.user_data.get("article")
-        if not data:
-            await update.message.reply_text("No hay nota activa. Manda un link primero.")
-            return
-        data["title"] = text_in
-        data["title_edited"] = True
-        context.user_data["article"] = data
-        preview = build_preview(data)
-        kb = _preview_kb_from_ctx(context)
-        await update.message.reply_text(
-            preview, parse_mode="Markdown", reply_markup=kb
-        )
-        return
-
     # ── Si el bot espera nuevo título para edición de nota existente ──
     if context.user_data.get("waiting_for_edit_title"):
         context.user_data["waiting_for_edit_title"] = False
@@ -5386,71 +5749,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Mandame la foto como imagen en Telegram, o una URL que empiece con http."
             )
             return
-
-    # ── Si el bot espera hashtags pre-programación ──
-    if context.user_data.get("waiting_for_pre_sched_ht"):
-        context.user_data["waiting_for_pre_sched_ht"] = False
-        data = context.user_data.get("article")
-        if not data:
-            await update.message.reply_text("No hay nota activa.")
-            return
-        words = text_in.split()
-        hashtags = " ".join(w if w.startswith("#") else f"#{w}" for w in words if w)
-        suggested = context.user_data.pop("_ht_suggested_sched", None) or _build_hashtags(data)
-        _save_ht_feedback(data, suggested, hashtags)
-        context.user_data["pre_sched_hashtags"] = hashtags
-        await update.message.reply_text(
-            build_preview(data) + f"\n\n*🐦 Twitter — Hashtags:*\n`{md_escape(hashtags)}`\n\nConfirmá los hashtags o cambiálos antes de elegir cuándo publicar:",
-            parse_mode="Markdown",
-            reply_markup=_build_sched_pre_ht_kb(),
-        )
-        return
-
-    # ── Si el bot espera hora personalizada para programación ──
-    if context.user_data.get("waiting_for_custom_hour"):
-        import re as _re
-        data = context.user_data.get("article")
-        if not data:
-            context.user_data["waiting_for_custom_hour"] = False
-            await update.message.reply_text("No hay nota activa.")
-            return
-        m = _re.match(r"^(\d{1,2}):(\d{2})$", text_in.strip())
-        if not m:
-            await update.message.reply_text(
-                "No entendí la hora. Usá el formato HH:MM (ej: 14:30)."
-            )
-            return
-        hour, minute = int(m.group(1)), int(m.group(2))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            await update.message.reply_text("Hora inválida. Usá HH:MM entre 00:00 y 23:59.")
-            return
-        context.user_data["waiting_for_custom_hour"] = False
-        from datetime import datetime, timezone, timedelta
-        tz_arg = timezone(timedelta(hours=-3))
-        now_arg = datetime.now(tz_arg)
-        day_offset = context.user_data.get("sched_custom_day", 0)
-        target = (now_arg + timedelta(days=day_offset)).replace(
-            hour=hour, minute=minute, second=0, microsecond=0
-        )
-        if target <= now_arg + timedelta(minutes=5):
-            target += timedelta(days=1)
-        context.user_data["sched_custom_target"] = target.isoformat()
-        day_label = target.strftime("%A %d/%m")
-        kb_confirm = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    f"✅ Programar para el {day_label} {hour:02d}:{minute:02d}",
-                    callback_data="sched_confirm_custom",
-                ),
-            ],
-            [InlineKeyboardButton("↩️ Cancelar", callback_data="sched_custom")],
-        ])
-        await update.message.reply_text(
-            f"📅 Confirmás programar para el *{day_label} a las {hour:02d}:{minute:02d}*?",
-            parse_mode="Markdown",
-            reply_markup=kb_confirm,
-        )
-        return
 
     # ── Frase: cambiar hashtags para tweet inmediato ──
     if context.user_data.get("waiting_for_frase_ht"):
@@ -5535,17 +5833,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Agente /c — ajuste del plan ──
-    if context.user_data.get("waiting_for_cmdc_adjust"):
-        context.user_data["waiting_for_cmdc_adjust"] = False
-        old_plan = context.user_data.get("cmd_c_plan", {})
-        history  = old_plan.get("history", [])
-        msg_edit = await update.message.reply_text("Ajustando el plan...")
-        try:
-            plan = await asyncio.to_thread(_cmd_c_plan_sync, text_in, history)
-        except Exception as e:
-            await msg_edit.edit_text(f"No pude ajustar el plan: {e}")
-            return
         if not plan["url"]:
             plan["url"] = old_plan.get("url", "")
         if not plan.get("raw_input"):
@@ -5625,6 +5912,145 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb_upd)
         return
 
+    # ── Reprogramar post WP: Leo escribe la nueva fecha ─────────────────────
+    if context.user_data.get("awaiting_reschedule_wp_id"):
+        wp_id_rs = context.user_data.pop("awaiting_reschedule_wp_id")
+        context.user_data.pop("awaiting_reschedule_msg_id", None)
+        import re as _re_rs, requests as _req_rs, base64 as _b64_rs
+        from config import WP_URL as _WP_RS, WP_USER as _WPU_RS, WP_PASS as _WPP_RS
+        raw_date = text_in.strip()
+        # Parsear "DD/MM HH:MM" o ISO directo
+        iso_date = None
+        m_rs = _re_rs.match(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\s+(\d{1,2}):(\d{2})", raw_date)
+        if m_rs:
+            day, mon, yr, hh, mm = m_rs.groups()
+            yr = yr or "2026"
+            iso_date = f"{yr}-{int(mon):02d}-{int(day):02d}T{int(hh):02d}:{mm}:00"
+        elif _re_rs.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", raw_date):
+            iso_date = raw_date
+        if not iso_date:
+            await update.message.reply_text(
+                f"⚠️ Formato no reconocido: <code>{raw_date}</code>\n"
+                f"Usá: <code>15/07 10:00</code>",
+                parse_mode="HTML"
+            )
+            context.user_data["awaiting_reschedule_wp_id"] = wp_id_rs
+            return
+        _tok_rs = _b64_rs.b64encode(f"{_WPU_RS}:{_WPP_RS}".encode()).decode()
+        r_rs = _req_rs.post(
+            f"{_WP_RS}/wp-json/wp/v2/posts/{wp_id_rs}",
+            headers={"Authorization": f"Basic {_tok_rs}", "Content-Type": "application/json"},
+            json={"date": iso_date, "status": "future"}, timeout=15
+        )
+        if r_rs.ok:
+            await update.message.reply_text(
+                f"✅ WP #{wp_id_rs} reprogramado para <b>{iso_date.replace('T',' ')}</b>",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(f"❌ Error WP {r_rs.status_code}: {r_rs.text[:100]}")
+        return
+
+    # ── URL de imagen para nota sin foto ────────────────────────────────────
+    if context.user_data.get("awaiting_img_url_for"):
+        job_id_iv = context.user_data.pop("awaiting_img_url_for")
+        context.user_data.pop("awaiting_img_msg_id", None)
+        img_url_iv = text_in.strip()
+        if img_url_iv.startswith("http://") or img_url_iv.startswith("https://"):
+            # Guardar en user_data — la URL puede ser muy larga para callback_data (límite 64 bytes)
+            context.user_data[f"pending_img_url_{job_id_iv}"] = img_url_iv
+            await update.message.reply_text(
+                f"🟢 <b>URL recibida</b> — <code>{img_url_iv[:80]}</code>",
+                parse_mode="HTML",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "✅ Usar esta imagen",  "callback_data": f"h_img_use:{job_id_iv}"}],
+                    [{"text": "🔗 Probar otra URL",   "callback_data": f"h_img_url:{job_id_iv}"},
+                     {"text": "🔍 Buscar en ME.ar",   "callback_data": f"h_img_search:{job_id_iv}"}],
+                ]}
+            )
+        else:
+            await update.message.reply_text(
+                f"🔴 <b>URL inválida</b> — debe empezar con https://\n<code>{img_url_iv[:80]}</code>",
+                parse_mode="HTML",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "🔗 Probar otra URL",  "callback_data": f"h_img_url:{job_id_iv}"},
+                     {"text": "🔍 Buscar en ME.ar",  "callback_data": f"h_img_search:{job_id_iv}"}],
+                    [{"text": "⏭ Publicar sin foto", "callback_data": f"h_img_skip:{job_id_iv}"}],
+                ]}
+            )
+        return
+
+    # ── Link manual sin título: Leo escribe el título ─────────────────────────
+    if context.user_data.get("awaiting_manual_harness_title"):
+        context.user_data.pop("awaiting_manual_harness_title")
+        _url_mh    = context.user_data.pop("pending_manual_url", "")
+        _exc_mh    = context.user_data.pop("pending_manual_excerpt", "")
+        _hilo_mh   = context.user_data.pop("pending_manual_hilo", 2)
+        _title_mh  = text_in.strip()
+        import sys as _sys_mh
+        _sys_mh.path.insert(0, "/opt/me-harness")
+        # Si Leo pegó una URL como título, usarla como source_url y re-scrapear
+        if _title_mh.startswith("http://") or _title_mh.startswith("https://"):
+            _url_mh = _title_mh
+            try:
+                from agents.redactor import scrape as _scrape_mh2
+                _scraped2 = await asyncio.to_thread(_scrape_mh2, _url_mh)
+                _title_mh = (_scraped2.get("title") or "").strip()
+                if not _title_mh:
+                    # slug como fallback
+                    _title_mh = _url_mh.rstrip("/").split("/")[-1].replace("-", " ").capitalize()
+                if not _exc_mh:
+                    _exc_mh = _scraped2.get("text", "")[:300]
+            except Exception:
+                _title_mh = _url_mh.rstrip("/").split("/")[-1].replace("-", " ").capitalize()
+        try:
+            import broker as _br_mh
+            _content_mh = {"title": _title_mh, "excerpt": _exc_mh,
+                           "source_name": _url_mh.split("/")[2] if "/" in _url_mh else _url_mh}
+            _jid_mh = _br_mh.enqueue("curado", source_url=_url_mh, title=_title_mh,
+                                      content=_content_mh, score=8.0, hilo=_hilo_mh, force=True)
+            from agents import curador as _cur_mh
+            await asyncio.to_thread(_cur_mh.run_briefing_single, _jid_mh)
+        except Exception as _e_mh:
+            await update.message.reply_text(f"❌ Error: {_e_mh}")
+        return
+
+    # ── Cola: nuevo título ingresado por Leo ───────────────────────────────────
+    if context.user_data.get("awaiting_cola_title_for"):
+        job_id    = context.user_data.pop("awaiting_cola_title_for")
+        msg_id    = context.user_data.pop("awaiting_cola_title_msg_id", None)
+        prompt_id = context.user_data.pop("awaiting_cola_title_prompt_id", None)
+        new_title = text_in.strip()
+        import sys as _sys_ct, json as _js_ct
+        _sys_ct.path.insert(0, "/opt/me-harness")
+        try:
+            import sqlite3 as _sq_ct
+            with _sq_ct.connect("/opt/me-harness/harness.db") as _c_ct:
+                # Guardar título original antes de cambiar
+                row_ct = _c_ct.execute(
+                    "SELECT title, content_json FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if row_ct:
+                    orig_title = row_ct[0] or ""
+                    cj_ct = _js_ct.loads(row_ct[1] or "{}")
+                    if "original_title" not in cj_ct:  # guardar solo la primera vez
+                        cj_ct["original_title"] = orig_title
+                    _c_ct.execute(
+                        "UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
+                        (new_title, _js_ct.dumps(cj_ct), job_id)
+                    )
+            if prompt_id:
+                try: await context.bot.delete_message(update.message.chat_id, prompt_id)
+                except Exception: pass
+            await update.message.reply_text(
+                f"✅ Título actualizado:\n<b>{new_title}</b>\n\n"
+                f"<i>Usá '↩ Restaurar original' en el menú para volver al título anterior.</i>",
+                parse_mode="HTML"
+            )
+        except Exception as _e_ct:
+            await update.message.reply_text(f"❌ Error: {_e_ct}")
+        return
+
     # ── Flujo normal: extraer URL del mensaje (acepta texto + link) ──
     url = extract_url_from_text(text_in)
     if not url:
@@ -5655,185 +6081,89 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass  # Si falla el check, seguir normalmente
 
-    msg = await update.message.reply_text(
-        "🎬 Bajando transcripción de YouTube..." if kind == "youtube"
-        else "Analizando la nota..."
-    )
-
-    try:
-        if kind == "youtube":
-            data = await asyncio.to_thread(scrape_youtube, url)
-        else:
-            data = await asyncio.to_thread(scrape, url)
-    except requests.exceptions.HTTPError as e:
-        code = e.response.status_code if e.response is not None else "?"
-        logger.error(f"scrape HTTP {code}: {e}")
-        stat_error()
-        await msg.edit_text(f"El sitio devolvió error {code}. Puede estar bloqueando bots.")
-        return
-    except requests.exceptions.Timeout:
-        logger.error(f"scrape timeout: {url}")
-        stat_error()
-        await msg.edit_text("Timeout: el sitio tardó demasiado en responder.")
-        return
-    except RuntimeError as e:
-        logger.error(f"scrape runtime: {e}")
-        stat_error()
-        await msg.edit_text(f"⚠️ {e}")
-        return
-    except Exception as e:
-        logger.error(f"scrape: {type(e).__name__}: {e}")
-        stat_error()
-        err_str = str(e)
-        t_match = re.search(r"Título: (.+)", err_str)
-        partial_title = t_match.group(1).strip() if t_match else ""
-        context.user_data["manual_url"]   = url
-        context.user_data["manual_title"] = partial_title
-        kb_manual = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✍️ Ingresar texto manualmente", callback_data="manual_text_start"),
-            InlineKeyboardButton("❌ Cancelar", callback_data="cancel"),
-        ]])
-        await msg.edit_text(
-            f"⚠️ No pude leer el artículo:\n_{md_escape(err_str[:250])}_\n\n"
-            "Podés pegar el texto vos mismo para procesarlo igual.",
-            parse_mode="Markdown",
-            reply_markup=kb_manual,
-        )
-        return
-
-    # Si no se extrajo texto (Instagram tiene captions cortos, umbral menor)
-    _min_text = 50 if data.get("is_instagram") else 200
-    if not data.get("text") or len(data["text"]) < _min_text:
-        stat_error()
-        method = data.get("_extraction_method", "none")
-        html_sz = data.get("_html_size", 0)
-        text_len = len(data.get("text", ""))
-        logger.error(
-            f"Extract falló para {text_in[:80]}: method={method}, "
-            f"html={html_sz}B, text={text_len} chars"
-        )
-        await msg.edit_text(
-            f"⚠️ No pude extraer el texto.\n"
-            f"Método: `{method}` · HTML: {html_sz:,} bytes · texto: {text_len} chars\n"
-            f"Puede ser un sitio SPA o el HTML no tiene los selectores esperados.",
-            parse_mode="Markdown",
-        )
-        return
-
-    # Check de duplicados por slug generado (más confiable que slug de URL fuente)
-    try:
-        generated_slug = url_slug(data.get("title", ""))
-        if generated_slug:
-            dup_r2 = requests.get(
-                f"{WP_URL}/wp-json/wp/v2/posts?slug={generated_slug}&_fields=id,link",
-                headers=wp_auth(), timeout=8
-            )
-            if dup_r2.status_code == 200 and dup_r2.json():
-                dup2 = dup_r2.json()[0]
-                await msg.edit_text(
-                    f"⚠️ Esta nota ya está publicada (mismo slug):\n{dup2['link']}\n\nUsá /editar si querés modificarla."
-                )
-                return
-    except Exception:
-        pass
-
-    # Determinar hilo (hint del operador o auto-detect)
-    hilo = hilo_hint or detect_hilo(data)
-    data["hilo"] = hilo
-
-    context.user_data["article"] = data
-    context.user_data.setdefault("tw_on", True)
-    context.user_data.setdefault("tg_on", True)
-    context.user_data.setdefault("wa_on", False)
-    context.user_data.setdefault("li_on", False)
-    context.user_data.setdefault("dest_on", False)
-    context.user_data.setdefault("orig_title_on", False)
-    context.user_data.setdefault("orig_excerpt_on", False)
-    context.user_data.setdefault("eco_on", False)
-    data["orig_title_on"] = context.user_data["orig_title_on"]
-    data["orig_excerpt_on"] = context.user_data["orig_excerpt_on"]
-
-    # Generar la bajada reescrita (GPT) una sola vez y cachear en data
-    if not data.get("rewritten_excerpt"):
-        kw = focus_keyword(data.get("original_title") or data.get("title", ""))
+    # ── URLs externas → harness briefing (no pipeline viejo) ──────────────────
+    # URLs de mundoempresarial.ar van al flujo de edición (/editar)
+    # ── YouTube / Instagram → agente social (semáforos + briefing) ───────────
+    if kind in ("youtube", "instagram"):
+        import sys as _sys_soc
+        _sys_soc.path.insert(0, "/opt/me-harness")
         try:
-            data["rewritten_excerpt"] = await asyncio.to_thread(
-                rewrite_excerpt_with_gpt,
-                get_title(data),
-                data.get("text", ""),
-                data.get("original_excerpt") or data.get("excerpt", ""),
-                kw,
+            from agents.social import analyze as _soc_analyze, format_panel as _soc_panel
+            msg_soc = await update.message.reply_text("🔍 Analizando contenido...")
+            data_soc = await asyncio.to_thread(_soc_analyze, url)
+            # Encolar en curado para tener job_id
+            import broker as _br_soc
+            content_soc = {
+                "title":       data_soc["title"],
+                "text":        data_soc["text"],
+                "excerpt":     data_soc["excerpt"],
+                "image_url":   data_soc["image_url"],
+                "source_name": data_soc["source"],
+                "source_url":  data_soc["source_url"],
+                "source":      data_soc["source_url"],
+            }
+            _job_soc = _br_soc.enqueue(
+                "curado", source_url=data_soc["source_url"],
+                title=data_soc["title"],
+                content=content_soc,
+                score=7.0,
+                hilo=hilo_hint or 2,
             )
-        except Exception as e:
-            logger.warning(f"rewrite_excerpt falló: {e}")
-            data["rewritten_excerpt"] = ""
-
-    # Si es YouTube, embed del video ON por defecto
-    if data.get("is_youtube"):
-        context.user_data["yt_embed_on"] = True
-
-    # Si viene del curador con "publicar auto", ir directo al preview unificado
-    if context.user_data.pop("curador_auto", False):
-        from datetime import datetime, timezone, timedelta
-        _tz_arg = timezone(timedelta(hours=-3))
-        _now = datetime.now(_tz_arg)
-        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
-        tw_on   = context.user_data.get("tw_on", True)
-        tg_on   = context.user_data.get("tg_on", True)
-        li_on   = context.user_data.get("li_on", False)
-        dest_on = context.user_data.get("dest_on", False)
-        s_title = get_title(data)
-        s_slug  = url_slug(data["title"])
-        cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
-        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
-        tags_str = " · ".join(extract_tags(data["title"])[:4])
-        hts      = _build_hashtags(data)
-        ch_tw = "✅" if tw_on else "❌"
-        ch_tg = "✅" if tg_on else "❌"
-        ch_li = "✅" if li_on else "❌"
-        dest_str = "⭐ Sí" if dest_on else "No"
-        preview_text = (
-            f"⚡ *Publicar auto*\n\n"
-            f"📰 *{md_escape(s_title)}*\n"
-            f"🔗 `/{s_slug}`\n"
-            f"🗂 {cats_str}\n"
-            f"🏷 {tags_str}\n"
-            f"🐦 `{md_escape(hts)}`\n\n"
-            f"📢 Canal TG: {ch_tg}  |  🐦 Twitter: {ch_tw}  |  💼 LinkedIn: {ch_li}\n"
-            f"⭐ Destacado: {dest_str}\n\n"
-            f"🕐 {fecha_str}\n\n"
-            f"¿Publicar ahora?"
-        )
-        kb_auto = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
-                InlineKeyboardButton("✏️ Volver",    callback_data="pub_auto_back"),
-                InlineKeyboardButton("❌ Cancelar",  callback_data="cancel"),
-            ]
-        ])
-        await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb_auto)
+            panel_text, panel_kb = _soc_panel(data_soc, job_id=_job_soc)
+            await msg_soc.delete()
+            await update.message.reply_text(
+                panel_text, parse_mode="HTML",
+                reply_markup={"inline_keyboard": panel_kb},
+                disable_web_page_preview=True,
+            )
+        except Exception as _e_soc:
+            await update.message.reply_text(f"❌ Error analizando: {_e_soc}")
         return
 
-    # Mostrar preview
-    kb = _preview_kb_from_ctx(context)
-    await msg.edit_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
+    if "mundoempresarial.ar" not in url:
+        import sys as _sys_hl
+        _sys_hl.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br_hl
+            from agents.ingesta import score_article as _score_hl
+            msg_hl = await update.message.reply_text("⏳ Leyendo artículo...")
+            # Usa el scraper del bot (og:title + JSON-LD + fallbacks AMP/Wayback/GCache)
+            scraped_hl = await asyncio.to_thread(scrape, url)
+            title_hl   = (scraped_hl.get("title") or "").strip()
+            if title_hl.lower() in ("sin título", "sin titulo", ""):
+                title_hl = ""
+            excerpt_hl = (scraped_hl.get("excerpt") or scraped_hl.get("text", "")[:300]).strip()
+            text_hl    = scraped_hl.get("text", "")
+            if not title_hl:
+                context.user_data["pending_manual_url"]     = url
+                context.user_data["pending_manual_excerpt"] = excerpt_hl
+                context.user_data["pending_manual_hilo"]    = hilo_hint or 2
+                await msg_hl.edit_text(
+                    "⚠️ No pude extraer el título. Escribí el título para esta nota:",
+                    parse_mode="HTML"
+                )
+                context.user_data["awaiting_manual_harness_title"] = True
+                return
 
-    # Si hay video o foto, preguntar si incorporarla
-    media = data.get("media", {})
-    if media.get("has_video"):
-        vid_url = media.get("video_url", "video detectado")
-        await update.message.reply_text(
-            f"🎬 La nota tiene un *video* embebido.\n`{vid_url[:100]}`\n\n"
-            "¿Querés incorporarlo a la publicación?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Sí, incluir video", callback_data="media_include_video"),
-                    InlineKeyboardButton("No", callback_data="media_skip"),
-                ]
-            ]),
-        )
+            # Score real (no hardcodeado)
+            score_hl = max(7.0, _score_hl(title_hl, text_hl[:500]))
+            hilo_hl  = hilo_hint or 2
+            content_hl = {"title": title_hl, "excerpt": excerpt_hl,
+                          "source_name": url.split("/")[2] if "/" in url else url,
+                          "text": text_hl[:3000]}
+            job_id_hl = _br_hl.enqueue("curado", source_url=url, title=title_hl,
+                                        content=content_hl, score=score_hl, hilo=hilo_hl, force=True)
+            await msg_hl.delete()
+            from agents import curador as _cur_hl
+            await asyncio.to_thread(_cur_hl.run_briefing_single, job_id_hl)
+        except Exception as _e_hl:
+            await update.message.reply_text(f"❌ Error al agregar al harness: {_e_hl}")
+        return
+
+    # URLs de mundoempresarial.ar → usar /editar para editar notas existentes
+    await update.message.reply_text(
+        f"Para editar una nota de ME.ar usá /editar\n{url}"
+    )
 
 
 async def _do_schedule(query, context, data, target):
@@ -5858,64 +6188,17 @@ async def _do_schedule(query, context, data, target):
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
     destacado = context.user_data.get("dest_on", False)
-    published = await asyncio.to_thread(publish_post, data, image_id, destacado, adjusted)
+    job_id = await asyncio.to_thread(_enqueue_to_harness, data, image_id, destacado, adjusted)
 
-    if not published:
-        await query.edit_message_text("❌ Error al programar la nota. Revisá los logs.")
-        return
-
-    post_url = published["link"]
-    post_id = published["id"]
-    post_content = published["content"]
-    custom_hashtags = context.user_data.get("pre_sched_hashtags")
-
-    if context.user_data.get("desp_on", False):
-        slug = published.get("slug", url_slug(data["title"]))
-        wrapped = _wrap_nota_desplegable(post_id, slug, post_content, data)
-        if await asyncio.to_thread(update_post, post_id, {"content": wrapped}):
-            post_content = wrapped
-
-    try:
-        await asyncio.to_thread(
-            _add_scheduled_job,
-            post_id, post_url, adjusted, data, context.user_data, post_content,
-        )
-    except Exception as e:
-        logger.warning(f"No pude persistir scheduled job: {e}")
-
-    job_data = {
-        "post_id":         post_id,
-        "post_url":        post_url,
-        "post_content":    post_content,
-        "data":            data,
-        "tw_on":           context.user_data.get("tw_on", True),
-        "tg_on":           context.user_data.get("tg_on", True),
-        "wa_on":           context.user_data.get("wa_on", False),
-        "li_on":           context.user_data.get("li_on", False),
-        "chat_id":         query.message.chat_id,
-        "custom_hashtags": custom_hashtags,
-    }
-    try:
-        context.application.job_queue.run_once(
-            _fire_scheduled_social,
-            when=adjusted,
-            data=job_data,
-            name=f"sched_social_{post_id}",
-        )
-    except Exception as e:
-        logger.error(f"run_once falló: {e}")
-
-    stat_publish(data["title"], data.get("source_url", ""))
-    eco_on = context.user_data.get("eco_on", False)
     context.user_data.pop("article", None)
     context.user_data.pop("pre_sched_hashtags", None)
     context.user_data.pop("sched_custom_day", None)
     context.user_data.pop("sched_custom_target", None)
 
     await query.edit_message_text(
-        f"✅ *Programado* para {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n\n"
-        f"📝 WP: {post_url}\n"
-        f"🔔 A esa hora se disparan los posteos en canal TG y el preview de Twitter.",
+        f"✅ *En cola del harness* — job \\#{job_id}\n"
+        f"Programado: {adjusted.strftime('%A %d/%m a las %H:%M')}{offset_msg}\n"
+        f"El publicador crea el post en WP y difunde a esa hora\\.",
         parse_mode="Markdown",
     )
 
@@ -5941,8 +6224,2632 @@ async def _do_schedule(query, context, data, target):
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as _qa_err:
+        if "query is too old" in str(_qa_err).lower():
+            return  # callback expirado, ignorar silenciosamente
+        raise
 
+    # ── /pipeline callbacks ───────────────────────────────────────────────────
+    if query.data == "pip_close":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if query.data == "pip_refresh":
+        try:
+            text, counts = await asyncio.to_thread(_pipeline_stats)
+            kb = _pipeline_kb(counts)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception as _pe:
+            await query.answer(f"Error: {_pe}", show_alert=True)
+        return
+    if query.data.startswith("pip_stage_"):
+        stage_key = query.data[len("pip_stage_"):]
+        if stage_key == "sin_imagen":
+            # Flujo estándar: card con botones de imagen para cada nota sin foto
+            import sqlite3 as _sq_si, json as _js_si
+            with _sq_si.connect(_HDB) as _c_si_pip:
+                _si_pip_rows = _c_si_pip.execute(
+                    "SELECT id, title, source_url, content_json FROM jobs WHERE stage='sin_imagen' ORDER BY created_at"
+                ).fetchall()
+            if not _si_pip_rows:
+                await query.answer("No hay notas sin imagen.", show_alert=True)
+                return
+            await query.answer(f"{len(_si_pip_rows)} nota(s) sin imagen", show_alert=False)
+            for _si_pip_id, _si_pip_title, _si_pip_src, _si_pip_cj in _si_pip_rows:
+                _si_pip_c = {}
+                try: _si_pip_c = _js_si.loads(_si_pip_cj or "{}")
+                except Exception: pass
+                _si_pip_url = _si_pip_c.get("source") or _si_pip_c.get("source_url") or _si_pip_src or ""
+                _si_pip_link = f'\n<a href="{_si_pip_url}">Ver fuente</a>' if _si_pip_url else ""
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"🖼 <b>Sin imagen — elegí foto (job #{_si_pip_id})</b>\n\n<b>{(_si_pip_title or '')[:80]}</b>{_si_pip_link}",
+                    parse_mode="HTML", disable_web_page_preview=True,
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "🔍 Buscar en ME.ar", "callback_data": f"h_img_search:{_si_pip_id}"},
+                         {"text": "🔗 Agregar URL",     "callback_data": f"h_img_url:{_si_pip_id}"}],
+                        [{"text": "➖ Publicar sin foto", "callback_data": f"h_img_skip:{_si_pip_id}"}],
+                        [{"text": "↩ Volver",            "callback_data": "pip_close"}],
+                    ]}
+                )
+            return
+        _PIP_ACTION_BTN = {
+            "curado":      ("📰 Ir a Briefing",           "pip_cmd_briefing"),
+            "cola":        ("📌 Ir a Cola de publicación", "h_cola_main_panel"),
+            "ingesta":     ("📡 Ejecutar Ingesta",         "pip_cmd_ingesta"),
+            "redaccion":   ("✍️ Procesar Redacción",       "pip_cmd_redaccion"),
+            "programadas": ("📅 Ver Programadas",          "h_cola_ver_programadas"),
+        }
+        try:
+            text = await asyncio.to_thread(_pipeline_stage_detail, stage_key)
+            _volver_btn = {"text": "↩ Volver", "callback_data": "pip_close"}
+            if stage_key in _PIP_ACTION_BTN:
+                lbl, cb = _PIP_ACTION_BTN[stage_key]
+                await query.message.reply_text(
+                    text, parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": lbl, "callback_data": cb}],
+                        [_volver_btn],
+                    ]}
+                )
+            else:
+                await query.message.reply_text(
+                    text, parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [[_volver_btn]]}
+                )
+        except Exception as _pe:
+            await query.answer(f"Error: {_pe}", show_alert=True)
+        return
+
+    # ── Pipeline — comandos de acción desde botones del stage ────────────────
+    if query.data in ("pip_cmd_briefing", "pip_cmd_ingesta", "pip_cmd_redaccion"):
+        import sys as _sys_pip
+        _sys_pip.path.insert(0, "/opt/me-harness")
+        if query.data == "pip_cmd_briefing":
+            msg_pip = await context.bot.send_message(query.message.chat_id, "📰 Generando briefing…")
+            try:
+                from agents import curador as _cur_pip
+                await asyncio.to_thread(_cur_pip.run_briefing, 0)
+                await msg_pip.delete()
+            except Exception as _e_pip:
+                await msg_pip.edit_text(f"⚠️ Error en briefing: {_e_pip}")
+        elif query.data == "pip_cmd_ingesta":
+            msg_pip = await context.bot.send_message(query.message.chat_id, "📡 Corriendo ingesta RSS…")
+            try:
+                from agents import ingesta as _ing_pip
+                n_pip = await asyncio.to_thread(_ing_pip.run)
+                await msg_pip.edit_text(
+                    f"✅ <b>Ingesta completada</b>\n{n_pip} notas nuevas encoladas.\nUsá /briefing para ver el briefing.",
+                    parse_mode="HTML"
+                )
+            except Exception as _e_pip:
+                await msg_pip.edit_text(f"⚠️ Error en ingesta: {_e_pip}")
+        elif query.data == "pip_cmd_redaccion":
+            msg_pip = await context.bot.send_message(query.message.chat_id, "✍️ Procesando redacción…")
+            try:
+                from agents import redactor as _red_pip
+                await asyncio.to_thread(_red_pip.run_once)
+                await msg_pip.edit_text("✅ Redacción procesada.")
+            except Exception as _e_pip:
+                await msg_pip.edit_text(f"⚠️ Error en redacción: {_e_pip}")
+        await query.answer()
+        return
+
+    # ── Harness — Tips de corrección sobre la nota (TIPS_NOTA) ──────────────
+    # h_tip_accept:{tip_id}  → Leo acepta la corrección (la hará manual)
+    # h_tip_skip:{tip_id}    → Leo ignora el tip
+    # h_tip_fix:{job_id}     → desde alerta score bajo, registra tarea
+    # h_tip_qaok:{job_id}    → descarta alerta QA
+    if (query.data.startswith("h_tip_accept:") or
+            query.data.startswith("h_tip_skip:") or
+            query.data.startswith("h_tip_fix:") or
+            query.data.startswith("h_tip_qaok:")):
+        import sys as _sys2
+        _sys2.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br2
+            parts2 = query.data.split(":")
+            action2 = parts2[0]
+            arg2   = int(parts2[1]) if len(parts2) >= 2 else None
+
+            if action2 == "h_tip_accept" and arg2:
+                tip2 = _br2.get_tip(arg2)
+                tip_text2 = (tip2 or {}).get("tip", "")[:200]
+                _br2.update_tip_status(arg2, "accepted")
+                await query.edit_message_text(
+                    f"🔧 <b>Corrección pendiente</b>\n<i>{tip_text2}</i>\n\n<code>→ Recordar corregir manualmente en WP</code>",
+                    parse_mode="HTML",
+                )
+
+            elif action2 == "h_tip_skip" and arg2:
+                _br2.update_tip_status(arg2, "ignored")
+                await query.edit_message_reply_markup(None)
+
+            elif action2 == "h_tip_fix" and arg2:
+                await query.edit_message_text(
+                    f"⏳ Corrigiendo job #{arg2}…", parse_mode="HTML"
+                )
+                try:
+                    import json as _jfix
+                    _job_fix = _br2.get_job(arg2)
+                    if not _job_fix or not _job_fix.get("wp_url"):
+                        await query.edit_message_text(
+                            f"❌ Job #{arg2} sin wp_url — no se puede auto-corregir.",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        from agents.lector import (
+                            run_qa_checks, _auto_fix_article,
+                            _get_post_id_from_slug, _get_wp_post_text,
+                        )
+                        _wp_url_fix = _job_fix["wp_url"]
+                        _cj_fix  = _jfix.loads(_job_fix.get("content_json") or "{}")
+                        _src_url  = _job_fix.get("source_url") or _cj_fix.get("source") or _cj_fix.get("source_url") or ""
+                        _src_name = _cj_fix.get("source_name") or ""
+                        _pid_fix  = _get_post_id_from_slug(_wp_url_fix)
+                        _qa_iss, _qa_meta = run_qa_checks(_wp_url_fix, arg2)
+                        _hard = [i for i in _qa_iss if i.startswith("❌")]
+                        if not _hard:
+                            await query.edit_message_text(
+                                f"✅ Job #{arg2}: sin errores duros detectados en QA.",
+                                parse_mode="HTML"
+                            )
+                        elif not _pid_fix:
+                            await query.edit_message_text(
+                                f"❌ No se pudo obtener post_id para job #{arg2}.",
+                                parse_mode="HTML"
+                            )
+                        else:
+                            _txt = _get_wp_post_text(_wp_url_fix) or ""
+                            _fixes = await _auto_fix_article(
+                                _pid_fix, _wp_url_fix,
+                                _job_fix.get("title", ""), _txt,
+                                _qa_iss, _qa_meta, 5, [],
+                                source_url=_src_url,
+                                source_name=_src_name,
+                            )
+                            if _fixes:
+                                await query.edit_message_text(
+                                    f"✅ <b>Auto-fix — job #{arg2}:</b>\n"
+                                    + "\n".join(f"• {f}" for f in _fixes),
+                                    parse_mode="HTML"
+                                )
+                            else:
+                                await query.edit_message_text(
+                                    f"⚠️ Job #{arg2}: QA errors sin fix automático disponible:\n"
+                                    + "\n".join(f"• {i}" for i in _hard[:5]),
+                                    parse_mode="HTML"
+                                )
+                except Exception as _fix_err:
+                    await query.edit_message_text(
+                        f"❌ Error en auto-fix job #{arg2}: {_fix_err}",
+                        parse_mode="HTML"
+                    )
+
+            elif action2 == "h_tip_qaok" and arg2:
+                await query.message.delete()
+
+        except Exception as _he2:
+            logger.warning(f"h_tip handler error: {_he2}")
+            await query.answer(f"Error: {_he2}")
+        return
+
+    # ── Harness — Recomendaciones generales / Reglas de agentes ─────────────
+    # h_agtrule_add:{agent}:{keyword} → escribe regla permanente
+    # h_agtrule_skip:{keyword}        → registra patrón como ignorado (no vuelve a aparecer)
+    if query.data.startswith("h_agtrule_add:") or query.data.startswith("h_agtrule_skip:"):
+        import sys as _sys2
+        _sys2.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _hb2
+            parts = query.data.split(":", 2)
+            action_ag = parts[0]
+            if action_ag == "h_agtrule_add" and len(parts) >= 3:
+                agent_name = parts[1]
+                keyword    = parts[2]
+                _PATTERNS_MAP = {
+                    "bullet":     "Los bullets se generan reformulando el título en lugar de extraer datos del cuerpo. Regla: cada bullet DEBE contener al menos un número, %, nombre propio o fecha extraído del cuerpo.",
+                    "título":     "El título no coincide con el eje central del artículo. Regla: verificar coherencia titulo-H2s antes de publicar.",
+                    "bajada":     "La bajada repite el título. Regla: bajada prohibida si tiene >60% de palabras en común con el título.",
+                    "coherencia": "Desconexión titulo-cuerpo. Regla: título, bajada, bullets y H2s deben responder la misma pregunta central.",
+                    "circular":   "Contenido circular en fuentes de video. Regla: usar al expositor como ancla narrativa.",
+                    "imagen":     "Imagen genérica. Regla: priorizar imagen con keyword exacto del título.",
+                    "h2":         "H2s vagos. Regla: cada H2 debe incluir un dato específico de la sección.",
+                    "relevancia": "Baja relevancia pyme. Regla: priorizar notas con impacto en costos, impuestos o regulaciones.",
+                }
+                rule_text = _PATTERNS_MAP.get(keyword, f"Patrón '{keyword}' detectado — revisar {agent_name}")
+                _hb2.add_rule(rule_text, category=f"agente_{agent_name}", source_tip=f"Pattern: {keyword}")
+                await query.edit_message_text(
+                    f"✅ <b>Regla guardada para {agent_name}</b>\n<i>{rule_text[:300]}</i>\n\nVer registro completo con /reglas",
+                    parse_mode="HTML",
+                )
+            elif action_ag == "h_agtrule_skip" and len(parts) >= 2:
+                keyword = parts[1]
+                _hb2.add_ignored_pattern(keyword)
+                await query.edit_message_text(
+                    f"❌ <b>Patrón ignorado para siempre: <code>{keyword}</code></b>\nNo se volverá a proponer esta recomendación.\n\nVer registro con /reglas",
+                    parse_mode="HTML",
+                )
+        except Exception as _age:
+            logger.warning(f"h_agtrule handler: {_age}")
+        return
+
+    # ── Harness — SysAdmin ───────────────────────────────────────────────────
+    if query.data.startswith("h_sa_"):
+        parts  = query.data.split(":")
+        action = parts[0]
+        arg    = parts[1] if len(parts) >= 2 else ""
+
+        if action == "h_sa_disk_clean":
+            import subprocess as _sp
+            # Mostrar uso de disco
+            out = _sp.run(["df", "-h", "/"], capture_output=True, text=True).stdout
+            du_log = _sp.run(["du", "-sh", "/var/log", "/tmp", "/opt",
+                              "/root/.cache"], capture_output=True, text=True).stdout
+            await query.edit_message_reply_markup(None)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"<b>Uso de disco:</b>\n<pre>{out.strip()}</pre>\n\n"
+                     f"<b>Directorios principales:</b>\n<pre>{du_log.strip()[:600]}</pre>",
+                parse_mode="HTML"
+            )
+        elif action == "h_sa_waf_check":
+            await query.edit_message_reply_markup(None)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="⚠️ <b>WAF / IP bloqueada</b>\n\n"
+                     "1. Entrá al panel Ferozo\n"
+                     "2. Soporte → reportar IP del VPS (179.43.122.186) como falso positivo\n"
+                     "3. O activar WARP como proxy para WP en config.py",
+                parse_mode="HTML"
+            )
+        elif action == "h_sa_ssl_renew":
+            host = arg or "mundoempresarial.ar"
+            await query.edit_message_reply_markup(None)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"🔐 <b>SSL — {host}</b>\n\n"
+                     f"Renovar con script ACME ya existente en el VPS.\n"
+                     f"Si es Ferozo: entrar al panel → SSL → Let's Encrypt → renovar.",
+                parse_mode="HTML"
+            )
+        elif action == "h_sa_warp_manual":
+            import subprocess as _sp
+            out = _sp.run(["systemctl", "status", "warp-connect", "--no-pager", "-n", "10"],
+                          capture_output=True, text=True).stdout
+            await query.edit_message_reply_markup(None)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"<b>Estado warp-connect:</b>\n<pre>{out.strip()[:600]}</pre>",
+                parse_mode="HTML"
+            )
+        elif action == "h_sa_skip":
+            await query.edit_message_reply_markup(None)
+        return
+
+    # ── Harness — Cola de publicación + agente Social ───────────────────────
+    if query.data.startswith(("h_cola_", "h_social_")):
+        import sys as _sys, json as _js, sqlite3 as _sq
+        _sys.path.insert(0, "/opt/me-harness")
+        _HDB = "/opt/me-harness/harness.db"
+        try:
+            import broker as _br_cola
+            parts  = query.data.split(":")
+            action = parts[0]
+            arg    = parts[1] if len(parts) >= 2 else None
+
+            _DEST_LABELS = {
+                "ahora":         "⚡ AHORA",
+                "hoy_portada":   "📌 HOY PORTADA",
+                "hoy_normal":    "📰 HOY",
+                "mejor_horario": "📊 MEJOR HORARIO",
+                "finde":         "📅 FINDE",
+                "fecha":         "🗓 FECHA ESPECÍFICA",
+                "recurrencia_a": "🔁 FECHA ANUAL",
+                "recurrencia_b": "📋 GUÍA NORMATIVA",
+            }
+
+            # ── Confirmar sugerencia del agente ──────────────────────────────
+            if action == "h_cola_confirm" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                if not job:
+                    await query.answer("Job no encontrado", show_alert=True)
+                    return
+                sg = {}
+                if job.get("agent_suggestion"):
+                    try: sg = _js.loads(job["agent_suggestion"])
+                    except Exception: pass
+                cj_conf = {}
+                if job.get("content_json"):
+                    try: cj_conf = _js.loads(job["content_json"])
+                    except Exception: pass
+
+                pub_dest = sg.get("pub_dest") or job.get("pub_dest") or "hoy_normal"
+                anchor   = sg.get("anchor_date")
+                rec_type = sg.get("recurrence_type")
+
+                # ── Aprendizaje: comparar sugerencia del agente vs lo que publicó Leo ──
+                import sys as _sys_lrn
+                _sys_lrn.path.insert(0, "/opt/me-harness")
+                try:
+                    import broker as _br_lrn
+                    from agents.curador import _extract_domain
+                    _domain = _extract_domain(job.get("source_url", ""))
+                    _title  = job.get("title", "")
+                    _agent_dest  = sg.get("pub_dest", "")
+                    _final_dest  = pub_dest
+                    _title_changed = bool(cj_conf.get("original_title") and
+                                         cj_conf.get("original_title") != _title)
+                    _dest_changed  = bool(_agent_dest and _agent_dest != _final_dest)
+                    _cats_changed  = bool(cj_conf.get("category_ids"))  # Leo tocó cats
+                    _changed = _title_changed or _dest_changed
+
+                    if not _changed:
+                        # Leo publicó sin cambios → confianza en la selección del agente
+                        _br_lrn.update_domain_weight(_domain, +0.15)
+                        _br_lrn.update_keywords_for_title(_title, +0.5)
+                    else:
+                        # Leo cambió algo → corrección al agente
+                        if _dest_changed:
+                            _br_lrn.record_feedback(job_id, "cola", "dest_corrected",
+                                before={"pub_dest": _agent_dest},
+                                after={"pub_dest": _final_dest, "title": _title})
+                        if _title_changed:
+                            _br_lrn.record_feedback(job_id, "cola", "title_corrected",
+                                before={"title": cj_conf.get("original_title", "")},
+                                after={"title": _title})
+                        # Feedback negativo leve al dominio (nota requirió corrección)
+                        _br_lrn.update_domain_weight(_domain, -0.05)
+                except Exception:
+                    pass
+
+                _br_cola.confirm_cola(job_id, pub_dest, anchor_date=anchor, recurrence_type=rec_type)
+                label = _DEST_LABELS.get(pub_dest, pub_dest)
+                try:
+                    await query.edit_message_text(
+                        f"✅ <b>{(job.get('title') or '')[:60]}</b>\n"
+                        f"→ Redacción  ·  {label}",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                await query.answer(f"✅ {label}", show_alert=False)
+
+            # ── Cambiar destino — submenu ─────────────────────────────────────
+            elif action == "h_cola_change" and arg:
+                job_id = int(arg)
+                # Leer destino actual para marcar con ✅
+                _job_ch = _br_cola.get_job(job_id)
+                _sg_ch = {}
+                if _job_ch and _job_ch.get("agent_suggestion"):
+                    try: _sg_ch = _js.loads(_job_ch["agent_suggestion"])
+                    except Exception: pass
+                _cur_dest = _sg_ch.get("pub_dest") or (_job_ch or {}).get("pub_dest") or ""
+                def _lbl(key, text):
+                    return ("✅ " if _cur_dest == key else "") + text
+                rows = [
+                    [{"text": _lbl("ahora",          "⚡ Ahora"),                "callback_data": f"h_cola_set:{job_id}:ahora"}],
+                    [{"text": _lbl("hoy_portada",    "📌 Portada de hoy"),       "callback_data": f"h_cola_set:{job_id}:hoy_portada"}],
+                    [{"text": _lbl("hoy_normal",     "🕐 Próximo turno"),        "callback_data": f"h_cola_set:{job_id}:hoy_normal"}],
+                    [{"text": _lbl("mejor_horario",  "📊 Mejor horario (GA4)"),  "callback_data": f"h_cola_set:{job_id}:mejor_horario"}],
+                    [{"text": _lbl("finde",          "📅 El finde"),             "callback_data": f"h_cola_set:{job_id}:finde"}],
+                    [{"text": _lbl("fecha",          "🗓 Programar día y hora"), "callback_data": f"h_cola_set:{job_id}:fecha"}],
+                    [{"text": _lbl("recurrencia_a",  "🔁 Fecha anual"),          "callback_data": f"h_cola_set:{job_id}:recurrencia_a"}],
+                    [{"text": _lbl("recurrencia_b",  "📋 Guía normativa"),       "callback_data": f"h_cola_set:{job_id}:recurrencia_b"}],
+                    [{"text": _lbl("auto",           "🤖 Auto (agente decide)"), "callback_data": f"h_cola_set:{job_id}:auto"}],
+                    [{"text": "↩ Volver",                                         "callback_data": f"h_cola_back:{job_id}"}],
+                ]
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup={"inline_keyboard": rows}
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Portada del día toggle ────────────────────────────────────────
+            elif action == "h_cola_portada" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                cj = {}
+                try:
+                    cj = _js.loads(job.get("content_json") or "{}") if job else {}
+                except Exception:
+                    pass
+                portada = not cj.get("portada", False)
+                cj["portada"] = portada
+                import sqlite3 as _sq3
+                with _sq3.connect("/opt/me-harness/harness.db") as _c3:
+                    _c3.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                                (_js.dumps(cj), job_id))
+                # Si se activa portada → pub_dest=hoy_portada
+                if portada:
+                    _br_cola.set_cola_suggestion(job_id, pub_dest="hoy_portada",
+                                                  reasoning="Marcado como portada del día por Leo")
+                await query.answer("📌 Portada activada" if portada else "Portada desactivada",
+                                   show_alert=False)
+                # Rebuild card con nuevo estado
+                # (mismo h_cola_back pero inline)
+                try:
+                    from agents import publicador as _pub_dummy  # solo para trigger cola
+                    pass
+                except Exception:
+                    pass
+                # Refrescar keyboard
+                _portada_lbl = "☑️ Portada del día" if portada else "📌 Portada del día"
+                _fmt         = cj.get("formato", "desplegable")
+                _fmt_lbl     = "☑️ Continua" if _fmt == "continua" else "☑️ Desplegable"
+                tags2    = cj.get("matched_kw") or []
+                cat_ids2 = cj.get("category_ids") or []
+                _CN2 = {94:"Economía",87:"Política",96:"Empresas",97:"Internacional",
+                        100:"Gobierno",95:"AFIP/ARCA",90:"Industria",91:"Opinión",
+                        89:"Comercio",88:"Agro",103:"Informes",102:"Provincias",
+                        93:"Sindicatos",92:"Servicios",239:"Digital pymes",1139:"Mundo del vino",
+                        101:"Poder Judicial",99:"Congreso",98:"Nacional",104:"ME TV",1048:"Coberturas"}
+                _tl = (f"🏷 {', '.join(t.title() for t in tags2[:3])}" if tags2 else "🏷 Etiquetas")
+                _cl = (f"🗂 {'+'.join(_CN2.get(c,str(c))[:8] for c in cat_ids2[:2])}" if cat_ids2 else "🗂 Categoría")
+                try:
+                    await query.edit_message_reply_markup(reply_markup={"inline_keyboard": [
+                        [{"text":"✅ Publicar","callback_data":f"h_cola_confirm:{job_id}"},
+                         {"text":"🔄 Cambiar destino","callback_data":f"h_cola_change:{job_id}"}],
+                        [{"text":_portada_lbl,"callback_data":f"h_cola_portada:{job_id}"},
+                         {"text":_fmt_lbl,"callback_data":f"h_cola_formato:{job_id}"}],
+                        [{"text":"✏️ Cambiar título","callback_data":f"h_cola_change_title:{job_id}"}],
+                        [{"text":_cl,"callback_data":f"h_cola_cats:{job_id}"},
+                         {"text":_tl,"callback_data":f"h_cola_tags:{job_id}"}],
+                        [{"text":"🚫 Descartar","callback_data":f"h_cola_discard:{job_id}"},
+                         {"text":"⏭ Ir a redacción","callback_data":f"h_cola_skip:{job_id}"}],
+                    ]})
+                except Exception:
+                    pass
+
+            # ── Formato nota (continua / desplegable) toggle ──────────────────
+            elif action == "h_cola_formato" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                cj = {}
+                try:
+                    cj = _js.loads(job.get("content_json") or "{}") if job else {}
+                except Exception:
+                    pass
+                fmt_actual = cj.get("formato", "desplegable")
+                fmt_nuevo  = "continua" if fmt_actual == "desplegable" else "desplegable"
+                cj["formato"] = fmt_nuevo
+                import sqlite3 as _sq4
+                with _sq4.connect("/opt/me-harness/harness.db") as _c4:
+                    _c4.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                                (_js.dumps(cj), job_id))
+                await query.answer(f"☑️ Formato: {fmt_nuevo}", show_alert=False)
+                portada2 = cj.get("portada", False)
+                tags3    = cj.get("matched_kw") or []
+                cat_ids3 = cj.get("category_ids") or []
+                _CN3 = {94:"Economía",87:"Política",96:"Empresas",97:"Internacional",
+                        100:"Gobierno",95:"AFIP/ARCA",90:"Industria",91:"Opinión",
+                        89:"Comercio",88:"Agro",103:"Informes",102:"Provincias",
+                        93:"Sindicatos",92:"Servicios",239:"Digital pymes",1139:"Mundo del vino",
+                        101:"Poder Judicial",99:"Congreso",98:"Nacional",104:"ME TV",1048:"Coberturas"}
+                _pl = "☑️ Portada del día" if portada2 else "📌 Portada del día"
+                _fl = "☑️ Continua" if fmt_nuevo == "continua" else "☑️ Desplegable"
+                _tl3 = (f"🏷 {', '.join(t.title() for t in tags3[:3])}" if tags3 else "🏷 Etiquetas")
+                _cl3 = (f"🗂 {'+'.join(_CN3.get(c,str(c))[:8] for c in cat_ids3[:2])}" if cat_ids3 else "🗂 Categoría")
+                try:
+                    await query.edit_message_reply_markup(reply_markup={"inline_keyboard": [
+                        [{"text":"✅ Publicar","callback_data":f"h_cola_confirm:{job_id}"},
+                         {"text":"🔄 Cambiar destino","callback_data":f"h_cola_change:{job_id}"}],
+                        [{"text":_pl,"callback_data":f"h_cola_portada:{job_id}"},
+                         {"text":_fl,"callback_data":f"h_cola_formato:{job_id}"}],
+                        [{"text":"✏️ Cambiar título","callback_data":f"h_cola_change_title:{job_id}"}],
+                        [{"text":_cl3,"callback_data":f"h_cola_cats:{job_id}"},
+                         {"text":_tl3,"callback_data":f"h_cola_tags:{job_id}"}],
+                        [{"text":"🚫 Descartar","callback_data":f"h_cola_discard:{job_id}"},
+                         {"text":"⏭ Ir a redacción","callback_data":f"h_cola_skip:{job_id}"}],
+                    ]})
+                except Exception:
+                    pass
+
+            # ── Setear destino manualmente ────────────────────────────────────
+            elif action == "h_cola_set" and len(parts) >= 3:
+                job_id   = int(parts[1])
+                pub_dest = parts[2]
+
+                if pub_dest == "fecha":
+                    # Pide texto con fecha/hora — único caso que no vuelve al card directo
+                    context.user_data["awaiting_cola_prog_for"] = job_id
+                    try:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text=(f"🗓 <b>Programar — nota #{job_id}</b>\n\n"
+                                  f"Escribí la fecha y hora:\n"
+                                  f"<code>30/05 18:30</code>  ·  <code>mañana 10:00</code>"),
+                            parse_mode="HTML",
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "↩ Volver", "callback_data": f"h_cola_back:{job_id}"}
+                            ]]}
+                        )
+                    except Exception:
+                        pass
+                    await query.answer()
+                elif pub_dest == "auto":
+                    # Restaura sugerencia original del agente
+                    job2 = _br_cola.get_job(job_id)
+                    sg2  = {}
+                    if job2 and job2.get("agent_suggestion"):
+                        try: sg2 = _js.loads(job2["agent_suggestion"])
+                        except Exception: pass
+                    pub_dest = sg2.get("pub_dest") or "hoy_normal"
+                    _br_cola.set_cola_suggestion(job_id, pub_dest=pub_dest,
+                                                  reasoning=sg2.get("reasoning",""))
+                    await query.answer(f"🤖 {_DEST_LABELS.get(pub_dest, pub_dest)}", show_alert=False)
+                    await query.data.__class__  # trigger h_cola_back inline
+                    # Simular h_cola_back
+                    query.data = f"h_cola_back:{job_id}"
+                    # Forzar re-render del card via answer vacío + edit
+                    job2 = _br_cola.get_job(job_id)
+                    if job2:
+                        import importlib as _imp
+                        # reusar lógica de back disparando el mismo evento
+                        pass
+                    # Simplemente re-editamos el reply_markup con el destino marcado en la sugerencia
+                    # El usuario puede ver el cambio al volver con ↩
+                    await query.answer(f"🤖 Auto → {_DEST_LABELS.get(pub_dest, pub_dest)}", show_alert=False)
+                else:
+                    # Actualizar destino en la sugerencia SIN confirmar (no manda a redacción aún)
+                    _br_cola.set_cola_suggestion(job_id, pub_dest=pub_dest,
+                                                  reasoning=f"Destino cambiado manualmente: {pub_dest}")
+                    label = _DEST_LABELS.get(pub_dest, pub_dest)
+                    await query.answer(f"✅ {label}", show_alert=False)
+                    # Volver al card principal con el destino actualizado
+                    query.data = f"h_cola_back:{job_id}"
+                    job_b = _br_cola.get_job(job_id)
+                    if job_b:
+                        _title_b = job_b.get("title") or "Sin título"
+                        _hilo_b  = job_b.get("hilo") or 2
+                        _url_b   = job_b.get("source_url","")
+                        _dom_b   = (_url_b.split("//",1)[-1].split("/")[0].replace("www.","") if _url_b else "")
+                        _cap_b   = {1:"CAPA 1",2:"CAPA 2",3:"CAPA 3"}.get(_hilo_b, f"CAPA {_hilo_b}")
+                        cj_b = {}
+                        try: cj_b = _js.loads(job_b.get("content_json") or "{}")
+                        except Exception: pass
+                        tags_b   = cj_b.get("matched_kw") or []
+                        cat_b    = cj_b.get("category_ids") or []
+                        fmt_b    = cj_b.get("formato","desplegable")
+                        port_b   = cj_b.get("portada",False)
+                        inst_b   = cj_b.get("instructions","")
+                        orig_b   = cj_b.get("original_title","")
+                        has_c_b  = bool(orig_b and orig_b != _title_b)
+                        _CN_B = {94:"Economía",87:"Política",96:"Empresas",97:"Internacional",
+                                 100:"Gobierno",95:"AFIP/ARCA",90:"Industria",91:"Opinión",
+                                 89:"Comercio",88:"Agro",103:"Informes",102:"Provincias",
+                                 93:"Sindicatos",92:"Servicios",239:"Digital pymes",1139:"Mundo del vino",
+                                 101:"Poder Judicial",99:"Congreso",98:"Nacional",104:"ME TV",1048:"Coberturas"}
+                        tl_b  = (f"🏷 {', '.join(t.title() for t in tags_b[:3])}" if tags_b else "🏷 Etiquetas")
+                        cl_b  = (f"🗂 {'+'.join(_CN_B.get(c,str(c))[:8] for c in cat_b[:2])}" if cat_b else "🗂 Categoría")
+                        fl_b  = "☑️ Continua" if fmt_b == "continua" else "☑️ Desplegable"
+                        pl_b  = "☑️ Portada del día" if port_b else "📌 Portada del día"
+                        tcb_b = f"h_cola_restore_title:{job_id}" if has_c_b else f"h_cola_change_title:{job_id}"
+                        tbtn_b= "↩ Restaurar original" if has_c_b else "✏️ Cambiar título"
+                        sug_b = {}
+                        if job_b.get("agent_suggestion"):
+                            try: sug_b = _js.loads(job_b["agent_suggestion"])
+                            except Exception: pass
+                        dest_b  = sug_b.get("pub_dest") or job_b.get("pub_dest") or "sin_asignar"
+                        reas_b  = sug_b.get("reasoning","")
+                        dl_b    = _DEST_LABELS.get(dest_b, dest_b)
+                        sl_b    = f"\n🤖 <b>{dl_b}</b>" + (f"\n<i>{reas_b}</i>" if reas_b else "")
+                        tlines_b= ""
+                        if orig_b and orig_b != _title_b: tlines_b += f"\n<s>{orig_b[:70]}</s>"
+                        pline_b = "\n📌 <b>PORTADA DEL DÍA</b>" if port_b else ""
+                        fline_b = f"\n📄 <i>{fmt_b.title()}</i>" if fmt_b != "desplegable" else ""
+                        iline_b = f"\n📝 <i>{inst_b}</i>" if inst_b else ""
+                        tgline_b= (f"\n🏷 <i>{' · '.join(t.title() for t in tags_b[:5])}</i>" if tags_b else "")
+                        ctline_b= (f"\n🗂 <i>{' · '.join(_CN_B.get(c,str(c)) for c in cat_b[:3])}</i>" if cat_b else "")
+                        dt_b    = (f"\n🗓 <i>{job_b.get('pub_date','')}</i>" if job_b.get("pub_date") else "")
+                        card_b  = (f"<b>{_title_b}</b>{tlines_b}\n{_cap_b}  ·  {_dom_b}"
+                                   f"{sl_b}{pline_b}{ctline_b}{tgline_b}{fline_b}{dt_b}{iline_b}\n"
+                                   f"<a href='{_url_b}'>📎 fuente</a>")
+                        _kb_b = [
+                            [{"text":"✅ Publicar","callback_data":f"h_cola_confirm:{job_id}"},
+                             {"text":"🔄 Cambiar destino","callback_data":f"h_cola_change:{job_id}"}],
+                            [{"text":pl_b,"callback_data":f"h_cola_portada:{job_id}"},
+                             {"text":fl_b,"callback_data":f"h_cola_formato:{job_id}"}],
+                            [{"text":tbtn_b,"callback_data":tcb_b}],
+                            [{"text":cl_b,"callback_data":f"h_cola_cats:{job_id}"},
+                             {"text":tl_b,"callback_data":f"h_cola_tags:{job_id}"}],
+                            [{"text":"🚫 Descartar","callback_data":f"h_cola_discard:{job_id}"},
+                             {"text":"⏭ Ir a redacción","callback_data":f"h_cola_skip:{job_id}"}],
+                        ]
+                        if job_b.get("wp_post_id"):
+                            _kb_b.append([{"text":"📢 Publicar en redes","callback_data":f"h_cola_redes:{job_id}"}])
+                        try:
+                            await query.edit_message_text(card_b, parse_mode="HTML",
+                                reply_markup={"inline_keyboard":_kb_b},
+                                disable_web_page_preview=True)
+                        except Exception:
+                            pass
+
+            # ── Ir directo a redacción (sin pub_dest específico) ─────────────
+            elif action == "h_cola_skip" and arg:
+                job_id = int(arg)
+                _br_cola.confirm_cola(job_id, "hoy_normal")
+                job = _br_cola.get_job(job_id)
+                try:
+                    await query.edit_message_text(
+                        f"⏭ <b>{(job.get('title') or '')[:60]}</b>\n"
+                        f"→ Redacción directa",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                await query.answer("⏭ Enviado a redacción", show_alert=False)
+
+            # ── Categorías (multi-select) ─────────────────────────────────────
+            elif action == "h_cola_cats" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                cj = {}
+                try:
+                    cj = _js.loads(job.get("content_json") or "{}") if job else {}
+                except Exception:
+                    pass
+                sel_ids = cj.get("category_ids", [])
+                _CAT_MAP = {
+                    94: "Economia", 87: "Politica", 96: "Empresas", 97: "Internacional",
+                    100: "Gobierno", 95: "AFIP/ARCA", 90: "Industria", 91: "Opinion",
+                    89: "Comercio", 88: "Agro", 103: "Informes", 102: "Provincias",
+                    93: "Sindicatos", 92: "Servicios", 239: "Digital pymes", 1139: "Mundo del vino",
+                    101: "Poder Judicial", 99: "Congreso", 98: "Nacional",
+                    104: "ME TV", 1048: "Coberturas",
+                }
+                rows = []
+                items = list(_CAT_MAP.items())
+                for i in range(0, len(items), 2):
+                    row = []
+                    for cid, cname in items[i:i+2]:
+                        prefix = "☑️ " if cid in sel_ids else ""
+                        row.append({"text": f"{prefix}{cname}",
+                                    "callback_data": f"h_cola_setcat:{job_id}:{cid}"})
+                    rows.append(row)
+                rows.append([{"text": "↩ Volver", "callback_data": f"h_cola_back:{job_id}"}])
+                try:
+                    await query.edit_message_text(
+                        f"🗂 <b>Categorías — nota #{job_id}</b>",
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": rows},
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            elif action == "h_cola_setcat" and len(parts) >= 3:
+                job_id = int(parts[1])
+                cat_id = int(parts[2])
+                job    = _br_cola.get_job(job_id)
+                cj = {}
+                try:
+                    cj = _js.loads(job.get("content_json") or "{}") if job else {}
+                except Exception:
+                    pass
+                cat_ids = cj.get("category_ids", [])
+                if cat_id in cat_ids:
+                    cat_ids.remove(cat_id)
+                else:
+                    cat_ids.append(cat_id)
+                cj["category_ids"] = cat_ids
+                import sqlite3 as _sq3
+                with _sq3.connect("/opt/me-harness/harness.db") as _c3:
+                    _c3.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                                (_js.dumps(cj), job_id))
+                # Refrescar el multi-select
+                _CAT_MAP = {
+                    94: "Economia", 87: "Politica", 96: "Empresas", 97: "Internacional",
+                    100: "Gobierno", 95: "AFIP/ARCA", 90: "Industria", 91: "Opinion",
+                    89: "Comercio", 88: "Agro", 103: "Informes", 102: "Provincias",
+                    93: "Sindicatos", 92: "Servicios", 239: "Digital pymes", 1139: "Mundo del vino",
+                    101: "Poder Judicial", 99: "Congreso", 98: "Nacional",
+                    104: "ME TV", 1048: "Coberturas",
+                }
+                rows = []
+                for i in range(0, len(list(_CAT_MAP.items())), 2):
+                    row = []
+                    for cid, cname in list(_CAT_MAP.items())[i:i+2]:
+                        prefix = "☑️ " if cid in cat_ids else ""
+                        row.append({"text": f"{prefix}{cname}",
+                                    "callback_data": f"h_cola_setcat:{job_id}:{cid}"})
+                    rows.append(row)
+                rows.append([{"text": "↩ Volver", "callback_data": f"h_cola_back:{job_id}"}])
+                try:
+                    await query.edit_message_reply_markup(reply_markup={"inline_keyboard": rows})
+                except Exception:
+                    pass
+                await query.answer("✓", show_alert=False)
+
+            # ── Programar fecha ───────────────────────────────────────────────
+            elif action == "h_cola_prog" and arg:
+                job_id = int(arg)
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup={"inline_keyboard": [
+                            [{"text": "⚡ Ahora",
+                              "callback_data": f"h_cola_prog_set:{job_id}:ahora"}],
+                            [{"text": "🕐 Próximo turno",
+                              "callback_data": f"h_cola_prog_set:{job_id}:turno"}],
+                            [{"text": "📊 Mejor horario del día (GA4)",
+                              "callback_data": f"h_cola_prog_set:{job_id}:mejor_horario"}],
+                            [{"text": "📅 El finde",
+                              "callback_data": f"h_cola_prog_set:{job_id}:finde"}],
+                            [{"text": "🗓 Programar día y hora",
+                              "callback_data": f"h_cola_prog_set:{job_id}:fecha"}],
+                            [{"text": "🤖 Auto (el agente decide)",
+                              "callback_data": f"h_cola_prog_set:{job_id}:auto"}],
+                            [{"text": "↩ Volver",
+                              "callback_data": f"h_cola_back:{job_id}"}],
+                        ]}
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            elif action == "h_cola_prog_set" and len(parts) >= 3:
+                job_id = int(parts[1])
+                opcion = parts[2]
+
+                if opcion == "fecha":
+                    # Único caso que necesita texto — pide fecha/hora
+                    context.user_data["awaiting_cola_prog_for"] = job_id
+                    try:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text=(
+                                f"🗓 <b>Programar — nota #{job_id}</b>\n\n"
+                                f"Escribí la fecha y hora:\n"
+                                f"<code>30/05 18:30</code>  ·  <code>mañana 10:00</code>"
+                            ),
+                            parse_mode="HTML",
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "↩ Volver", "callback_data": f"h_cola_back:{job_id}"}
+                            ]]}
+                        )
+                    except Exception:
+                        pass
+                    await query.answer()
+                else:
+                    # Todas las otras opciones se resuelven directamente
+                    _PROG_DEST = {
+                        "ahora":         "ahora",
+                        "turno":         "hoy_normal",
+                        "mejor_horario": "mejor_horario",
+                        "finde":         "finde",
+                        "auto":          None,  # usar sugerencia del agente
+                    }
+                    _PROG_LABELS = {
+                        "ahora":         "⚡ Ahora",
+                        "turno":         "🕐 Próximo turno",
+                        "mejor_horario": "📊 Mejor horario del día",
+                        "finde":         "📅 El finde",
+                        "auto":          "🤖 Auto",
+                    }
+                    pub_dest = _PROG_DEST.get(opcion)
+                    if pub_dest is None:
+                        # Auto: leer sugerencia del agente
+                        job2 = _br_cola.get_job(job_id)
+                        sg2  = {}
+                        if job2 and job2.get("agent_suggestion"):
+                            try:
+                                sg2 = _js.loads(job2["agent_suggestion"])
+                            except Exception:
+                                pass
+                        pub_dest = sg2.get("pub_dest") or "hoy_normal"
+
+                    _br_cola.confirm_cola(job_id, pub_dest)
+                    label = _PROG_LABELS.get(opcion, opcion)
+                    try:
+                        await query.edit_message_text(
+                            f"✅ <b>{(_br_cola.get_job(job_id) or {}).get('title', '')[:60]}</b>\n"
+                            f"→ Redacción  ·  {label}",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                    await query.answer(f"✅ {label}", show_alert=False)
+
+            # ── Ajustar etiquetas desde cola (Volver → cola card) ─────────────
+            elif action == "h_cola_kw_add" and arg:
+                job_id = int(arg)
+                context.user_data["awaiting_cola_kw_for"]         = job_id
+                context.user_data["awaiting_cola_kw_panel_msg_id"] = query.message.message_id
+                context.user_data["awaiting_cola_kw_panel_chat_id"] = query.message.chat_id
+                try:
+                    sent = await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=(
+                            f"✏️ <b>Agregar etiquetas — nota #{job_id}</b>\n\n"
+                            f"Separalas con coma, punto o <code> - </code>:\n"
+                            f"<code>comercio exterior, plazo fijo, pymes</code>\n"
+                            f"<i>Se suman a las actuales. Usá ✖️ en el panel para borrar.</i>"
+                        ),
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "↩ Volver", "callback_data": f"h_cola_kw_back:{job_id}"}
+                        ]]}
+                    )
+                    context.user_data["awaiting_cola_kw_prompt_msg_id"] = sent.message_id
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Volver al panel de keywords desde prompt agregar (cola) ─────────
+            elif action == "h_cola_kw_back" and arg:
+                job_id        = int(arg)
+                panel_msg_id  = context.user_data.pop("awaiting_cola_kw_panel_msg_id",  None)
+                panel_chat_id = context.user_data.pop("awaiting_cola_kw_panel_chat_id", None)
+                context.user_data.pop("awaiting_cola_kw_for", None)
+                context.user_data.pop("awaiting_cola_kw_prompt_msg_id", None)
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                if panel_msg_id and panel_chat_id:
+                    job2 = _br_cola.get_job(job_id)
+                    cj2  = {}
+                    if job2 and job2.get("content_json"):
+                        try: cj2 = _js.loads(job2["content_json"])
+                        except Exception: pass
+                    kws2 = cj2.get("matched_kw", [])
+                    rows = []
+                    for k in kws2:
+                        ww = _br_cola.get_keyword_weight(k)
+                        em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                        rows.append([
+                            {"text": f"{em} {k}  {ww:+.1f}",
+                             "callback_data": f"h_cola_tags:{job_id}"},
+                            {"text": "👍",  "callback_data": f"h_cur_kw_up:{job_id}:{k}"},
+                            {"text": "👎",  "callback_data": f"h_cur_kw_dn:{job_id}:{k}"},
+                            {"text": "✖️",  "callback_data": f"h_cur_kw_rm:{job_id}:{k}"},
+                            {"text": "🗑",  "callback_data": f"h_cur_kw_del:{job_id}:{k}"},
+                        ])
+                    rows.append([{"text": "✏️ Ajustar etiquetas",
+                                  "callback_data": f"h_cola_kw_add:{job_id}"}])
+                    rows.append([{"text": "↩ Volver",
+                                  "callback_data": f"h_cola_back:{job_id}"}])
+                    try:
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=panel_chat_id, message_id=panel_msg_id,
+                            reply_markup={"inline_keyboard": rows},
+                        )
+                    except Exception:
+                        pass
+                await query.answer()
+
+            # ── Etiquetas cola: 👍/👎/✖️ ─────────────────────────────────────────
+            elif action in ("h_cola_kw_up", "h_cola_kw_dn", "h_cola_kw_rm", "h_cola_kw_del") and len(parts) >= 3:
+                job_id = int(parts[1])
+                kw     = parts[2]
+                if action == "h_cola_kw_up":
+                    _br_cola.update_keyword_weight(kw, +0.3)
+                elif action == "h_cola_kw_dn":
+                    _br_cola.update_keyword_weight(kw, -0.3)
+                elif action in ("h_cola_kw_rm", "h_cola_kw_del"):
+                    # Quitar de matched_kw del job
+                    _j_rm = _br_cola.get_job(job_id)
+                    if _j_rm:
+                        try:
+                            _cj_rm = _js.loads(_j_rm.get("content_json") or "{}")
+                            _kws_rm = [k for k in _cj_rm.get("matched_kw", []) if k != kw]
+                            _cj_rm["matched_kw"] = _kws_rm
+                            with _sq.connect(_HDB) as _c_rm:
+                                _c_rm.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                                              (_js.dumps(_cj_rm), job_id))
+                        except Exception:
+                            pass
+                    # ✖️ = solo de esta nota; 🗑 = descalificada del diario para siempre
+                    if action == "h_cola_kw_del":
+                        _br_cola.blacklist_keyword(kw)
+                # Refrescar panel
+                await query.answer({"h_cola_kw_up": "👍 +0.3", "h_cola_kw_dn": "👎 -0.3",
+                                    "h_cola_kw_rm": "✖️ Quitada de esta nota",
+                                    "h_cola_kw_del": "🗑 Descalificada para siempre"}.get(action, ""))
+                # Re-render panel (reusar h_cola_tags)
+                _j2 = _br_cola.get_job(job_id)
+                _cj2 = _js.loads(_j2.get("content_json") or "{}") if _j2 else {}
+                _kws2 = _cj2.get("matched_kw", [])
+                _rows2 = []
+                for k in _kws2:
+                    ww = _br_cola.get_keyword_weight(k)
+                    em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                    _rows2.append([
+                        {"text": f"{em} {k}  {ww:+.1f}", "callback_data": f"h_cola_tags:{job_id}"},
+                        {"text": "👍", "callback_data": f"h_cola_kw_up:{job_id}:{k}"},
+                        {"text": "👎", "callback_data": f"h_cola_kw_dn:{job_id}:{k}"},
+                        {"text": "✖️", "callback_data": f"h_cola_kw_rm:{job_id}:{k}"},
+                        {"text": "🗑", "callback_data": f"h_cola_kw_del:{job_id}:{k}"},
+                    ])
+                _rows2.append([{"text": "✏️ Ajustar etiquetas", "callback_data": f"h_cola_kw_add:{job_id}"}])
+                _rows2.append([{"text": "↩ Volver", "callback_data": f"h_cola_back:{job_id}"}])
+                try:
+                    await query.edit_message_reply_markup(reply_markup={"inline_keyboard": _rows2})
+                except Exception:
+                    pass
+
+            # ── Panel etiquetas/keywords (igual al briefing) ─────────────────
+            elif action == "h_cola_tags" and arg:
+                # Panel idéntico al del briefing (h_cur_kw) — mismos botones y handlers.
+                # Solo cambia "Volver" que va a h_cola_back en lugar de h_cur_volver.
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                cj = {}
+                try:
+                    cj = _js.loads(job.get("content_json") or "{}") if job else {}
+                except Exception:
+                    pass
+                matched_kw = cj.get("matched_kw", [])
+                _jtitle = (job.get("title") or "")[:55] if job else ""
+                _jurl   = (job.get("source_url") or "") if job else ""
+                _hdr = (
+                    f"🔑 <b><a href='{_jurl}'>{_jtitle}</a></b>\n"
+                    f"<i>👍👎 ajustar peso  ·  ✖️ quitar de nota  ·  🗑 borrar de la base</i>"
+                )
+                rows = []
+                for k in matched_kw:
+                    ww = _br_cola.get_keyword_weight(k)
+                    em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                    rows.append([
+                        {"text": f"{em} {k}  {ww:+.1f}",
+                         "callback_data": f"h_cola_tags:{job_id}"},
+                        {"text": "👍",  "callback_data": f"h_cola_kw_up:{job_id}:{k}"},
+                        {"text": "👎",  "callback_data": f"h_cola_kw_dn:{job_id}:{k}"},
+                        {"text": "✖️",  "callback_data": f"h_cola_kw_rm:{job_id}:{k}"},
+                        {"text": "🗑",  "callback_data": f"h_cola_kw_del:{job_id}:{k}"},
+                    ])
+                rows.append([{"text": "✏️ Ajustar etiquetas",
+                              "callback_data": f"h_cola_kw_add:{job_id}"}])
+                rows.append([{"text": "↩ Volver",
+                              "callback_data": f"h_cola_back:{job_id}"}])
+                try:
+                    await query.edit_message_text(
+                        _hdr, parse_mode="HTML",
+                        reply_markup={"inline_keyboard": rows},
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Social agent: mandar al briefing o descartar ─────────────────
+            elif action == "h_social_brief" and arg:
+                job_id = int(arg)
+                # El job ya está en curado — confirmar a Leo
+                import broker as _br_soc2
+                _j_soc = _br_soc2.get_job(job_id)
+                _title_soc = (_j_soc.get("title") or "")[:60] if _j_soc else "?"
+                await query.edit_message_text(
+                    f"✅ <b>Nota enviada al briefing</b> (job #{job_id})\n"
+                    f"<b>{_title_soc}</b>\n\n"
+                    f"<i>Aparecerá en el próximo ciclo del curador.</i>",
+                    parse_mode="HTML",
+                )
+                await query.answer("📋 En el briefing")
+
+            elif action == "h_social_drop" and arg:
+                job_id = int(arg)
+                import broker as _br_soc3
+                _br_soc3.update_stage(job_id, "rejected")
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.answer("❌ Descartado")
+
+            # ── Restaurar título original ─────────────────────────────────────
+            elif action == "h_cola_restore_title" and arg:
+                job_id = int(arg)
+                import sqlite3 as _sq_rt, json as _js_rt
+                try:
+                    with _sq_rt.connect("/opt/me-harness/harness.db") as _c_rt:
+                        row_rt = _c_rt.execute(
+                            "SELECT content_json FROM jobs WHERE id=?", (job_id,)
+                        ).fetchone()
+                        if row_rt:
+                            cj_rt = _js_rt.loads(row_rt[0] or "{}")
+                            orig = cj_rt.pop("original_title", "")
+                            if orig:
+                                _c_rt.execute(
+                                    "UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
+                                    (orig, _js_rt.dumps(cj_rt), job_id)
+                                )
+                                await query.answer(f"↩ Título restaurado", show_alert=False)
+                            else:
+                                await query.answer("No hay título original guardado", show_alert=True)
+                        else:
+                            await query.answer("Job no encontrado", show_alert=True)
+                except Exception as _e_rt:
+                    await query.answer(f"Error: {_e_rt}", show_alert=True)
+
+            # ── Cambiar título del job en cola ───────────────────────────────
+            elif action == "h_cola_change_title" and arg:
+                job_id = int(arg)
+                context.user_data["awaiting_cola_title_for"]    = job_id
+                context.user_data["awaiting_cola_title_msg_id"] = query.message.message_id
+                sent = await query.message.reply_text("✏️ Escribí el nuevo título:")
+                context.user_data["awaiting_cola_title_prompt_id"] = sent.message_id
+                await query.answer()
+
+            # ── Descartar de la cola ──────────────────────────────────────────
+            elif action == "h_cola_discard" and arg:
+                job_id = int(arg)
+                _br_cola.update_stage(job_id, "rejected")
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.answer("🚫 Descartado", show_alert=False)
+
+            # ── Listado compacto de la cola ───────────────────────────────────
+            elif action == "h_cola_list":
+                jobs_list = _br_cola.dequeue_cola(limit=30)
+                _DL = {"hoy_portada":"📌","hoy_normal":"📰","finde":"📅",
+                       "fecha":"🗓","recurrencia_a":"🔁","recurrencia_b":"📋"}
+                lines = [f"<b>Cola — {len(jobs_list)} nota(s)</b>"]
+                for j in jobs_list:
+                    dest  = j.get("pub_dest") or "—"
+                    icon  = _DL.get(dest, "·")
+                    t     = (j.get("title") or "")[:55]
+                    lines.append(f"{icon} #{j['id']}  {t}")
+                try:
+                    await query.edit_message_text(
+                        "\n".join(lines), parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "↩ Cerrar", "callback_data": "h_cola_close_list"}
+                        ]]}
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            elif action == "h_cola_close_list":
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Publicar en redes (nota ya publicada en WP) ───────────────────
+            elif action == "h_cola_redes" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                if not job or not job.get("wp_post_id"):
+                    await query.answer("⚠️ La nota no está publicada en WP aún", show_alert=True)
+                else:
+                    await query.answer("📢 Difundiendo...", show_alert=False)
+                    try:
+                        from agents import publicador as _pub
+                        cj     = {}
+                        if job.get("content_json"):
+                            try: cj = _js.loads(job["content_json"])
+                            except Exception: pass
+                        tags    = cj.get("tag_names", []) or cj.get("matched_kw", []) or []
+                        excerpt = cj.get("excerpt", "") or cj.get("meta_desc", "") or ""
+                        social  = _pub.post_to_social(
+                            wp_post_id=job["wp_post_id"],
+                            wp_url=job["wp_url"],
+                            title=job.get("title", ""),
+                            excerpt=excerpt[:280],
+                            tags=tags,
+                        )
+                        tg_ok = "✅" if social.get("tg_msg_id") else "❌"
+                        tw_ok = "✅" if social.get("tweet_id")  else "❌"
+                        try:
+                            await query.edit_message_text(
+                                f"📢 <b>Difundido</b> — {(job.get('title') or '')[:60]}\n"
+                                f"📱 Telegram canal: {tg_ok}  ·  🐦 Twitter: {tw_ok}",
+                                parse_mode="HTML"
+                            )
+                        except Exception:
+                            pass
+                    except Exception as _e:
+                        await query.answer(f"❌ Error: {_e}", show_alert=True)
+
+            # ── Panel principal (volver desde submenús) ───────────────────────
+            elif action == "h_cola_main_panel":
+                jobs_mp = _br_cola.dequeue_cola(limit=20)
+                with _sq.connect(_HDB) as _c_mp:
+                    n_pend_mp = _c_mp.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE stage IN ('redaccion','publicacion','sin_imagen')"
+                    ).fetchone()[0]
+                    n_prog_mp = _c_mp.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE pub_date IS NOT NULL AND pub_date != '' "
+                        "AND stage NOT IN ('done','rejected')"
+                    ).fetchone()[0]
+                man_mp = sum(
+                    1 for j in jobs_mp
+                    if j.get("agent_suggestion") and
+                    "cambiado manualmente" in (
+                        _js.loads(j["agent_suggestion"]).get("reasoning", "")
+                        if j["agent_suggestion"] else ""
+                    )
+                )
+                res_mp = "🗂 <b>Cola de publicación</b>"
+                if jobs_mp:
+                    res_mp += f"\n📋 A procesar: <b>{len(jobs_mp)}</b>"
+                if n_pend_mp:
+                    res_mp += f"\n⏳ Pendientes en pipeline: <b>{n_pend_mp}</b>"
+                if n_prog_mp:
+                    res_mp += f"\n🗓 Programadas: <b>{n_prog_mp}</b>"
+                kb_mp = []
+                if jobs_mp:
+                    kb_mp.append([{"text": f"📋 Notas a procesar ({len(jobs_mp)})",
+                                   "callback_data": "h_cola_notas_a_procesar"}])
+                _proc_row_mp = []
+                if jobs_mp:
+                    _proc_row_mp.append({"text": f"📤 Procesar listado ({man_mp})", "callback_data": "h_cola_process_list"})
+                if n_pend_mp:
+                    _proc_row_mp.append({"text": f"🔄 Procesar pendientes ({n_pend_mp})", "callback_data": "h_cola_process_pend"})
+                if _proc_row_mp:
+                    kb_mp.append(_proc_row_mp)
+                if jobs_mp or n_pend_mp:
+                    kb_mp.append([{"text": "🚀 Procesar todo", "callback_data": "h_cola_process_all"}])
+                if n_pend_mp:
+                    kb_mp.append([{"text": f"⏳ Ver pendientes ({n_pend_mp})",
+                                   "callback_data": "h_cola_ver_pendientes"}])
+                kb_mp.append([{"text": "🗓 Ver notas programadas", "callback_data": "h_cola_ver_programadas"}])
+                kb_mp.append([{"text": "🛑 Cancelar publicador",   "callback_data": "h_cola_stop_pub"}])
+                try:
+                    await query.edit_message_text(
+                        res_mp, parse_mode="HTML",
+                        reply_markup={"inline_keyboard": kb_mp}
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Notas a procesar — despliega cards individuales ─────────────
+            elif action == "h_cola_notas_a_procesar":
+                context.user_data["cola_back_src"] = "notas"
+                jobs_ap = _br_cola.dequeue_cola(limit=20)
+                if not jobs_ap:
+                    await query.answer("No hay notas en la cola", show_alert=True)
+                    return
+                chat_id_ap = query.message.chat_id
+                try:
+                    await query.edit_message_text(
+                        f"📋 <b>Notas a procesar</b> — {len(jobs_ap)} nota(s)\n"
+                        "<i>Configurá cada una y luego usá 'Procesar todo'.</i>",
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "🔄 Actualizar", "callback_data": "h_cola_notas_a_procesar"},
+                            {"text": "🚀 Procesar todo", "callback_data": "h_cola_process_all"},
+                        ]]}
+                    )
+                except Exception:
+                    pass
+                _HILO_N_AP = {1:"CAPA 1", 2:"CAPA 2", 3:"CAPA 3"}
+                _CN_AP = {94:"Economía",87:"Política",96:"Empresas",97:"Internacional",
+                           100:"Gobierno",95:"AFIP/ARCA",90:"Industria",91:"Opinión",
+                           89:"Comercio",88:"Agro",103:"Informes",102:"Provincias",
+                           93:"Sindicatos",92:"Servicios",239:"Digital pymes",1139:"Mundo del vino",
+                           101:"Poder Judicial",99:"Congreso",98:"Nacional",
+                           104:"ME TV",1048:"Coberturas"}
+                card_msg_ids_ap = context.user_data.get("cola_msg_ids", [])
+                for j_ap in jobs_ap:
+                    jid_ap   = j_ap["id"]
+                    ttl_ap   = j_ap.get("title") or "Sin título"
+                    hilo_ap  = j_ap.get("hilo") or 2
+                    url_ap   = j_ap.get("source_url", "")
+                    dom_ap   = (url_ap.split("//",1)[-1].split("/")[0].replace("www.","") if url_ap else "")
+                    capa_ap  = _HILO_N_AP.get(hilo_ap, f"CAPA {hilo_ap}")
+                    sg_ap = {}
+                    if j_ap.get("agent_suggestion"):
+                        try: sg_ap = _js.loads(j_ap["agent_suggestion"])
+                        except Exception: pass
+                    pd_ap    = sg_ap.get("pub_dest") or j_ap.get("pub_dest") or "sin_asignar"
+                    rs_ap    = sg_ap.get("reasoning", "")
+                    dl_ap    = _DEST_LABELS.get(pd_ap, pd_ap)
+                    sl_ap    = f"\n🤖 <b>{dl_ap}</b>" + (f"\n<i>{rs_ap}</i>" if rs_ap else "")
+                    cj_ap = {}
+                    if j_ap.get("content_json"):
+                        try: cj_ap = _js.loads(j_ap["content_json"])
+                        except Exception: pass
+                    tags_ap    = cj_ap.get("matched_kw") or []
+                    cats_ap    = cj_ap.get("category_ids") or []
+                    fmt_ap     = cj_ap.get("formato", "desplegable")
+                    port_ap    = cj_ap.get("portada", False)
+                    ot_ap      = cj_ap.get("original_title", "")
+                    pt_ap      = cj_ap.get("proposed_title", "")
+                    hc_ap      = bool(ot_ap and ot_ap != ttl_ap)
+                    inst_ap    = cj_ap.get("instructions", "")
+                    tl_ap   = (f"\n🏷 <i>{' · '.join(t.title() for t in tags_ap[:5])}</i>" if tags_ap else "")
+                    cl_ap   = (f"\n🗂 <i>{' · '.join(_CN_AP.get(c,str(c)) for c in cats_ap[:3])}</i>" if cats_ap else "")
+                    pdl_ap  = (f"\n🗓 <i>{j_ap.get('pub_date','')}</i>" if j_ap.get("pub_date") else "")
+                    porl_ap = "\n📌 <b>PORTADA DEL DÍA</b>" if port_ap else ""
+                    fml_ap  = f"\n📄 <i>{fmt_ap.title()}</i>" if fmt_ap != "desplegable" else ""
+                    il_ap   = f"\n📝 <i>{inst_ap}</i>" if inst_ap else ""
+                    titl_ap = ""
+                    if ot_ap and ot_ap != ttl_ap:
+                        titl_ap += f"\n<s>{ot_ap[:70]}</s>"
+                    if pt_ap and pt_ap != ttl_ap:
+                        titl_ap += f"\n💡 <i>{pt_ap[:70]}</i>"
+                    tlbl_ap = (f"🏷 {', '.join(t.title() for t in tags_ap[:3])}" if tags_ap else "🏷 Etiquetas")
+                    clbl_ap = (f"🗂 {'+'.join(_CN_AP.get(c,str(c))[:8] for c in cats_ap[:2])}" if cats_ap else "🗂 Categoría")
+                    flbl_ap = "☑️ Continua" if fmt_ap == "continua" else "☑️ Desplegable"
+                    plbl_ap = "☑️ Portada del día" if port_ap else "📌 Portada del día"
+                    tbtn_ap = "↩ Restaurar original" if hc_ap else "✏️ Cambiar título"
+                    tcb_ap  = f"h_cola_restore_title:{jid_ap}" if hc_ap else f"h_cola_change_title:{jid_ap}"
+                    card_txt_ap = (
+                        f"<b>{ttl_ap}</b>{titl_ap}\n"
+                        f"{capa_ap}  ·  {dom_ap}"
+                        f"{sl_ap}{porl_ap}{cl_ap}{tl_ap}{fml_ap}{pdl_ap}{il_ap}\n"
+                        f"<a href='{url_ap}'>📎 fuente</a>"
+                    )
+                    kb_ap = [
+                        [{"text":"✅ Publicar","callback_data":f"h_cola_confirm:{jid_ap}"},
+                         {"text":"🔄 Cambiar destino","callback_data":f"h_cola_change:{jid_ap}"}],
+                        [{"text":plbl_ap,"callback_data":f"h_cola_portada:{jid_ap}"},
+                         {"text":flbl_ap,"callback_data":f"h_cola_formato:{jid_ap}"}],
+                        [{"text":tbtn_ap,"callback_data":tcb_ap}],
+                        [{"text":clbl_ap,"callback_data":f"h_cola_cats:{jid_ap}"},
+                         {"text":tlbl_ap,"callback_data":f"h_cola_tags:{jid_ap}"}],
+                        [{"text":"🚫 Descartar","callback_data":f"h_cola_discard:{jid_ap}"},
+                         {"text":"⏭ Ir a redacción","callback_data":f"h_cola_skip:{jid_ap}"}],
+                    ]
+                    if j_ap.get("wp_post_id"):
+                        kb_ap.append([{"text":"📢 Publicar en redes","callback_data":f"h_cola_redes:{jid_ap}"}])
+                    try:
+                        cm_ap = await context.bot.send_message(
+                            chat_id=chat_id_ap, text=card_txt_ap, parse_mode="HTML",
+                            reply_markup={"inline_keyboard": kb_ap},
+                            disable_web_page_preview=True,
+                        )
+                        card_msg_ids_ap.append(cm_ap.message_id)
+                    except Exception:
+                        pass
+                context.user_data["cola_msg_ids"] = card_msg_ids_ap
+                await query.answer(f"📋 {len(jobs_ap)} nota(s) cargadas")
+
+            # ── Procesar pendientes — re-ejecuta agentes de pipeline ─────────
+            elif action == "h_cola_process_pend":
+                with _sq.connect(_HDB) as _c_pp0:
+                    n_pp0 = _c_pp0.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE stage IN ('redaccion','publicacion','sin_imagen')"
+                    ).fetchone()[0]
+                _ran = []
+                for _ag_name in ("redaccion", "publicacion"):
+                    try:
+                        _ag_mod = __import__(f"agents.{_ag_name}", fromlist=["run_once"])
+                        await asyncio.to_thread(_ag_mod.run_once)
+                        _ran.append(_ag_name)
+                    except Exception:
+                        pass
+                with _sq.connect(_HDB) as _c_pp1:
+                    n_pp1 = _c_pp1.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE stage IN ('redaccion','publicacion','sin_imagen')"
+                    ).fetchone()[0]
+                _mov = max(0, n_pp0 - n_pp1)
+                _ran_txt = " · ".join(_ran) if _ran else "ninguno"
+                try:
+                    await query.edit_message_text(
+                        f"🔄 <b>Pendientes procesados</b>\n"
+                        f"Agentes: {_ran_txt}\n"
+                        f"Antes: {n_pp0}  ·  Después: {n_pp1}"
+                        + (f"  ·  Avanzaron: {_mov}" if _mov else ""),
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "↩ Volver", "callback_data": "h_cola_main_panel"}
+                        ]]}
+                    )
+                except Exception:
+                    pass
+                await query.answer(f"🔄 {n_pp1} pendientes restantes", show_alert=False)
+                # Enviar card de resolución para cada job sin_imagen
+                with _sq.connect(_HDB) as _c_si:
+                    _si_rows = _c_si.execute(
+                        "SELECT id, title, source_url, content_json FROM jobs WHERE stage='sin_imagen' ORDER BY created_at"
+                    ).fetchall()
+                for _si_id, _si_title, _si_src, _si_cj in _si_rows:
+                    _si_c = {}
+                    try: _si_c = _js.loads(_si_cj or "{}")
+                    except Exception: pass
+                    _si_url = _si_c.get("source") or _si_c.get("source_url") or _si_src or ""
+                    _si_link = f'\n<a href="{_si_url}">Ver fuente</a>' if _si_url else ""
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"🖼 <b>Sin imagen — elegí foto (job #{_si_id})</b>\n\n<b>{(_si_title or '')[:80]}</b>{_si_link}",
+                        parse_mode="HTML", disable_web_page_preview=True,
+                        reply_markup={"inline_keyboard": [
+                            [{"text": "🔍 Buscar en ME.ar", "callback_data": f"h_img_search:{_si_id}"},
+                             {"text": "🔗 Agregar URL",      "callback_data": f"h_img_url:{_si_id}"}],
+                            [{"text": "➖ Publicar sin foto","callback_data": f"h_img_skip:{_si_id}"}],
+                        ]}
+                    )
+
+            # ── Procesar listado — solo las que Leo configuró manualmente ────
+            elif action == "h_cola_process_list":
+                jobs_all = _br_cola.dequeue_cola(limit=50)
+                procesadas = 0
+                for j in jobs_all:
+                    sg = {}
+                    if j.get("agent_suggestion"):
+                        try: sg = _js.loads(j["agent_suggestion"])
+                        except Exception: pass
+                    if "cambiado manualmente" not in sg.get("reasoning", ""):
+                        continue  # saltear las no tocadas por Leo
+                    dest = sg.get("pub_dest") or j.get("pub_dest") or "hoy_normal"
+                    _br_cola.confirm_cola(j["id"], dest,
+                                          anchor_date=sg.get("anchor_date"),
+                                          recurrence_type=sg.get("recurrence_type"))
+                    procesadas += 1
+                try:
+                    await query.edit_message_text(
+                        f"📤 <b>{procesadas} nota(s) del listado enviadas a redacción</b>\n"
+                        f"<i>Las no configuradas siguen en la cola.</i>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                await query.answer(f"📤 {procesadas} notas procesadas", show_alert=False)
+
+            # ── Procesar todo — confirma cola + re-ejecuta agentes pipeline ──
+            elif action == "h_cola_process_all":
+                jobs_all = _br_cola.dequeue_cola(limit=50)
+                procesadas = 0
+                for j in jobs_all:
+                    jid2 = j["id"]
+                    sg = {}
+                    if j.get("agent_suggestion"):
+                        try:
+                            sg = _js.loads(j["agent_suggestion"])
+                        except Exception:
+                            pass
+                    dest = sg.get("pub_dest") or j.get("pub_dest") or "hoy_normal"
+                    _br_cola.confirm_cola(jid2, dest,
+                                          anchor_date=sg.get("anchor_date"),
+                                          recurrence_type=sg.get("recurrence_type"))
+                    procesadas += 1
+                # También re-ejecutar agentes de pipeline
+                for _ag_pa in ("redaccion", "publicacion"):
+                    try:
+                        _ag_pa_mod = __import__(f"agents.{_ag_pa}", fromlist=["run_once"])
+                        await asyncio.to_thread(_ag_pa_mod.run_once)
+                    except Exception:
+                        pass
+                with _sq.connect(_HDB) as _c_pa:
+                    n_pend_pa = _c_pa.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE stage IN ('redaccion','publicacion','sin_imagen')"
+                    ).fetchone()[0]
+                try:
+                    await query.edit_message_text(
+                        f"🚀 <b>{procesadas} nota(s) de cola enviadas a redacción</b>\n"
+                        f"<i>Pipeline: {n_pend_pa} jobs en curso.</i>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                await query.answer(f"✅ {procesadas} notas procesadas", show_alert=False)
+                # Enviar card de resolución para cada job sin_imagen
+                with _sq.connect(_HDB) as _c_si2:
+                    _si_rows2 = _c_si2.execute(
+                        "SELECT id, title, source_url, content_json FROM jobs WHERE stage='sin_imagen' ORDER BY created_at"
+                    ).fetchall()
+                for _si_id2, _si_title2, _si_src2, _si_cj2 in _si_rows2:
+                    _si_c2 = {}
+                    try: _si_c2 = _js.loads(_si_cj2 or "{}")
+                    except Exception: pass
+                    _si_url2 = _si_c2.get("source") or _si_c2.get("source_url") or _si_src2 or ""
+                    _si_link2 = f'\n<a href="{_si_url2}">Ver fuente</a>' if _si_url2 else ""
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"🖼 <b>Sin imagen — elegí foto (job #{_si_id2})</b>\n\n<b>{(_si_title2 or '')[:80]}</b>{_si_link2}",
+                        parse_mode="HTML", disable_web_page_preview=True,
+                        reply_markup={"inline_keyboard": [
+                            [{"text": "🔍 Buscar en ME.ar", "callback_data": f"h_img_search:{_si_id2}"},
+                             {"text": "🔗 Agregar URL",      "callback_data": f"h_img_url:{_si_id2}"}],
+                            [{"text": "➖ Publicar sin foto","callback_data": f"h_img_skip:{_si_id2}"}],
+                        ]}
+                    )
+
+            # ── Notas programadas ─────────────────────────────────────────────
+            elif action == "h_cola_ver_programadas":
+                import requests as _req_prog, base64 as _b64_prog
+                from config import WP_URL as _WP_PROG, WP_USER as _WPU_PROG, WP_PASS as _WPP_PROG
+                _tok_prog = _b64_prog.b64encode(f"{_WPU_PROG}:{_WPP_PROG}".encode()).decode()
+                _hdrs_prog = {"Authorization": f"Basic {_tok_prog}"}
+
+                # Jobs en DB con pub_date pendiente
+                with _sq.connect(_HDB) as _c_p:
+                    rows_p = _c_p.execute(
+                        "SELECT id, title, pub_date, stage FROM jobs "
+                        "WHERE pub_date IS NOT NULL AND pub_date != '' "
+                        "AND stage NOT IN ('done','rejected') ORDER BY pub_date ASC LIMIT 10"
+                    ).fetchall()
+
+                # Posts WP con status=future
+                wp_future = []
+                try:
+                    _rf = _req_prog.get(
+                        f"{_WP_PROG}/wp-json/wp/v2/posts?status=future&per_page=20"
+                        "&_fields=id,title,date,link",
+                        headers=_hdrs_prog, timeout=10
+                    )
+                    if _rf.ok:
+                        wp_future = _rf.json()
+                except Exception:
+                    pass
+
+                if not rows_p and not wp_future:
+                    await query.answer("No hay notas programadas", show_alert=True)
+                    return
+
+                lines = ["🗓 <b>Notas programadas</b>\n"]
+                kb_p  = []
+
+                # Jobs en pipeline con pub_date
+                for r in rows_p:
+                    jid, title, pub_date, stage = r
+                    lines.append(f"⏳ <b>{(title or '')[:55]}</b>\n  📅 {pub_date[:16]}  ·  {stage}")
+                    kb_p.append([
+                        {"text": f"✏️ #{jid} {(title or '')[:25]}", "callback_data": f"h_cola_back:{jid}"},
+                        {"text": "❌ Cancelar",                      "callback_data": f"h_cola_cancel_job:{jid}"},
+                    ])
+
+                # Posts WP future
+                for wp in wp_future:
+                    wp_id    = wp["id"]
+                    wp_title = wp.get("title", {}).get("rendered", "")[:55]
+                    wp_date  = wp.get("date", "")[:16].replace("T", " ")
+                    lines.append(f"📅 <b>{wp_title}</b>\n  🗓 {wp_date}")
+                    kb_p.append([
+                        {"text": f"🕐 Reprogramar",  "callback_data": f"h_wp_reschedule:{wp_id}"},
+                        {"text": f"⚡ Publicar ya",   "callback_data": f"h_wp_publish_now:{wp_id}"},
+                        {"text": f"📝 Borrador",      "callback_data": f"h_wp_to_draft:{wp_id}"},
+                    ])
+
+                kb_p.append([
+                    {"text": "🔄 Actualizar", "callback_data": "h_cola_ver_programadas"},
+                    {"text": "↩ Volver",      "callback_data": "h_cola_main_panel"},
+                ])
+                try:
+                    await query.edit_message_text(
+                        "\n".join(lines), parse_mode="HTML",
+                        reply_markup={"inline_keyboard": kb_p},
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Acciones sobre posts WP future ───────────────────────────────
+            elif action in ("h_wp_publish_now", "h_wp_to_draft", "h_wp_reschedule") and arg:
+                wp_id = int(arg)
+                import requests as _req_wp, base64 as _b64_wp
+                from config import WP_URL as _WP_ACT, WP_USER as _WPU_ACT, WP_PASS as _WPP_ACT
+                _tok_wp = _b64_wp.b64encode(f"{_WPU_ACT}:{_WPP_ACT}".encode()).decode()
+                _hdrs_wp = {"Authorization": f"Basic {_tok_wp}", "Content-Type": "application/json"}
+
+                if action == "h_wp_publish_now":
+                    r_wp = _req_wp.post(
+                        f"{_WP_ACT}/wp-json/wp/v2/posts/{wp_id}",
+                        headers=_hdrs_wp, json={"status": "publish"}, timeout=15
+                    )
+                    if r_wp.ok:
+                        await query.answer("⚡ Publicado ahora", show_alert=False)
+                    else:
+                        await query.answer(f"❌ Error: {r_wp.status_code}", show_alert=True)
+                    # Refrescar listado
+                    query.data = "h_cola_ver_programadas"
+                    await query.answer()
+
+                elif action == "h_wp_to_draft":
+                    r_wp = _req_wp.post(
+                        f"{_WP_ACT}/wp-json/wp/v2/posts/{wp_id}",
+                        headers=_hdrs_wp, json={"status": "draft"}, timeout=15
+                    )
+                    if r_wp.ok:
+                        await query.answer("📝 Movido a borrador", show_alert=False)
+                    else:
+                        await query.answer(f"❌ Error: {r_wp.status_code}", show_alert=True)
+
+                elif action == "h_wp_reschedule":
+                    context.user_data["awaiting_reschedule_wp_id"]     = wp_id
+                    context.user_data["awaiting_reschedule_msg_id"]     = query.message.message_id
+                    await query.answer()
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=(f"🗓 <b>Reprogramar WP #{wp_id}</b>\n\n"
+                              f"Escribí la nueva fecha y hora:\n"
+                              f"<code>15/07 10:00</code>  ·  <code>2026-07-15T10:00:00</code>"),
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "↩ Volver", "callback_data": "h_cola_ver_programadas"}
+                        ]]}
+                    )
+
+            # ── Notas pendientes de procesamiento ─────────────────────────────
+            elif action == "h_cola_ver_pendientes":
+                context.user_data["cola_back_src"] = "pendientes"
+                _STAGE_EMOJI = {
+                    "redaccion":  "✍️", "publicacion": "📤",
+                    "sin_imagen": "🖼", "cola": "🗂",
+                }
+                with _sq.connect(_HDB) as _c_pend:
+                    rows_pend = _c_pend.execute(
+                        "SELECT id, title, stage, updated_at FROM jobs "
+                        "WHERE stage IN ('redaccion','publicacion','sin_imagen') "
+                        "ORDER BY updated_at ASC LIMIT 20"
+                    ).fetchall()
+                if not rows_pend:
+                    await query.answer("No hay notas pendientes", show_alert=True)
+                    return
+                lines_pend = ["⏳ <b>Pendientes de procesamiento</b>\n"]
+                kb_pend = []
+                for r in rows_pend:
+                    jid, title, stage, upd = r
+                    em = _STAGE_EMOJI.get(stage, "•")
+                    lines_pend.append(f"{em} <b>{(title or '')[:55]}</b>  ·  {stage}")
+                    row_btns = [{"text": f"✏️ #{jid} {(title or '')[:20]}", "callback_data": f"h_cola_back:{jid}"}]
+                    if stage == "sin_imagen":
+                        row_btns.append({"text": "🖼 Foto",          "callback_data": f"h_img_url:{jid}"})
+                    row_btns.append({"text": "❌ Cancelar",           "callback_data": f"h_cola_cancel_job:{jid}"})
+                    kb_pend.append(row_btns)
+                kb_pend.append([
+                    {"text": "🔄 Actualizar", "callback_data": "h_cola_ver_pendientes"},
+                    {"text": "↩ Volver",      "callback_data": "h_cola_main_panel"},
+                ])
+                try:
+                    await query.edit_message_text(
+                        "\n".join(lines_pend), parse_mode="HTML",
+                        reply_markup={"inline_keyboard": kb_pend}
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+            # ── Cancelar job individual desde pendientes ──────────────────────
+            elif action == "h_cola_cancel_job" and arg:
+                job_id = int(arg)
+                with _sq.connect(_HDB) as _c_cj:
+                    _c_cj.execute(
+                        "UPDATE jobs SET stage='rejected', updated_at=datetime('now') WHERE id=?",
+                        (job_id,)
+                    )
+                await query.answer(f"❌ Job #{job_id} cancelado", show_alert=False)
+                # Refrescar el listado de pendientes
+                _STAGE_EMOJI2 = {"redaccion": "✍️", "publicacion": "📤", "sin_imagen": "🖼"}
+                with _sq.connect(_HDB) as _c_ref:
+                    rows_ref = _c_ref.execute(
+                        "SELECT id, title, stage, updated_at FROM jobs "
+                        "WHERE stage IN ('redaccion','publicacion','sin_imagen') "
+                        "ORDER BY updated_at ASC LIMIT 20"
+                    ).fetchall()
+                if not rows_ref:
+                    try:
+                        await query.edit_message_text(
+                            "⏳ <b>Pendientes</b> — ninguna.", parse_mode="HTML",
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "↩ Volver", "callback_data": "h_cola_main_panel"}
+                            ]]}
+                        )
+                    except Exception:
+                        pass
+                else:
+                    lines_r = ["⏳ <b>Pendientes de procesamiento</b>\n"]
+                    kb_r = []
+                    for r in rows_ref:
+                        jid2, title2, stage2, _ = r
+                        em2 = _STAGE_EMOJI2.get(stage2, "•")
+                        lines_r.append(f"{em2} <b>{(title2 or '')[:55]}</b>  ·  {stage2}")
+                        row2 = [{"text": f"✏️ #{jid2} {(title2 or '')[:20]}", "callback_data": f"h_cola_back:{jid2}"}]
+                        if stage2 == "sin_imagen":
+                            row2.append({"text": "🖼 Foto", "callback_data": f"h_img_url:{jid2}"})
+                        row2.append({"text": "❌ Cancelar", "callback_data": f"h_cola_cancel_job:{jid2}"})
+                        kb_r.append(row2)
+                    kb_r.append([
+                        {"text": "🔄 Actualizar", "callback_data": "h_cola_ver_pendientes"},
+                        {"text": "↩ Volver",      "callback_data": "h_cola_main_panel"},
+                    ])
+                    try:
+                        await query.edit_message_text(
+                            "\n".join(lines_r), parse_mode="HTML",
+                            reply_markup={"inline_keyboard": kb_r}
+                        )
+                    except Exception:
+                        pass
+
+            # ── Cancelar publicador — borra cards y pausa publicacion ────────
+            elif action == "h_cola_stop_pub":
+                chat_id = query.message.chat_id
+                # Borrar todos los cards de esta sesión + el resumen
+                msg_ids = context.user_data.pop("cola_msg_ids", [])
+                msg_ids.append(query.message.message_id)
+                for _mid in set(msg_ids):
+                    try:
+                        await context.bot.delete_message(chat_id=chat_id, message_id=_mid)
+                    except Exception:
+                        pass
+                # Mover jobs en publicacion de vuelta a cola
+                with _sq.connect(_HDB) as _c3:
+                    _c3.execute(
+                        "UPDATE jobs SET stage='cola', updated_at=datetime('now') "
+                        "WHERE stage='publicacion'"
+                    )
+                await query.answer("🛑 Cancelado", show_alert=False)
+
+            # ── Volver al card original ───────────────────────────────────────
+            elif action == "h_cola_back" and arg:
+                job_id = int(arg)
+                job    = _br_cola.get_job(job_id)
+                if not job:
+                    await query.answer()
+                    return
+                # Reconstruir card idéntico al de cmd_coladepublicacion
+                _title  = job.get("title") or "Sin título"
+                _hilo   = job.get("hilo") or 2
+                _url    = job.get("source_url", "")
+                _domain = (_url.split("//",1)[-1].split("/")[0].replace("www.","") if _url else "")
+                _HILO_N = {1:"CAPA 1", 2:"CAPA 2", 3:"CAPA 3"}
+                _capa   = _HILO_N.get(_hilo, f"CAPA {_hilo}")
+                sg = {}
+                if job.get("agent_suggestion"):
+                    try: sg = _js.loads(job["agent_suggestion"])
+                    except Exception: pass
+                pub_dest  = sg.get("pub_dest") or job.get("pub_dest") or "sin_asignar"
+                reasoning = sg.get("reasoning", "")
+                dest_lbl  = _DEST_LABELS.get(pub_dest, pub_dest)
+                sug_line  = f"\n🤖 <b>{dest_lbl}</b>" + (f"\n<i>{reasoning}</i>" if reasoning else "")
+                cj = {}
+                if job.get("content_json"):
+                    try: cj = _js.loads(job["content_json"])
+                    except Exception: pass
+                tags    = cj.get("matched_kw") or []
+                cat_ids = cj.get("category_ids") or []
+                _CN = {94:"Economía",87:"Política",96:"Empresas",97:"Internacional",
+                       100:"Gobierno",95:"AFIP/ARCA",90:"Industria",91:"Opinión",
+                       89:"Comercio",88:"Agro",103:"Informes",102:"Provincias",
+                       93:"Sindicatos",92:"Servicios",239:"Digital pymes",1139:"Mundo del vino",
+                       101:"Poder Judicial",99:"Congreso",98:"Nacional",
+                       104:"ME TV",1048:"Coberturas"}
+                _formato_b      = cj.get("formato", "desplegable")
+                _portada_b      = cj.get("portada", False)
+                original_title  = cj.get("original_title", "")
+                proposed_title  = cj.get("proposed_title", "")
+                has_custom      = bool(original_title and original_title != _title)
+                inst            = cj.get("instructions", "")
+                tags_line     = (f"\n🏷 <i>{' · '.join(t.title() for t in tags[:5])}</i>" if tags else "")
+                cats_line     = (f"\n🗂 <i>{' · '.join(_CN.get(c,str(c)) for c in cat_ids[:3])}</i>" if cat_ids else "")
+                pub_date_line = (f"\n🗓 <i>{job.get('pub_date','')}</i>" if job.get("pub_date") else "")
+                portada_line  = "\n📌 <b>PORTADA DEL DÍA</b>" if _portada_b else ""
+                fmt_line      = f"\n📄 <i>{_formato_b.title()}</i>" if _formato_b != "desplegable" else ""
+                inst_line     = f"\n📝 <i>{inst}</i>" if inst else ""
+                title_lines   = ""
+                if original_title and original_title != _title:
+                    title_lines += f"\n<s>{original_title[:70]}</s>"
+                if proposed_title and proposed_title != _title:
+                    title_lines += f"\n💡 <i>{proposed_title[:70]}</i>"
+                tags_lbl    = (f"🏷 {', '.join(t.title() for t in tags[:3])}" if tags else "🏷 Etiquetas")
+                cats_lbl    = (f"🗂 {'+'.join(_CN.get(c,str(c))[:8] for c in cat_ids[:2])}" if cat_ids else "🗂 Categoría")
+                fmt_lbl     = "☑️ Continua" if _formato_b == "continua" else "☑️ Desplegable"
+                port_lbl    = "☑️ Portada del día" if _portada_b else "📌 Portada del día"
+                titulo_btn  = "↩ Restaurar original" if has_custom else "✏️ Cambiar título"
+                titulo_cb   = f"h_cola_restore_title:{job_id}" if has_custom else f"h_cola_change_title:{job_id}"
+                card_msg = (
+                    f"<b>{_title}</b>{title_lines}\n"
+                    f"{_capa}  ·  {_domain}"
+                    f"{sug_line}{portada_line}{cats_line}{tags_line}{fmt_line}{pub_date_line}{inst_line}\n"
+                    f"<a href='{_url}'>📎 fuente</a>"
+                )
+                _kb_rows = [
+                    [{"text":"✅ Publicar","callback_data":f"h_cola_confirm:{job_id}"},
+                     {"text":"🔄 Cambiar destino","callback_data":f"h_cola_change:{job_id}"}],
+                    [{"text":port_lbl,"callback_data":f"h_cola_portada:{job_id}"},
+                     {"text":fmt_lbl,"callback_data":f"h_cola_formato:{job_id}"}],
+                    [{"text":titulo_btn,"callback_data":titulo_cb}],
+                    [{"text":cats_lbl,"callback_data":f"h_cola_cats:{job_id}"},
+                     {"text":tags_lbl,"callback_data":f"h_cola_tags:{job_id}"}],
+                    [{"text":"🚫 Descartar","callback_data":f"h_cola_discard:{job_id}"},
+                     {"text":"⏭ Ir a redacción","callback_data":f"h_cola_skip:{job_id}"}],
+                ]
+                if job.get("wp_post_id"):
+                    _kb_rows.append([{"text":"📢 Publicar en redes","callback_data":f"h_cola_redes:{job_id}"}])
+                _back_src = context.user_data.get("cola_back_src", "")
+                if _back_src == "pendientes":
+                    _kb_rows.append([{"text":"↩ Ver pendientes","callback_data":"h_cola_ver_pendientes"}])
+                else:
+                    _kb_rows.append([{"text":"↩ Menú","callback_data":"h_cola_main_panel"}])
+                keyboard = {"inline_keyboard": _kb_rows}
+                try:
+                    await query.edit_message_text(
+                        card_msg, parse_mode="HTML",
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+
+        except Exception as _e:
+            logger.exception(f"h_cola_ error: {_e}")
+            await query.answer("Error interno", show_alert=True)
+        return
+
+    # ── Harness — Imagen pendiente ───────────────────────────────────────────
+    if query.data.startswith("h_img_"):
+        import sys as _sys_img, json as _js_img, sqlite3 as _sq_img
+        _sys_img.path.insert(0, "/opt/me-harness")
+        try:
+            import broker as _br_img
+            parts_img = query.data.split(":")
+            action_img = parts_img[0]
+            job_id_img = int(parts_img[1]) if len(parts_img) > 1 else 0
+
+            if action_img == "h_img_url":
+                # Pedir URL o foto directa
+                context.user_data["awaiting_img_url_for"]     = job_id_img
+                context.user_data["awaiting_img_msg_id"]      = query.message.message_id
+                await query.answer()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"🖼 <b>Imagen para la nota #{job_id_img}</b>\n\nPegá la URL <i>o enviá la foto directamente</i> acá:",
+                    parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "↩ Volver", "callback_data": f"h_img_cancel:{job_id_img}"}
+                    ]]}
+                )
+
+            elif action_img == "h_img_cancel":
+                await query.answer()
+                context.user_data.pop("awaiting_img_url_for", None)
+                context.user_data.pop("awaiting_img_msg_id", None)
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+
+            elif action_img == "h_img_search":
+                # Buscar en media library de WP por keywords de la nota
+                await query.answer("🔍 Buscando...")
+                job_i = _br_img.get_job(job_id_img)
+                cj_i = {}
+                try: cj_i = _js_img.loads(job_i.get("content_json") or "{}")
+                except Exception: pass
+                kws = cj_i.get("matched_kw") or []
+                query_str = " ".join(kws[:3]) if kws else (job_i.get("title") or "")[:30]
+                import requests as _req_img
+                from config import WP_URL as _WP_IMG, WP_USER as _WPU_IMG, WP_PASS as _WPP_IMG
+                import base64 as _b64_img
+                _tok_img = _b64_img.b64encode(f"{_WPU_IMG}:{_WPP_IMG}".encode()).decode()
+                _hdrs_img = {"Authorization": f"Basic {_tok_img}"}
+                r_media = _req_img.get(
+                    f"{_WP_IMG}/wp-json/wp/v2/media",
+                    params={"search": query_str, "per_page": 5, "media_type": "image"},
+                    headers=_hdrs_img, timeout=10
+                )
+                media_items = r_media.json() if r_media.ok else []
+                if not media_items:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"❌ No encontré imágenes para <i>{query_str[:40]}</i> en ME.ar.\n"
+                             f"Probá con una URL propia.",
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "🔗 Agregar URL", "callback_data": f"h_img_url:{job_id_img}"}
+                        ]]}
+                    )
+                else:
+                    nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣"]
+                    rows_media = []
+                    lines = [f"🔍 <b>Imágenes en ME.ar</b> para <i>{query_str[:40]}</i>:\n"]
+                    for idx, m in enumerate(media_items[:5]):
+                        m_id  = m.get("id")
+                        m_url = m.get("source_url") or ""
+                        m_ttl = (m.get("title", {}).get("rendered") or m.get("slug") or str(m_id))[:40]
+                        n = nums[idx]
+                        lines.append(f'{n} <a href="{m_url}">{m_ttl}</a>')
+                        rows_media.append([{"text": f"{n} Usar esta",
+                                            "callback_data": f"h_img_wpid:{job_id_img}:{m_id}"}])
+                    rows_media.append([{"text": "🔗 Agregar URL", "callback_data": f"h_img_url:{job_id_img}"},
+                                       {"text": "↩ Cancelar",    "callback_data": f"h_img_cancel:{job_id_img}"}])
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text="\n".join(lines),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup={"inline_keyboard": rows_media}
+                    )
+
+            elif action_img == "h_img_wpid" and len(parts_img) >= 3:
+                # Leo eligió una imagen de la media library por su WP ID
+                wp_media_id = int(parts_img[2])
+                job_i = _br_img.get_job(job_id_img)
+                cj_i = {}
+                try: cj_i = _js_img.loads(job_i.get("content_json") or "{}")
+                except Exception: pass
+                cj_i["image_id_override"] = wp_media_id
+                with _sq_img.connect("/opt/me-harness/harness.db") as _c_img:
+                    _c_img.execute("UPDATE jobs SET stage='publicacion', content_json=?, updated_at=datetime('now') WHERE id=?",
+                                   (_js_img.dumps(cj_i), job_id_img))
+                await query.answer("✅ Imagen seleccionada — reintentando publicación", show_alert=False)
+                try:
+                    await query.edit_message_text(
+                        f"🟢 <b>Imagen seleccionada (WP #{wp_media_id})</b>\n"
+                        f"Nota #{job_id_img} vuelve a la cola de publicación.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+
+            elif action_img == "h_img_use":
+                # Subir la URL validada como featured image y reintentar publicación
+                # URL guardada en user_data (callback_data tiene límite 64 bytes)
+                import urllib.parse as _up_img
+                img_url_to_use = (
+                    context.user_data.pop(f"pending_img_url_{job_id_img}", None)
+                    or (_up_img.unquote(parts_img[2]) if len(parts_img) >= 3 else None)
+                )
+                if not img_url_to_use:
+                    await query.answer("No se encontró la URL — pegá la imagen de nuevo", show_alert=True)
+                    return
+                await query.answer("⏳ Subiendo imagen...")
+                from agents.publicador import upload_image as _upload_img
+                media_id = _upload_img(img_url_to_use)
+                if not media_id:
+                    try:
+                        await query.edit_message_text(
+                            f"🔴 <b>No pude subir esa imagen a WP.</b>\n"
+                            f"Probá con otra URL:",
+                            parse_mode="HTML",
+                            reply_markup={"inline_keyboard": [
+                                [{"text": "🔗 Otra URL",        "callback_data": f"h_img_url:{job_id_img}"},
+                                 {"text": "🔍 Buscar en ME.ar", "callback_data": f"h_img_search:{job_id_img}"}],
+                            ]}
+                        )
+                    except Exception:
+                        pass
+                else:
+                    job_i = _br_img.get_job(job_id_img)
+                    cj_i = {}
+                    try: cj_i = _js_img.loads(job_i.get("content_json") or "{}")
+                    except Exception: pass
+                    cj_i["image_id_override"] = media_id
+                    with _sq_img.connect("/opt/me-harness/harness.db") as _c_img:
+                        _c_img.execute("UPDATE jobs SET stage='publicacion', content_json=?, updated_at=datetime('now') WHERE id=?",
+                                       (_js_img.dumps(cj_i), job_id_img))
+                    try:
+                        await query.edit_message_text(
+                            f"🟢 <b>Imagen subida — publicando nota #{job_id_img}</b>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+            elif action_img == "h_img_skip":
+                # Publicar sin imagen (Leo lo acepta explícitamente)
+                job_i = _br_img.get_job(job_id_img)
+                cj_i = {}
+                try: cj_i = _js_img.loads(job_i.get("content_json") or "{}")
+                except Exception: pass
+                cj_i["skip_image"] = True
+                with _sq_img.connect("/opt/me-harness/harness.db") as _c_img:
+                    _c_img.execute("UPDATE jobs SET stage='publicacion', content_json=?, updated_at=datetime('now') WHERE id=?",
+                                   (_js_img.dumps(cj_i), job_id_img))
+                await query.answer("⏭ Publicando sin foto")
+                try:
+                    await query.edit_message_text(f"⏭ Nota #{job_id_img} → publicando sin imagen.", parse_mode="HTML")
+                except Exception:
+                    pass
+
+        except Exception as _e_img:
+            logger.exception(f"h_img_ error: {_e_img}")
+            await query.answer("Error interno", show_alert=True)
+        return
+
+    # ── Harness — Curador (Fase 2) ───────────────────────────────────────────
+    if query.data.startswith("h_cur_"):
+        import sys as _sys, sqlite3 as _sq, json as _js
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import curador as _cur
+            import broker as _br
+            parts  = query.data.split(":")
+            action = parts[0]
+            arg    = parts[1] if len(parts) >= 2 else None
+
+            _HDB = "/opt/me-harness/harness.db"
+
+            def _load_state(jid):
+                with _sq.connect(_HDB) as _c:
+                    row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (jid,)).fetchone()
+                    return _js.loads(row[0]) if row and row[0] else {}
+
+            def _save_state(jid, state):
+                with _sq.connect(_HDB) as _c:
+                    _c.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                               (_js.dumps(state), jid))
+
+            async def _update_card(jid, state, chat_id):
+                """Edita el keyboard de la tarjeta original si tenemos su message_id."""
+                card_msg_id = state.get("card_msg_id")
+                if card_msg_id:
+                    try:
+                        new_kb = _cur.build_card_keyboard(jid, state)
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=chat_id,
+                            message_id=card_msg_id,
+                            reply_markup=new_kb,
+                        )
+                    except Exception:
+                        pass
+
+            # ── Aprobar ──────────────────────────────────────────────────────
+            if action == "h_cur_approve" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                inst   = state.get("instructions", "")
+                ok     = _cur.approve(job_id, instructions=inst)
+                await query.message.delete()
+                if ok:
+                    # Asignar sugerencia de cola en background (silencioso)
+                    try:
+                        from agents import cola as _cola_a
+                        import threading as _thr
+                        _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                    except Exception:
+                        pass
+                    # Confirmación simple — el job espera en la cola hasta /coladepublicacion
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"🗂 Nota #{job_id} → cola"
+                             + (f"\n📝 <i>{inst[:80]}</i>" if inst else ""),
+                        parse_mode="HTML"
+                    )
+
+            # ── Consolidar fuentes similares en una sola nota ────────────
+            elif action == "h_cur_consolidar" and arg:
+                job_id      = int(arg)
+                state       = _load_state(job_id)
+                similar_ids = state.get("similar_job_ids", [])
+                # Recopilar URLs de fuentes secundarias
+                multi_urls = []
+                with _sq.connect(_HDB) as _c:
+                    for sid in similar_ids:
+                        row = _c.execute(
+                            "SELECT source_url FROM jobs WHERE id=?", (sid,)
+                        ).fetchone()
+                        if row and row[0]:
+                            multi_urls.append(row[0])
+                    # Rechazar los jobs secundarios para que no reaparezcan
+                    if similar_ids:
+                        _c.execute(
+                            f"UPDATE jobs SET stage='rejected', updated_at=datetime('now') "
+                            f"WHERE id IN ({','.join('?'*len(similar_ids))})",
+                            similar_ids
+                        )
+                # Guardar URLs multi-fuente en el job primario
+                state["multi_source_urls"] = multi_urls
+                _save_state(job_id, state)
+                # Aprobar el job primario → va a cola
+                inst = state.get("instructions", "")
+                _cur.approve(job_id, instructions=inst)
+                await query.message.delete()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"🔀 <b>Consolidando {len(multi_urls)+1} fuentes</b> → cola\n"
+                        f"<i>El redactor combinará todas las fuentes en una sola nota.</i>"
+                    ),
+                    parse_mode="HTML"
+                )
+
+            # ── Like toggle (👍/☑️ Es tema ME.ar) ────────────────────
+            elif action == "h_cur_like" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                state["liked"] = True if state.get("liked") is not True else None
+                _save_state(job_id, state)
+                keyboard = _cur.build_card_keyboard(job_id, state)
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+                await query.answer(
+                    "☑️ Es tema ME.ar" if state.get("liked") is True else "Desmarcado",
+                    show_alert=False
+                )
+
+            # ── Dislike toggle (👎/☑️ No es nuestro) ───────────────
+            elif action == "h_cur_dislike" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                state["liked"] = False if state.get("liked") is not False else None
+                _save_state(job_id, state)
+                keyboard = _cur.build_card_keyboard(job_id, state)
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+                await query.answer(
+                    "☑️ No es nuestro" if state.get("liked") is False else "Desmarcado",
+                    show_alert=False
+                )
+
+            # ── Rechazar — guarda aprendizaje y saca la tarjeta ──────────────
+            # -- Portada toggle --------------------------------------------------
+            elif action == "h_cur_portada" and arg:
+                job_id = int(arg)
+                state = _load_state(job_id)
+                state["portada"] = not state.get("portada", False)
+                _save_state(job_id, state)
+                await _update_card(job_id, state, query.message.chat_id)
+                label = "Portada activada" if state["portada"] else "Portada desactivada"
+                await query.answer(label, show_alert=False)
+
+            elif action == "h_cur_nopub" and arg:
+                job_id = int(arg)
+                reasons = [
+                    ("📋 Nota repetida",             "repetida"),
+                    ("😐 Nota de poco interés",      "poco_interes"),
+                    ("🚫 No es tema del diario",     "offtopic"),
+                    ("🎭 Contenido no confiable",    "manipulado"),
+                    ("🔍 Fuente no confiable",       "fuente"),
+                    ("🌐 Tema periférico",            "periferico"),
+                ]
+                rows = [[{"text": r[0], "callback_data": f"h_cur_reject_why:{job_id}:{r[1]}"}]
+                        for r in reasons]
+                rows.append([{"text": "📢 Publinota",
+                              "callback_data": f"h_cur_publinota:{job_id}"}])
+                rows.append([{"text": "📝 Publicar con instrucción",
+                              "callback_data": f"h_cur_instruct:{job_id}"}])
+                rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
+                try:
+                    await query.edit_message_text(
+                        f"🚫 <b>¿Qué hacemos con esta nota?</b> — job #{job_id}",
+                        parse_mode="HTML",
+                        reply_markup={"inline_keyboard": rows},
+                    )
+                except Exception:
+                    pass
+
+            elif action == "h_cur_publinota" and arg:
+                job_id = int(arg)
+                try:
+                    import sys as _sys_pn
+                    _sys_pn.path.insert(0, "/opt/me-harness")
+                    import broker as _br_pn
+                    _job_pn = _br_pn.get_job(job_id)
+                    _url_pn   = (_job_pn.get("source_url") or "") if _job_pn else ""
+                    _title_pn = (_job_pn.get("title") or "")      if _job_pn else ""
+                    _br_pn.add_publinota(job_id, _url_pn, _title_pn)
+                    _br_pn.update_stage(job_id, "publinota")
+                    await query.answer("📢 Guardada como publinota", show_alert=False)
+                    await query.edit_message_text(
+                        f"📢 <b>Publinota registrada</b> — job #{job_id}\n"
+                        f"<i>{_title_pn[:120]}</i>\n"
+                        f"Usá /publinotas para ver el listado.",
+                        parse_mode="HTML",
+                    )
+                except Exception as _e_pn:
+                    await query.answer(f"Error: {_e_pn}", show_alert=True)
+
+            elif action == "h_cur_reject_why" and len(parts) >= 3:
+                job_id = int(parts[1])
+                reason = parts[2]
+                try:
+                    import sys as _sys_rj
+                    _sys_rj.path.insert(0, "/opt/me-harness")
+                    import broker as _br_rj
+                    import sqlite3 as _sq_rj, json as _js_rj
+
+                    # Obtener dominio y título del job
+                    _job_rj = _br_rj.get_job(job_id)
+                    _domain_rj = ""
+                    _title_rj  = ""
+                    if _job_rj:
+                        from agents.curador import _extract_domain as _exd_rj
+                        _domain_rj = _exd_rj(_job_rj.get("source_url", ""))
+                        _title_rj  = _job_rj.get("title", "")
+
+                    def _cascade_reject(jid):
+                        """Rechaza el job y todos sus similares en curado."""
+                        _br_rj.update_stage(jid, "rejected")
+                        try:
+                            with _sq_rj.connect(_HDB) as _cc:
+                                _row = _cc.execute("SELECT content_json FROM jobs WHERE id=?", (jid,)).fetchone()
+                                if _row and _row[0]:
+                                    for sid in _js_rj.loads(_row[0]).get("similar_job_ids", []):
+                                        _br_rj.update_stage(sid, "rejected")
+                        except Exception:
+                            pass
+
+                    if reason == "repetida":
+                        # Sin penalización. Cascade reject grupo.
+                        _cascade_reject(job_id)
+                        _br_rj.record_feedback(job_id, "curador", "reject_repetida",
+                                               after={"reason": "repetida"})
+
+                    elif reason == "poco_interes":
+                        # Dominio leve (-0.1), keywords moderado (-0.5/kw)
+                        _br_rj.update_stage(job_id, "rejected")
+                        _br_rj.update_domain_weight(_domain_rj, -0.1)
+                        _br_rj.update_keywords_for_title(_title_rj, -1.0)
+                        _br_rj.record_feedback(job_id, "curador", "reject_poco_interes",
+                                               after={"reason": "poco_interes", "domain": _domain_rj})
+
+                    elif reason == "offtopic":
+                        # Sin penalizar dominio. Keywords muy fuerte (-2.0/kw). Cascade.
+                        _cascade_reject(job_id)
+                        _br_rj.update_keywords_for_title(_title_rj, -4.0)
+                        _br_rj.record_feedback(job_id, "curador", "reject_offtopic",
+                                               after={"reason": "offtopic"})
+
+                    elif reason == "manipulado":
+                        # Penalización media en dominio (-0.5). Sin tocar keywords.
+                        _br_rj.update_stage(job_id, "rejected")
+                        _br_rj.update_domain_weight(_domain_rj, -0.5)
+                        _br_rj.record_feedback(job_id, "curador", "reject_manipulado",
+                                               after={"reason": "manipulado", "domain": _domain_rj})
+
+                    elif reason == "fuente":
+                        # Penalización fuerte en dominio (-1.5). Sin tocar keywords.
+                        _br_rj.update_stage(job_id, "rejected")
+                        _br_rj.update_domain_weight(_domain_rj, -1.5)
+                        _br_rj.record_feedback(job_id, "curador", "reject_fuente",
+                                               after={"reason": "fuente", "domain": _domain_rj})
+
+                    elif reason == "periferico":
+                        # Dominio leve (-0.1), keywords leve (-0.3/kw)
+                        _br_rj.update_stage(job_id, "rejected")
+                        _br_rj.update_domain_weight(_domain_rj, -0.1)
+                        _br_rj.update_keywords_for_title(_title_rj, -0.6)
+                        _br_rj.record_feedback(job_id, "curador", "reject_periferico",
+                                               after={"reason": "periferico", "domain": _domain_rj})
+
+                    else:
+                        # Fallback genérico
+                        _cur.reject(job_id)
+                        _br.record_feedback(job_id, "curador", f"reject_{reason}",
+                                            after={"reason": reason})
+
+                except Exception as _e_rj:
+                    log.warning(f"reject_why error: {_e_rj}")
+                    try:
+                        _cur.reject(job_id)
+                    except Exception:
+                        pass
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                reason_labels = {
+                    "repetida":      "nota repetida",
+                    "poco_interes":  "nota de poco interés",
+                    "offtopic":      "no es tema del diario",
+                    "manipulado":    "contenido no confiable (operación/publinota)",
+                    "fuente":        "fuente no confiable",
+                    "periferico":    "tema periférico",
+                }
+                label = reason_labels.get(reason, reason)
+                try:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"🚫 Job #{job_id} rechazado — {label}",
+                    )
+                except Exception:
+                    pass
+
+            elif action == "h_cur_reject" and arg:
+                job_id = int(arg)
+                _cur.reject(job_id)
+                await query.message.delete()
+
+            # ── CAPA toggle ──────────────────────────────────────────────────
+            elif action == "h_cur_capa" and len(parts) >= 3:
+                job_id  = int(parts[1])
+                capa_id = int(parts[2])
+                state   = _load_state(job_id)
+                if state.get("hilo") == capa_id:
+                    state["hilo"] = None
+                    with _sq.connect(_HDB) as _c:
+                        _c.execute("UPDATE jobs SET hilo=NULL WHERE id=?", (job_id,))
+                else:
+                    state["hilo"] = capa_id
+                    with _sq.connect(_HDB) as _c:
+                        _c.execute("UPDATE jobs SET hilo=? WHERE id=?", (capa_id, job_id))
+                _save_state(job_id, state)
+                keyboard = _cur.build_card_keyboard(job_id, state)
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+                _capa_names = {1: "Informarse es respetarse", 2: "Mundo empresarial", 3: "La Voz de las pymes"}
+                ans = (f"✅ CAPA: {_capa_names[capa_id]}" if state.get("hilo")
+                       else "Capa deseleccionada")
+                await query.answer(ans, show_alert=False)
+
+            # ── Sub-menú categorías (con preseleción marcada) ───────────────────
+            # -- Sub-menu categorias multi-select ----------------------------------
+            elif action == "h_cur_cats" and arg:
+                job_id = int(arg)
+                state = _load_state(job_id)
+                # Migrar formato viejo (single -> multi)
+                if "category_id" in state and "category_ids" not in state:
+                    state["category_ids"] = [state["category_id"]]
+                sel_ids = state.get("category_ids", [])
+                _CAT_NAMES_LOCAL = {
+                    94: "Economia", 87: "Politica", 96: "Empresas", 97: "Internacional",
+                    100: "Gobierno", 95: "AFIP/ARCA", 90: "Industria", 91: "Opinion",
+                    89: "Comercio", 88: "Agro", 103: "Informes", 102: "Provincias",
+                    93: "Sindicatos", 92: "Servicios", 239: "Digital pymes", 1139: "Mundo del vino",
+                    101: "Poder Judicial", 99: "Congreso", 98: "Nacional",
+                    104: "ME TV", 1048: "Coberturas",
+                }
+                rows = []
+                cat_items = list(_CAT_NAMES_LOCAL.items())
+                for i in range(0, len(cat_items), 2):
+                    row = []
+                    for cat_id, cat_name in cat_items[i:i+2]:
+                        prefix = "☑️ " if cat_id in sel_ids else ""
+                        row.append({"text": prefix+cat_name, "callback_data": f"h_cur_setcat:{job_id}:{cat_id}"})
+                    rows.append(row)
+                rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
+                kb = {"inline_keyboard": rows}
+                await query.edit_message_text(
+                    f"🗂 <b>Categorias</b> (job #{job_id}) — toca para seleccionar/deseleccionar:",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+
+            # -- Setear/deseleccionar categoria (multi-select) --------------------
+            elif action == "h_cur_setcat" and len(parts) >= 3:
+                job_id = int(parts[1])
+                cat_id = int(parts[2])
+                state  = _load_state(job_id)
+                if "category_id" in state and "category_ids" not in state:
+                    state["category_ids"] = [state["category_id"]]
+                cat_ids = state.get("category_ids", [])
+                if cat_id in cat_ids:
+                    cat_ids.remove(cat_id)
+                    label = "Categoria removida"
+                else:
+                    cat_ids.append(cat_id)
+                    label = "Categoria agregada"
+                state["category_ids"] = cat_ids
+                _save_state(job_id, state)
+                # Actualizar el sub-menu de categorias (mantener abierto)
+                _CAT_NAMES_LOCAL = {
+                    94: "Economia", 87: "Politica", 96: "Empresas", 97: "Internacional",
+                    100: "Gobierno", 95: "AFIP/ARCA", 90: "Industria", 91: "Opinion",
+                    89: "Comercio", 88: "Agro", 103: "Informes", 102: "Provincias",
+                    93: "Sindicatos", 92: "Servicios", 239: "Digital pymes", 1139: "Mundo del vino",
+                    101: "Poder Judicial", 99: "Congreso", 98: "Nacional",
+                    104: "ME TV", 1048: "Coberturas",
+                }
+                rows = []
+                cat_items = list(_CAT_NAMES_LOCAL.items())
+                for i in range(0, len(cat_items), 2):
+                    row = []
+                    for cid, cname in cat_items[i:i+2]:
+                        prefix = "☑️ " if cid in cat_ids else ""
+                        row.append({"text": prefix+cname, "callback_data": f"h_cur_setcat:{job_id}:{cid}"})
+                    rows.append(row)
+                rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
+                kb = {"inline_keyboard": rows}
+                await query.edit_message_reply_markup(reply_markup=kb)
+                await _update_card(job_id, state, query.message.chat_id)
+                await query.answer(label, show_alert=False)
+
+            elif action == "h_cur_tags" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                context.user_data["awaiting_tags_for"] = job_id
+                current_tags = state.get("tags", [])
+                current_text = (f"\nActuales: <code>{', '.join(current_tags)}</code>"
+                                if current_tags else "")
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"🏷 <b>Etiquetas para nota #{job_id}</b>{current_text}\n\n"
+                        f"Escribí las etiquetas separadas por coma:\n"
+                        f"<code>pymes, monotributo, ARCA, exportaciones</code>"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "↩ Volver", "callback_data": "h_cur_volver"}
+                    ]]}
+                )
+
+            # ── Instrucción — muestra prompt con instrucción actual y botón Volver ─
+            elif action == "h_cur_instruct" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                context.user_data["awaiting_inst_for"] = job_id
+                current_inst = state.get("instructions", "")
+                current_text = (f"\nActual: <i>{current_inst[:80]}</i>"
+                                if current_inst else "")
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"📝 <b>Instrucciones para nota #{job_id}</b>{current_text}\n\n"
+                        f"Escribí el enfoque directamente:\n"
+                        f"<i>Ej: enfocalo en pymes exportadoras, tono crítico</i>\n"
+                        f"<i>Ej: versión corta, solo datos duros</i>"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "↩ Volver", "callback_data": "h_cur_volver"}
+                    ]]}
+                )
+
+            # ── Formato (continua / desplegable) ──────────────────────────────
+            elif action == "h_cur_fmt" and len(parts) >= 3:
+                job_id = int(parts[1])
+                fmt    = parts[2]  # "continua" | "desplegable"
+                state  = _load_state(job_id)
+                state["formato"] = fmt
+                _save_state(job_id, state)
+                keyboard = _cur.build_card_keyboard(job_id, state)
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+                await query.answer(
+                    "☑️ Formato: continua" if fmt == "continua" else "☑️ Formato: desplegable",
+                    show_alert=False
+                )
+
+            # ── Keywords — ver lista con pesos y ajustar ──────────────────────
+            elif action == "h_cur_kw" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                matched_kw = state.get("matched_kw", [])
+                with _sq.connect(_HDB) as _c:
+                    _jrow = _c.execute(
+                        "SELECT title, source_url FROM jobs WHERE id=?", (job_id,)
+                    ).fetchone()
+                _jtitle = (_jrow[0] if _jrow else "") or ""
+                _jurl   = (_jrow[1] if _jrow else "") or ""
+                _title_short = _jtitle[:55] + "…" if len(_jtitle) > 55 else _jtitle
+
+                def _kw_keyboard(kws, jid):
+                    _rows = []
+                    for k in kws:
+                        ww = _br.get_keyword_weight(k)
+                        em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                        _rows.append([
+                            {"text": f"{em} {k}  {ww:+.1f}",
+                             "callback_data": f"h_cur_kw:{jid}"},
+                            {"text": "👍",  "callback_data": f"h_cur_kw_up:{jid}:{k}"},
+                            {"text": "👎",  "callback_data": f"h_cur_kw_dn:{jid}:{k}"},
+                            {"text": "✖️",  "callback_data": f"h_cur_kw_rm:{jid}:{k}"},
+                            {"text": "🗑",  "callback_data": f"h_cur_kw_del:{jid}:{k}"},
+                        ])
+                    _rows.append([{"text": "✏️ Ajustar etiquetas",
+                                   "callback_data": f"h_cur_kw_add:{jid}"}])
+                    _rows.append([{"text": "↩ Volver",
+                                   "callback_data": f"h_cur_volver:{jid}"}])
+                    return {"inline_keyboard": _rows}
+
+                _hdr = (
+                    f"🔑 <b><a href='{_jurl}'>{_title_short}</a></b>\n"
+                    f"<i>👍👎 ajustar peso  ·  ✖️ quitar de nota</i>"
+                    if _jurl else
+                    f"🔑 <b>{_title_short}</b>\n"
+                    f"<i>👍👎 ajustar peso  ·  ✖️ quitar de nota</i>"
+                )
+                try:
+                    await query.edit_message_text(
+                        _hdr, parse_mode="HTML",
+                        reply_markup=_kw_keyboard(matched_kw, job_id),
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+
+            elif action in ("h_cur_kw_up", "h_cur_kw_dn",
+                            "h_cur_kw_rm", "h_cur_kw_del") and len(parts) >= 3:
+                job_id = int(parts[1])
+                kw     = ":".join(parts[2:])
+                state  = _load_state(job_id)
+                matched_kw = list(state.get("matched_kw", []))
+
+                if action == "h_cur_kw_up":
+                    _br.update_keyword_weight(kw, +0.3)
+                    w = _br.get_keyword_weight(kw)
+                    await query.answer(f"👍 {kw}  {w:+.1f}", show_alert=False)
+
+                elif action == "h_cur_kw_dn":
+                    _br.update_keyword_weight(kw, -0.3)
+                    w = _br.get_keyword_weight(kw)
+                    await query.answer(f"👎 {kw}  {w:+.1f}", show_alert=False)
+
+                elif action == "h_cur_kw_rm":
+                    # Quitar solo de esta nota
+                    if kw in matched_kw:
+                        matched_kw.remove(kw)
+                    state["matched_kw"] = matched_kw
+                    _save_state(job_id, state)
+                    await query.answer(f"✖️ {kw} quitada de esta nota", show_alert=False)
+
+                elif action == "h_cur_kw_del":
+                    # Descalificar para siempre + quitar de esta nota
+                    _br.blacklist_keyword(kw)
+                    if kw in matched_kw:
+                        matched_kw.remove(kw)
+                    state["matched_kw"] = matched_kw
+                    _save_state(job_id, state)
+                    await query.answer(f"🗑 {kw} descalificada para siempre", show_alert=False)
+
+                # Refrescar teclado con la lista actualizada
+                rows = []
+                for k in matched_kw:
+                    ww = _br.get_keyword_weight(k)
+                    em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                    rows.append([
+                        {"text": f"{em} {k}  {ww:+.1f}",
+                         "callback_data": f"h_cur_kw:{job_id}"},
+                        {"text": "👍",  "callback_data": f"h_cur_kw_up:{job_id}:{k}"},
+                        {"text": "👎",  "callback_data": f"h_cur_kw_dn:{job_id}:{k}"},
+                        {"text": "✖️",  "callback_data": f"h_cur_kw_rm:{job_id}:{k}"},
+                        {"text": "🗑",  "callback_data": f"h_cur_kw_del:{job_id}:{k}"},
+                    ])
+                rows.append([{"text": "✏️ Ajustar etiquetas",
+                              "callback_data": f"h_cur_kw_add:{job_id}"}])
+                rows.append([{"text": "↩ Volver",
+                              "callback_data": f"h_cur_volver:{job_id}"}])
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup={"inline_keyboard": rows}
+                    )
+                except Exception:
+                    pass
+
+            elif action == "h_cur_kw_add" and arg:
+                job_id = int(arg)
+                context.user_data["awaiting_kw_for"]              = job_id
+                context.user_data["awaiting_kw_panel_msg_id"]     = query.message.message_id
+                context.user_data["awaiting_kw_panel_chat_id"]    = query.message.chat_id
+                sent = await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"✏️ <b>Agregar etiquetas — nota #{job_id}</b>\n\n"
+                        f"Separalas con coma, punto o <code> - </code>:\n"
+                        f"<code>exportacion, monotributo, arca</code>\n"
+                        f"<i>Se suman a las actuales. Usá ✖️ en el panel para borrar.</i>"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "↩ Volver", "callback_data": f"h_cur_kw_back:{job_id}"}
+                    ]]}
+                )
+                context.user_data["awaiting_kw_prompt_msg_id"] = sent.message_id
+                await query.answer()
+
+            elif action == "h_cur_kw_back" and arg:
+                # Volver desde el prompt de agregar etiquetas → restaurar panel de keywords
+                job_id        = int(arg)
+                panel_msg_id  = context.user_data.pop("awaiting_kw_panel_msg_id",  None)
+                panel_chat_id = context.user_data.pop("awaiting_kw_panel_chat_id", None)
+                context.user_data.pop("awaiting_kw_for", None)
+                context.user_data.pop("awaiting_kw_prompt_msg_id", None)
+                # Borrar el prompt (el mensaje actual con este botón)
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                # Restaurar panel de keywords en el mensaje original
+                if panel_msg_id and panel_chat_id:
+                    state = _load_state(job_id)
+                    matched_kw = state.get("matched_kw", [])
+                    rows = []
+                    for k in matched_kw:
+                        ww = _br.get_keyword_weight(k)
+                        em = "🟢" if ww > 0.5 else ("🔴" if ww < -0.5 else "🟡")
+                        rows.append([
+                            {"text": f"{em} {k}  {ww:+.1f}",
+                             "callback_data": f"h_cur_kw:{job_id}"},
+                            {"text": "👍", "callback_data": f"h_cur_kw_up:{job_id}:{k}"},
+                            {"text": "👎", "callback_data": f"h_cur_kw_dn:{job_id}:{k}"},
+                            {"text": "✖️", "callback_data": f"h_cur_kw_rm:{job_id}:{k}"},
+                            {"text": "🗑", "callback_data": f"h_cur_kw_del:{job_id}:{k}"},
+                        ])
+                    rows.append([{"text": "✏️ Agregar etiquetas",
+                                  "callback_data": f"h_cur_kw_add:{job_id}"}])
+                    rows.append([{"text": "↩ Volver",
+                                  "callback_data": f"h_cur_volver:{job_id}"}])
+                    try:
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=panel_chat_id,
+                            message_id=panel_msg_id,
+                            reply_markup={"inline_keyboard": rows},
+                        )
+                    except Exception:
+                        pass
+                await query.answer()
+
+            # ── Volver — cierra el sub-menú o prompt activo ───────────────────
+            elif action == "h_cur_volver":
+                context.user_data.pop("awaiting_tags_for", None)
+                context.user_data.pop("awaiting_inst_for", None)
+                context.user_data.pop("awaiting_kw_for", None)
+                if arg:
+                    # Viene desde h_cur_cats: el mensaje actual ES la tarjeta
+                    # (fue editada para mostrar categorías). Restaurarla.
+                    job_id = int(arg)
+                    state  = _load_state(job_id)
+                    with _sq.connect(_HDB) as _c:
+                        row = _c.execute(
+                            "SELECT title, score, source_url FROM jobs WHERE id=?",
+                            (job_id,)
+                        ).fetchone()
+                    if row:
+                        _title, _score, _url = row
+                        _domain = (_url.split("//", 1)[-1].split("/")[0]
+                                   .replace("www.", "") if _url else "")
+                        _msg = (
+                            f"<b>{_title}</b>\n"
+                            f"⭐ {float(_score or 0):.1f}  ·  {_domain}\n"
+                            f"<a href='{_url}'>📎 ver fuente</a>"
+                        )
+                        _kb = _cur.build_card_keyboard(job_id, state)
+                        await query.edit_message_text(
+                            _msg, parse_mode="HTML", reply_markup=_kb
+                        )
+                    else:
+                        await query.message.delete()
+                else:
+                    # Viene desde h_cur_tags o h_cur_instruct: borrar el prompt
+                    await query.message.delete()
+                await query.answer()
+
+            # ── Consolidar manual — lista notas y pide números ────────────────
+            elif action == "h_cur_consolidar_manual":
+                import sys as _sys2, sqlite3 as _sq2, json as _js2
+                _sys2.path.insert(0, "/opt/me-harness")
+                with _sq2.connect("/opt/me-harness/harness.db") as _c2:
+                    _jobs_ord = _c2.execute(
+                        "SELECT id, title, score FROM jobs WHERE stage='curado' ORDER BY score DESC"
+                    ).fetchall()
+                context.user_data["awaiting_consolidar_manual"] = True
+                jobs_list = [(i + 1, r[0], r[1]) for i, r in enumerate(_jobs_ord)]
+                context.user_data["briefing_jobs_ordered"] = jobs_list
+                lines = ["📎 <b>Consolidar fuentes manual</b>", ""]
+                lines.append("Ingresá los números de nota separados por coma.")
+                lines.append("El <b>primer número</b> será la nota principal:\n")
+                for pos, jid, title in jobs_list[:30]:
+                    lines.append(f"  <b>{pos}.</b> {(title or '')[:55]}")
+                lines.append("\nEj: <code>3,7</code> → nota 3 con fuente de nota 7")
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="\n".join(lines),
+                    parse_mode="HTML",
+                )
+                await query.answer()
+
+            # ── Cancelar briefing — borra tarjetas + resumen ──────────────────
+            elif action == "h_cur_cancel":
+                chat_id = query.message.chat_id
+                # Borrar todas las tarjetas del briefing activo (jobs en curado con card_msg_id)
+                with _sq.connect(_HDB) as _c:
+                    _rows = _c.execute(
+                        "SELECT content_json FROM jobs WHERE stage='curado'"
+                    ).fetchall()
+                for _row in _rows:
+                    try:
+                        _st = _js.loads(_row[0]) if _row[0] else {}
+                        _mid = _st.get("card_msg_id")
+                        if _mid:
+                            await context.bot.delete_message(chat_id=chat_id, message_id=_mid)
+                    except Exception:
+                        pass
+                # Borrar el mensaje resumen (el que tiene este botón)
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.answer("Briefing cerrado", show_alert=False)
+
+            # ── Paginación ────────────────────────────────────────────────────
+            elif action == "h_cur_more" and arg:
+                offset = int(arg)
+                await asyncio.to_thread(_cur.run_briefing, offset)
+
+        except Exception as _he:
+            logger.warning(f"h_cur handler error: {_he}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"⚠️ Error en curador: {_he}"
+            )
+        return
     # ── 2FA Redacción web ────────────────────────────────────────────────────
     if query.data.startswith("redaccion_2fa_"):
         # formato: redaccion_2fa_<token>  o  redaccion_2fa_deny_<token>
@@ -5994,15 +8901,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("waiting_for_title", None)
         context.user_data.pop("waiting_for_manual_text", None)
         context.chat_data.pop("sug_queue", None)
-        stat_cancel()
         await query.edit_message_text("Cancelado.")
         return
 
-    # ── Agente /c callbacks ──────────────────────────────────────────────────
-    if query.data == "cmdc_cancel":
-        context.user_data.pop("cmd_c_plan", None)
-        await query.edit_message_text("Cancelado.")
-        return
 
     # ── Actualizar post — confirmar / corregir / cancelar ───────────────────
     if query.data == "upd_confirm":
@@ -6043,341 +8944,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Actualización cancelada.")
         return
 
-    if query.data == "cmdc_adjust":
-        context.user_data["waiting_for_cmdc_adjust"] = True
-        await query.edit_message_text(
-            _cmd_c_plan_text(context.user_data.get("cmd_c_plan", {}))
-            + "\n\n_Escribí tus ajustes como mensaje normal:_",
-            parse_mode="Markdown",
-        )
-        return
 
-    if query.data == "cmdc_exec":
-        plan = context.user_data.pop("cmd_c_plan", None)
-        if not plan:
-            await query.edit_message_text("Plan inválido o expirado. Usá /c de nuevo.")
-            return
-
-        url = plan.get("url", "")
-        modo = plan.get("modo", "crear")
-
-        # ── MODO ACTUALIZAR: patch sobre post existente de ME ───────────────────
-        if modo == "actualizar":
-            await query.edit_message_text("Actualizando post existente...")
-            slug = url.rstrip("/").rsplit("/", 1)[-1]
-            r = await asyncio.to_thread(
-                requests.get,
-                f"{WP_URL}/wp-json/wp/v2/posts",
-                params={"slug": slug, "context": "edit"},
-                headers=wp_auth(), timeout=15
-            )
-            posts = r.json() if r.ok else []
-            if not posts or not isinstance(posts, list):
-                await query.edit_message_text(f"No encontré el post en WP para: {url}")
-                context.user_data.pop("cmd_c_photo_bytes", None)
-                return
-            post_id   = posts[0]["id"]
-            post_data = posts[0]
-            patch: dict = {}
-
-            # Foto adjunta → subir y usar como portada
-            photo_bytes = context.user_data.pop("cmd_c_photo_bytes", None)
-            if photo_bytes:
-                await query.edit_message_text("Subiendo imagen adjunta...")
-                alt = plan.get("override_title") or post_data.get("title", {}).get("rendered", "")
-                media_id = await asyncio.to_thread(upload_image_bytes, photo_bytes, "jpg", alt)
-                if media_id:
-                    patch["featured_media"] = media_id
-                else:
-                    await query.edit_message_text("Error subiendo la imagen. Intentá de nuevo.")
-                    return
-
-            if plan.get("override_title"):
-                patch["title"] = plan["override_title"]
-            if plan.get("override_categories"):
-                patch["categories"] = plan["override_categories"]
-
-            # ── Actualizar contenido si hay texto nuevo o instrucciones de reescritura ──
-            raw_input      = plan.get("raw_input", "")
-            redactor_instr = plan.get("redactor_instructions") or ""
-
-            # Detectar si el post existente ya es desplegable (preservarlo siempre)
-            existing_raw = post_data.get("content", {}).get("raw", "")
-            is_existing_desplegable = bool(re.search(r'id="nota-ampliada-\d+', existing_raw))
-            desp_requested = is_existing_desplegable
-
-            # Quitar URL y prefijo de comando del raw_input
-            clean_input = re.sub(r'https?://\S+', '', raw_input).strip()
-            clean_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_input).strip()
-
-            # Si hay un marcador "Texto:" o "Contenido:", separar instrucción de contenido
-            text_marker = re.search(r'(?i)\b(Texto|Contenido)\s*:\s*', clean_input)
-            if text_marker:
-                instr_part     = clean_input[:text_marker.start()].strip()
-                clean_new_text = clean_input[text_marker.end():].strip()
-                if instr_part and not redactor_instr:
-                    redactor_instr = instr_part
-            else:
-                clean_new_text = clean_input
-
-            has_new_text = len(clean_new_text.split()) >= 60
-            # "nota" y "texto" se sacan: demasiado genéricos, disparaban reformat por cualquier mención
-            has_content_instr = bool(re.search(
-                r'mejora|reescrib|agreg|desplegable|estructura|reformate', redactor_instr, re.I
-            ))
-            # Si la instrucción es solo un fix menor (tildes, encoding), no reescribir
-            is_minor_fix = bool(re.search(
-                r'\b(corrig|tilde|acento|caracter|codif|encod)\b', redactor_instr, re.I
-            )) and not has_content_instr
-
-            if (has_new_text or has_content_instr) and not is_minor_fix:
-                await query.edit_message_text("Reformateando contenido...")
-
-                # source_url: extraer del contenido existente o usar la URL del plan
-                src_match = re.search(r'href="(https?://[^"]+)"[^>]*>Ver nota original', existing_raw)
-                source_url = src_match.group(1) if src_match else url
-
-                # Detectar si el usuario quiere trabajar sobre el post actual (no la fuente original)
-                use_current_post = bool(re.search(
-                    r'\b(nota actual|la que hiciste|la actual|lo actual|lo que hiciste|post actual)\b',
-                    redactor_instr, re.I
-                ))
-
-                # Construir body_text: texto nuevo > fuente original (default) > post existente
-                body_text = clean_new_text if has_new_text else ""
-                if not body_text:
-                    if use_current_post:
-                        # "modifica la nota actual" → stripear HTML del post existente
-                        body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
-                        body_text = re.sub(r'<[^>]+>', ' ', body_text)
-                        body_text = re.sub(r'\s+', ' ', body_text).strip()
-                    else:
-                        # Default: re-scrapear la fuente original para evitar degradación iterativa
-                        await query.edit_message_text("Leyendo fuente original...")
-                        scraped = await asyncio.to_thread(scrape, source_url)
-                        if scraped and scraped.get("text", "").strip():
-                            body_text = scraped["text"]
-                        else:
-                            # Fallback si la fuente no responde
-                            logger.warning(f"Re-scrape de fuente falló ({source_url}), usando post existente")
-                            body_text = re.sub(r'<!-- /?wp:[^>]+ -->', '', existing_raw)
-                            body_text = re.sub(r'<[^>]+>', ' ', body_text)
-                            body_text = re.sub(r'\s+', ' ', body_text).strip()
-
-                existing_title = (post_data.get("title", {}).get("raw")
-                                  or post_data.get("title", {}).get("rendered", ""))
-                title = plan.get("override_title") or existing_title
-
-                data_upd = {
-                    "title":      title,
-                    "text":       body_text,
-                    "excerpt":    body_text[:200],
-                    "source_url": source_url,
-                    "image_url":  "",
-                    "hilo":       detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]}),
-                }
-                if redactor_instr:
-                    data_upd["_redactor_instructions"] = redactor_instr
-
-                kw = focus_keyword(title)
-                # desp_requested ya fue seteado arriba (auto-detect + keyword)
-                desp_requested = desp_requested or bool(re.search(r'desplegable', redactor_instr, re.I))
-
-                # Block 1: detectar tipo de contenido para adaptar el prompt de GPT
-                content_type, expected_count = detect_content_type(title)
-
-                # Intentar formatear con GPT (mejor calidad para texto estructurado)
-                gpt_result = await asyncio.to_thread(
-                    _gpt_format_article, title, body_text, source_url, kw, redactor_instr,
-                    content_type, expected_count
-                )
-
-                if gpt_result:
-                    # Construir contenido desde el HTML de GPT
-                    hilo       = detect_hilo({"title": title, "text": body_text, "excerpt": body_text[:200]})
-                    data_upd["_gpt_html"]    = gpt_result["html"]
-                    data_upd["_gpt_bullets"] = gpt_result.get("bullets", [])
-                    toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
-                    fuente_html = (
-                        f'<!-- wp:paragraph -->\n'
-                        f'<p><em>Fuente: <a href="{source_url}" target="_blank" '
-                        f'rel="noopener noreferrer">Ver nota original</a></em></p>\n'
-                        f'<!-- /wp:paragraph -->'
-                    )
-                    if desp_requested:
-                        # Para desplegable: todo el cuerpo en wp:html (necesita JS + inline styles)
-                        body_block = f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->'
-                    else:
-                        # Para nota estándar: bloques Gutenberg nativos (sin wp:html wrapper)
-                        body_block = _gpt_html_to_gutenberg(gpt_result["html"])
-                    new_content = (toc_block + "\n" if toc_block else "") + body_block + "\n" + fuente_html
-                    data_upd["hilo"] = hilo
-                else:
-                    # Fallback a format_content()
-                    logger.warning("_gpt_format_article falló, usando format_content() como fallback")
-                    new_content = format_content(data_upd, kw=kw)
-
-                if desp_requested:
-                    new_content = _wrap_nota_desplegable(post_id, slug, new_content, data_upd)
-
-                patch["content"] = new_content
-                s_desc = get_excerpt(data_upd, kw=kw)
-                patch.setdefault("meta", {})
-                patch["meta"].update({
-                    "rank_math_focus_keyword": kw,
-                    "rank_math_description":   s_desc,
-                })
-                if plan.get("override_title"):
-                    patch["meta"]["rank_math_title"] = _meta_safe(plan["override_title"])
-
-            if not patch:
-                await query.edit_message_text("No hay cambios que aplicar.")
-                return
-
-            # Block 3: mostrar preview y pedir confirmación antes de publicar
-            pending_gpt = locals().get("gpt_result") if "content" in patch else None
-            context.user_data["pending_update"] = {
-                "patch":          patch,
-                "post_id":        post_id,
-                "post_url":       url,
-                "slug":           slug,
-                "desp_requested": desp_requested,
-                "gpt_result":     pending_gpt,
-                # para re-run en Corregir
-                "title":          locals().get("title", ""),
-                "body_text":      locals().get("body_text", ""),
-                "source_url":     locals().get("source_url", url),
-                "kw":             locals().get("kw", ""),
-                "redactor_instr": locals().get("redactor_instr", ""),
-                "data_upd":       locals().get("data_upd", {}),
-                "content_type":   locals().get("content_type", "standard"),
-                "expected_count": locals().get("expected_count", 0),
-            }
-            preview_text = _build_upd_preview(patch, pending_gpt, desp_requested)
-            kb_upd = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Confirmar", callback_data="upd_confirm"),
-                InlineKeyboardButton("✏️ Corregir",  callback_data="upd_correct"),
-                InlineKeyboardButton("❌ Cancelar",  callback_data="upd_cancel"),
-            ]])
-            await query.edit_message_text(preview_text, parse_mode="Markdown", reply_markup=kb_upd)
-            return
-        # ── fin modo actualizar ────────────────────────────────────────────────
-
-        await query.edit_message_text("Procesando la nota...")
-
-        if url and url.startswith("http"):
-            kind = detect_url_kind(url)
-            try:
-                if kind == "youtube":
-                    data = await asyncio.to_thread(scrape_youtube, url)
-                else:
-                    data = await asyncio.to_thread(scrape, url)
-            except Exception as e:
-                logger.exception("cmdc_exec scrape error: %s", url)
-                await query.edit_message_text(f"No pude extraer la nota: {e}")
-                return
-        else:
-            # Modo texto directo: el contenido viene en raw_input del plan
-            raw_input = plan.get("raw_input", "").strip()
-            if not raw_input:
-                await query.edit_message_text(
-                    "No hay URL ni texto para procesar. Pegá el contenido junto con /c."
-                )
-                return
-            # Detectar URL de referencia en el texto
-            ref_match = re.search(r'https?://\S+', raw_input)
-            ref_url = ref_match.group(0).rstrip(".,;)>") if ref_match else ""
-            # Limpiar el texto: quitar URLs y prefijo del comando
-            clean_text = re.sub(r'https?://\S+', '', raw_input).strip()
-            clean_text = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', clean_text).strip()
-
-            MIN_WORDS = 60
-            if len(clean_text.split()) < MIN_WORDS:
-                # Texto insuficiente — intentar scrapeando la URL de referencia
-                if ref_url:
-                    await query.edit_message_text(
-                        f"Texto muy corto para generar una nota. "
-                        f"Intentando extraer contenido de {ref_url}…"
-                    )
-                    try:
-                        data = await asyncio.to_thread(scrape, ref_url)
-                    except Exception as e:
-                        await query.edit_message_text(
-                            f"No pude extraer contenido de {ref_url}: {e}\n\n"
-                            "Pegá el texto completo del artículo junto con /c."
-                        )
-                        return
-                else:
-                    await query.edit_message_text(
-                        "El texto es muy corto para generar una nota \\(mínimo 60 palabras\\)\\. "
-                        "Pegá el contenido completo del artículo junto con /c\\.",
-                        parse_mode="MarkdownV2"
-                    )
-                    return
-            else:
-                source_url = ref_url or "https://mundoempresarial.ar"
-                if plan.get("override_title"):
-                    title = plan["override_title"]
-                else:
-                    first_sent = re.split(r'(?<=[.!?])\s+', clean_text)[0]
-                    title = (first_sent[:80] if first_sent else clean_text[:80]).strip()
-                data = {
-                    "title":      title,
-                    "text":       clean_text,
-                    "excerpt":    clean_text[:200],
-                    "source_url": source_url,
-                    "image_url":  "",
-                    "hilo":       2,
-                }
-
-        # Aplicar overrides del plan
-        if plan.get("override_title"):
-            data["title"] = plan["override_title"]
-        if plan.get("override_categories") is not None:
-            data["_cat_override"] = plan["override_categories"]
-        if plan.get("redactor_instructions"):
-            data["_redactor_instructions"] = plan["redactor_instructions"]
-
-        # Foto adjunta: subir a WP y usar como portada
-        photo_bytes = context.user_data.pop("cmd_c_photo_bytes", None)
-        if photo_bytes:
-            await query.edit_message_text("Subiendo imagen adjunta...")
-            alt = get_title(data)
-            media_id = await asyncio.to_thread(upload_image_bytes, photo_bytes, "jpg", alt)
-            if media_id:
-                data["_featured_media_id"] = media_id
-                data["image_url"] = ""  # no re-subir desde URL
-
-        # Aplicar toggles de canales
-        channels = plan.get("channels", ["wordpress", "telegram", "twitter"])
-        context.user_data["tw_on"]   = "twitter"  in channels
-        context.user_data["tg_on"]   = "telegram" in channels
-        context.user_data["li_on"]   = "linkedin" in channels
-        context.user_data["wa_on"]   = False
-        context.user_data["dest_on"] = False
-
-        hilo = detect_hilo(data)
-        data["hilo"] = hilo
-        context.user_data["article"] = data
-
-        # Generar bajada reescrita
-        if not data.get("rewritten_excerpt"):
-            kw = focus_keyword(data.get("original_title") or data.get("title", ""))
-            try:
-                instr = plan.get("redactor_instructions") or ""
-                data["rewritten_excerpt"] = await asyncio.to_thread(
-                    rewrite_excerpt_with_gpt,
-                    get_title(data), data.get("text", ""),
-                    data.get("original_excerpt") or data.get("excerpt", ""),
-                    kw + (f". {instr}" if instr else ""),
-                )
-            except Exception:
-                data["rewritten_excerpt"] = ""
-
-        kb = _preview_kb_from_ctx(context)
-        await query.edit_message_text(build_preview(data), parse_mode="Markdown", reply_markup=kb)
-        return
-    # ── fin agente /c ────────────────────────────────────────────────────────
 
     if query.data == "change_title":
         context.user_data["waiting_for_title"] = True
@@ -6385,74 +8952,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Escribi el nuevo titulo para la nota\n"
             "(solo escribilo como mensaje normal):"
         )
-        return
-
-    # ── Toggles ──
-    if query.data == "toggle_tw":
-        context.user_data["tw_on"] = not context.user_data.get("tw_on", True)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_tg":
-        context.user_data["tg_on"] = not context.user_data.get("tg_on", True)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_wa":
-        context.user_data["wa_on"] = not context.user_data.get("wa_on", False)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_li":
-        context.user_data["li_on"] = not context.user_data.get("li_on", False)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_dest":
-        context.user_data["dest_on"] = not context.user_data.get("dest_on", False)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_orig_title":
-        new_val = not context.user_data.get("orig_title_on", False)
-        context.user_data["orig_title_on"] = new_val
-        data = context.user_data.get("article")
-        if data:
-            data["orig_title_on"] = new_val
-            context.user_data["article"] = data
-            await query.edit_message_text(
-                build_preview(data),
-                parse_mode="Markdown",
-                reply_markup=_preview_kb_from_ctx(context),
-            )
-        else:
-            await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_orig_excerpt":
-        new_val = not context.user_data.get("orig_excerpt_on", False)
-        context.user_data["orig_excerpt_on"] = new_val
-        data = context.user_data.get("article")
-        if data:
-            data["orig_excerpt_on"] = new_val
-            context.user_data["article"] = data
-            await query.edit_message_text(
-                build_preview(data),
-                parse_mode="Markdown",
-                reply_markup=_preview_kb_from_ctx(context),
-            )
-        else:
-            await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_eco":
-        context.user_data["eco_on"] = not context.user_data.get("eco_on", False)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
-        return
-
-    if query.data == "toggle_desp":
-        context.user_data["desp_on"] = not context.user_data.get("desp_on", False)
-        await query.edit_message_reply_markup(reply_markup=_preview_kb_from_ctx(context))
         return
 
     # ─── Frases flow ─────────────────────────────────────────────────────────────
@@ -6544,32 +9043,26 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res_lines = []
 
             if wp_on:
-                await query.edit_message_caption(caption="📤 Publicando en WordPress…")
+                await query.edit_message_caption(caption="📤 Publicando…")
                 try:
-                    wp_data  = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes)
-                    post_url = wp_data["link"]
-                    post_id  = wp_data["id"]
-                    res_lines.append(f"✅ WP: {post_url}")
-                except Exception as e:
-                    res_lines.append(f"❌ WP: {e}")
-
-            await query.edit_message_caption(caption="📲 Publicando en redes…")
-
-            if tg_on:
-                try:
-                    cap_tg = f"💬 *{md_escape(frase)}*"
-                    if post_url:
-                        cap_tg += f"\n\n🔗 [Ver en web]({utm_url(post_url, 'telegram')})"
-                    cap_tg += f"\n\n{custom_ht}"
-                    bio = io.BytesIO(img_bytes)
-                    bio.name = "frase.png"
-                    await context.bot.send_photo(
-                        chat_id=TELEGRAM_CHANNEL, photo=bio,
-                        caption=cap_tg, parse_mode="Markdown",
+                    import sys as _sys_fr
+                    _sys_fr.path.insert(0, "/opt/me-harness")
+                    from agents.frases import publish as _frases_publish
+                    _fr_result = await asyncio.to_thread(
+                        _frases_publish, frase, img_bytes,
+                        tw_on=tw_on, tg_on=tg_on, hashtags=custom_ht
                     )
-                    res_lines.append("✅ Canal TG")
+                    post_url = _fr_result["wp_link"]
+                    post_id  = _fr_result["wp_id"]
+                    res_lines.append(f"✅ WP: {post_url}")
+                    if _fr_result.get("tg_msg_id"):
+                        res_lines.append("✅ Canal TG")
+                    if _fr_result.get("tweet_id"):
+                        res_lines.append("✅ Twitter")
+                    # Marcar como ya publicado en redes para no repetir abajo
+                    tg_on = False
                 except Exception as e:
-                    res_lines.append(f"❌ Canal TG: {e}")
+                    res_lines.append(f"❌ Error: {e}")
 
             if li_on and post_url:
                 li_url = await asyncio.to_thread(post_linkedin, {"title": frase, "excerpt": ""}, post_url)
@@ -6742,11 +9235,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 img_bytes = ft.get("img_bytes") or b""
                 media_id  = None
                 if img_bytes:
-                    r_media  = requests.post(
-                        "https://upload.twitter.com/1.1/media/upload.json",
-                        files={"media": img_bytes}, auth=auth, timeout=30,
-                    )
-                    media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
+                    _mime = _twitter_mime(img_bytes)
+                    if _mime:
+                        r_media = requests.post(
+                            "https://upload.twitter.com/1.1/media/upload.json",
+                            files={"media": ("image", img_bytes, _mime)}, auth=auth, timeout=30,
+                        )
+                        media_id = r_media.json().get("media_id_string") if r_media.status_code == 200 else None
+                    else:
+                        logger.warning("Frase: formato imagen no soportado por Twitter, tweet sin imagen")
                 frase     = ft["frase"]
                 post_url  = ft.get("post_url", "")
                 custom_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
@@ -7120,63 +9617,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Publicado!\n\n{url}")
         return
 
-    # ── Publicar auto: preview unificado ──
-    if query.data == "pub_auto":
-        if not data:
-            await query.edit_message_text("No hay nota activa.")
-            return
-        tw_on   = context.user_data.get("tw_on", True)
-        tg_on   = context.user_data.get("tg_on", True)
-        li_on   = context.user_data.get("li_on", False)
-        dest_on = context.user_data.get("dest_on", False)
-        s_title = get_title(data)
-        s_slug  = url_slug(data["title"])
-        cat_ids = detect_categories(data["title"], data["text"], data["excerpt"])
-        cats_str = " · ".join(CAT_NAMES.get(c, str(c)) for c in cat_ids)
-        tags_str = " · ".join(extract_tags(data["title"])[:4])
-        hts      = _build_hashtags(data)
-        from datetime import datetime, timezone, timedelta
-        _tz_arg = timezone(timedelta(hours=-3))
-        _now = datetime.now(_tz_arg)
-        dias = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
-        fecha_str = f"{dias[_now.weekday()]} {_now.day}/{_now.month}/{_now.year} {_now.strftime('%H:%M')}"
-        ch_tw = "✅" if tw_on else "❌"
-        ch_tg = "✅" if tg_on else "❌"
-        ch_li = "✅" if li_on else "❌"
-        dest_str = "⭐ Sí" if dest_on else "No"
-        preview_text = (
-            f"⚡ *Publicar auto*\n\n"
-            f"📰 *{md_escape(s_title)}*\n"
-            f"🔗 `/{s_slug}`\n"
-            f"🗂 {cats_str}\n"
-            f"🏷 {tags_str}\n"
-            f"🐦 `{md_escape(hts)}`\n\n"
-            f"📢 Canal TG: {ch_tg}  |  🐦 Twitter: {ch_tw}  |  💼 LinkedIn: {ch_li}\n"
-            f"⭐ Destacado: {dest_str}\n\n"
-            f"🕐 {fecha_str}\n\n"
-            f"¿Publicar ahora?"
-        )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirmar", callback_data="pub_auto_confirm"),
-                InlineKeyboardButton("✏️ Volver",    callback_data="pub_auto_back"),
-                InlineKeyboardButton("❌ Cancelar",  callback_data="cancel"),
-            ]
-        ])
-        await query.edit_message_text(preview_text, parse_mode="Markdown", reply_markup=kb)
-        return
-
-    if query.data == "pub_auto_back":
-        if not data:
-            await query.edit_message_text("No hay nota activa.")
-            return
-        await query.edit_message_text(
-            build_preview(data),
-            parse_mode="Markdown",
-            reply_markup=_preview_kb_from_ctx(context),
-        )
-        return
-
     if query.data == "pub_auto_confirm":
         if not data:
             await query.edit_message_text("No hay nota activa.")
@@ -7187,89 +9627,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         li_on   = context.user_data.get("li_on", False)
         dest_on = context.user_data.get("dest_on", False)
 
-        await query.edit_message_text("⚡ Publicando…")
+        await query.edit_message_text("📤 Enviando al harness…")
 
-        # Imagen — prioridad: foto adjunta de /Claude > image_url scrapeada
         image_id = data.pop("_featured_media_id", None)
         if not image_id and data.get("image_url"):
             kw  = focus_keyword(data["title"])
             alt = f"{kw} - {get_title(data)}"
             image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
-        # WordPress
-        published = await asyncio.to_thread(publish_post, data, image_id, dest_on)
-        if not published:
-            err = _LAST_WP_ERROR or "sin detalle"
-            await query.edit_message_text(
-                f"❌ Error al publicar en WordPress.\n`{md_escape(err[:300])}`",
-                parse_mode="Markdown",
-            )
-            return
-
-        post_url     = published["link"]
-        post_id      = published["id"]
-        post_content = published["content"]
-        suffix       = " (Destacados)" if dest_on else ""
-
-        if context.user_data.get("desp_on", False):
-            slug = published.get("slug", url_slug(data["title"]))
-            wrapped = _wrap_nota_desplegable(post_id, slug, post_content, data)
-            if await asyncio.to_thread(update_post, post_id, {"content": wrapped}):
-                post_content = wrapped
-
-        stat_publish(data["title"], data.get("source_url", ""))
-        context.user_data["published"] = {
-            "url": post_url, "data": data, "id": post_id, "content": post_content
-        }
-        context.user_data.pop("custom_hashtags", None)
-
-        results = [f"✅ WordPress{suffix}\n🔗 {md_escape(post_url)}"]
-        tg_msg_id  = 0
-        tweet_id   = ""
-        li_urn     = ""
-
-        # Canal TG
-        if tg_on:
-            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
-            if tg_msg_id:
-                results.append(f"📢 Canal TG: t.me/MundoEmpresarial\\_AR/{tg_msg_id}")
-                context.user_data["published"]["tg_msg_id"] = tg_msg_id
-            else:
-                results.append("❌ Canal TG: error")
-
-        # Twitter (auto, sin preguntar)
-        if tw_on:
-            custom_ht = context.user_data.get("custom_hashtags")
-            tweet_url = await asyncio.to_thread(post_tweet, data, post_url, custom_ht)
-            if tweet_url:
-                tweet_id = tweet_url.rsplit("/", 1)[-1]
-                results.append(f"🐦 Twitter: {md_escape(tweet_url)}")
-            else:
-                err_tw = get_last_twitter_error() or "(sin detalle)"
-                results.append(f"❌ Twitter: `{md_escape(err_tw[:150])}`")
-
-        # LinkedIn
-        if li_on:
-            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
-            if li_url:
-                li_urn = _LAST_LINKEDIN_URN
-                results.append(f"💼 LinkedIn: {md_escape(li_url)}")
-            else:
-                results.append(f"❌ LinkedIn: {md_escape((_LAST_LINKEDIN_ERROR or '')[:80])}")
-
-        # Persistir social meta
-        await asyncio.to_thread(
-            append_social_meta, post_id, post_content,
-            tweet_id, tg_msg_id, li_urn,
-        )
-
-        # Editar el mismo mensaje con resultado
+        job_id = await asyncio.to_thread(_enqueue_to_harness, data, image_id, dest_on)
         await query.edit_message_text(
-            "⚡ *Publicado*\n\n" + "\n".join(results),
+            f"✅ *En cola del harness* — job \\#{job_id}\n"
+            f"El publicador lo publica en segundos con formato estándar\\.",
             parse_mode="Markdown",
         )
 
-        # Si vino de auto_edit, marcar como done en auto_todo_processed
         _edit_idx = context.user_data.pop("auto_todo_edit_idx", None)
         if _edit_idx is not None:
             _proc = context.chat_data.get("auto_todo_processed", [])
@@ -7277,7 +9649,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _proc[_edit_idx]["done"] = True
                 context.chat_data["auto_todo_processed"] = _proc
 
-        # Si hay cola de sugerencia, procesar la siguiente
         sug_queue = context.chat_data.get("sug_queue", [])
         if sug_queue:
             next_url = sug_queue.pop(0)
@@ -7290,158 +9661,56 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(handle_link(fake_upd, context))
         return
 
-    # ── Publicar ──
+    # ── Publicar (fallback) → harness ──
     destacado = context.user_data.get("dest_on", False)
-    label = "destacada " if destacado else ""
-    await query.edit_message_text(f"Publicando nota {label}...")
+    await query.edit_message_text("📤 Enviando al harness…")
 
     image_id = None
-    if data["image_url"]:
+    if data.get("image_url"):
         kw  = focus_keyword(data["title"])
         alt = f"{kw} - {get_title(data)}"
         image_id = await asyncio.to_thread(upload_image, data["image_url"], alt)
 
-    published = await asyncio.to_thread(publish_post, data, image_id, destacado)
-
-    if published:
-        post_url = published["link"]
-        post_id = published["id"]
-        post_content = published["content"]
-
-        # Estadísticas
-        stat_publish(data["title"], data.get("source_url", ""))
-
-        context.user_data["published"] = {
-            "url": post_url, "data": data, "id": post_id, "content": post_content
-        }
-        context.user_data.pop("custom_hashtags", None)
-        suffix = " (Destacados)" if destacado else ""
-
-        tw_on = context.user_data.get("tw_on", True)
-        tg_on = context.user_data.get("tg_on", True)
-        wa_on = context.user_data.get("wa_on", False)
-        li_on = context.user_data.get("li_on", False)
-
-        results = [f"✅ Publicado en WordPress{suffix}!\n{md_escape(post_url)}"]
-
-        # Publicar en canal TG y guardar message_id
-        tg_msg_id = 0
-        if tg_on:
-            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
-            if tg_msg_id:
-                results.append("✅ Publicado en canal @MundoEmpresarial\\_AR")
-                context.user_data["published"]["tg_msg_id"] = tg_msg_id
-            else:
-                results.append("❌ Error al publicar en canal TG")
-
-        # Guardar tg_msg_id inmediatamente en el post
-        if tg_msg_id:
-            await asyncio.to_thread(
-                append_social_meta, post_id, post_content,
-                "", tg_msg_id
-            )
-
-        if tw_on:
-            tweet_preview = build_tweet(data, post_url)
-            kb_tweet = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Twittear", callback_data="tweet"),
-                    InlineKeyboardButton("No twittear", callback_data="no_tweet"),
-                ],
-                [InlineKeyboardButton("Cambiar HT", callback_data="change_ht")],
-            ])
-            await query.edit_message_text(
-                "\n".join(results) + "\n\n"
-                f"— Vista previa del tweet —\n"
-                f"`{md_escape(tweet_preview)}`",
-                parse_mode="Markdown",
-                reply_markup=kb_tweet,
-            )
-        else:
-            await query.edit_message_text("\n".join(results), parse_mode="Markdown")
-
-        if wa_on:
-            s_title = get_title(data)
-            kw_wa = focus_keyword(data.get("original_title") or data.get("title", ""))
-            s_excerpt_wa = get_excerpt(data, kw=kw_wa)
-            wa_text = f"📰 {s_title}\n\n{s_excerpt_wa[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
-            await query.message.reply_text(
-                f"— Copiá y pegá en WhatsApp —\n\n{wa_text}"
-            )
-
-        if li_on:
-            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
-            if li_url:
-                await query.message.reply_text(f"✅ LinkedIn: {li_url}")
-                if _LAST_LINKEDIN_URN:
-                    await asyncio.to_thread(
-                        append_social_meta, post_id, post_content, li_urn=_LAST_LINKEDIN_URN
-                    )
-            else:
-                err = _LAST_LINKEDIN_ERROR or "error desconocido"
-                await query.message.reply_text(f"❌ LinkedIn: {err[:150]}")
-
-        # ECO: si está activado, abrir menú de configuración del eco
-        if context.user_data.get("eco_on"):
-            eco = {
-                "post_id":   post_id,
-                "wp_url":    post_url,
-                "data":      dict(data),
-                "alt_title": None,
-                "alt_bajada": None,
-                "tw_on":     True,
-                "tg_on":     True,
-                "li_on":     False,
-            }
-            context.user_data["eco"] = eco
-            await query.message.reply_text(
-                _eco_preview_text(eco),
-                parse_mode="Markdown",
-                reply_markup=_build_eco_kb(eco),
-            )
-    else:
-        err_detail = _LAST_WP_ERROR or "sin detalle"
-        await query.edit_message_text(f"❌ Error al publicar en WordPress.\n`{err_detail[:300]}`", parse_mode="Markdown")
+    job_id = await asyncio.to_thread(_enqueue_to_harness, data, image_id, destacado)
+    await query.edit_message_text(
+        f"✅ *En cola del harness* — job \\#{job_id}\n"
+        f"El publicador lo publica en segundos con formato estándar\\.",
+        parse_mode="Markdown",
+    )
 
 
 # ── Borrar nota ───────────────────────────────────────────────────────────────
 
 def find_post(query: str) -> dict | None:
-    """Busca un post en WP. Usa context=edit para obtener raw content (con comments)."""
-    h = wp_auth()
+    """Busca un post en WP vía WARP (Ferozo bloquea IP del VPS con 415 sin proxy)."""
+    h    = wp_auth()
+    warp = {"http": "socks5://127.0.0.1:40000", "https": "socks5://127.0.0.1:40000"}
+
+    def _extract(p):
+        return {
+            "id":             p["id"],
+            "title":          p["title"].get("rendered", ""),
+            "link":           p["link"],
+            "categories":     p.get("categories", []),
+            "featured_media": p.get("featured_media", 0),
+            "content":        p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", ""),
+        }
+
     if query.strip().isdigit():
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts/{query.strip()}?context=edit",
-            headers=h, timeout=10
+            headers=h, proxies=warp, timeout=10
         )
-        if r.status_code == 200:
-            p = r.json()
-            return {
-                "id": p["id"],
-                "title": p["title"].get("rendered", ""),
-                "link": p["link"],
-                "categories": p.get("categories", []),
-                "featured_media": p.get("featured_media", 0),
-                "content": p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", ""),
-            }
-        return None
+        return _extract(r.json()) if r.status_code == 200 else None
 
     clean = query.strip().rstrip("/")
-    slug = clean.split("/")[-1]
+    slug  = clean.split("/")[-1]
     r = requests.get(
-        f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1&context=edit",
-        headers=h, timeout=10
+        f"{WP_URL}/wp-json/wp/v2/posts?slug={slug}&per_page=1&context=edit&status=any",
+        headers=h, proxies=warp, timeout=10
     )
     if r.status_code == 200 and r.json():
-        p = r.json()[0]
-        return {
-            "id": p["id"],
-            "title": p["title"].get("rendered", ""),
-            "link": p["link"],
-            "categories": p.get("categories", []),
-            "featured_media": p.get("featured_media", 0),
-            "content": p.get("content", {}).get("raw", "") or p.get("content", {}).get("rendered", ""),
-        }
+        return _extract(r.json()[0])
     return None
 
 
@@ -8174,6 +10443,456 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 
+# ── /publicador — Gestión de notas publicadas ─────────────────────────────────
+
+_PUBX_NETS_LINKS = ["wp", "telegram", "twitter", "facebook", "instagram", "linkedin", "whatsapp"]
+_PUBX_NETS_REP   = ["telegram", "twitter", "facebook", "instagram", "linkedin", "whatsapp"]
+_PUBX_NETS_DEL   = ["wp", "telegram", "twitter", "linkedin"]
+
+_PUBX_NET_LABEL = {
+    "wp": "WordPress", "telegram": "Telegram", "twitter": "Twitter",
+    "facebook": "Facebook", "instagram": "Instagram",
+    "linkedin": "LinkedIn", "whatsapp": "WhatsApp",
+}
+
+
+def _pubx_copy(net: str, title: str, excerpt: str, url: str, post_id: int) -> str:
+    """Copy + link UTM para compartir en cada red."""
+    ex = excerpt[:280] if excerpt else ""
+    if net == "wp":
+        edit_url = f"{WP_URL}/wp-admin/post.php?post={post_id}&action=edit"
+        return f"🌐 *WordPress*\n{url}\nAdmin: {edit_url}"
+    if net == "telegram":
+        return f"📰 *{md_escape(title)}*\n\n{md_escape(ex)}\n\n{utm_url(url, 'telegram')}"
+    if net == "twitter":
+        tw = utm_url(url, "twitter")
+        head = title[:200] if len(title) > 200 else title
+        return f"{head}\n\n{tw}"
+    if net == "facebook":
+        return f"📰 {title}\n\n{ex}\n\n{utm_url(url, 'facebook')}"
+    if net == "instagram":
+        return f"📷 {title}\n\n{ex}\n\n#MundoEmpresarial #Economia #Pymes #Argentina"
+    if net == "linkedin":
+        return f"{title}\n\n{ex}\n\n{utm_url(url, 'linkedin')}"
+    if net == "whatsapp":
+        return f"*{title}*\n\n{ex}\n\n{utm_url(url, 'whatsapp')}"
+    return f"{title}\n{url}"
+
+
+def _build_pubx_main_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Traer links",  callback_data="pubx_links")],
+        [InlineKeyboardButton("🔁 Republicar",   callback_data="pubx_rep")],
+        [InlineKeyboardButton("🗑️ Borrar",       callback_data="pubx_del")],
+        [InlineKeyboardButton("↩️ Cerrar",       callback_data="pubx_cancel")],
+    ])
+
+
+def _build_pubx_links_kb(sel: set) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for net in _PUBX_NETS_LINKS:
+        icon = "✅" if net in sel else "☐"
+        row.append(InlineKeyboardButton(f"{icon} {_PUBX_NET_LABEL[net]}",
+                                        callback_data=f"pubx_lt_{net}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("📤 Traer",    callback_data="pubx_links_send"),
+        InlineKeyboardButton("↩️ Volver",  callback_data="pubx_main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_pubx_rep_kb(sel: set) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for net in _PUBX_NETS_REP:
+        icon = "✅" if net in sel else "☐"
+        row.append(InlineKeyboardButton(f"{icon} {_PUBX_NET_LABEL[net]}",
+                                        callback_data=f"pubx_rt_{net}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("📢 Publicar ahora",  callback_data="pubx_rep_now"),
+        InlineKeyboardButton("⏰ Programar hora",  callback_data="pubx_rep_hora"),
+    ])
+    rows.append([InlineKeyboardButton("↩️ Volver", callback_data="pubx_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_pubx_hora_kb() -> InlineKeyboardMarkup:
+    hours = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    rows = []
+    row = []
+    for h in hours:
+        row.append(InlineKeyboardButton(f"{h:02d}:00", callback_data=f"pubx_hora_{h:02d}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ Volver", callback_data="pubx_rep")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_pubx_del_kb(sel: set, meta: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for net in _PUBX_NETS_DEL:
+        avail = True
+        if net == "telegram" and not meta.get("tg_msg"):
+            avail = False
+        elif net == "twitter" and not meta.get("tweet_id"):
+            avail = False
+        elif net == "linkedin" and not meta.get("li_urn"):
+            avail = False
+        icon   = "✅" if net in sel else "☐"
+        suffix = "" if avail else " (N/A)"
+        rows.append([InlineKeyboardButton(
+            f"{icon} {_PUBX_NET_LABEL[net]}{suffix}",
+            callback_data=f"pubx_dt_{net}",
+        )])
+    rows.append([
+        InlineKeyboardButton("🗑️ Confirmar borrado", callback_data="pubx_del_confirm"),
+        InlineKeyboardButton("↩️ Volver",            callback_data="pubx_main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _pubx_excerpt(post: dict) -> str:
+    raw = post.get("content", "")
+    clean = re.sub(r'<!--[^>]*-->', '', raw)
+    clean = re.sub(r'<[^>]+>', ' ', clean)
+    return re.sub(r'\s+', ' ', clean).strip()[:280]
+
+
+async def _pubx_do_social(
+    context: ContextTypes.DEFAULT_TYPE,
+    post: dict,
+    sel: set,
+    chat_id: int | None = None,
+) -> list:
+    """Publica en las redes de `sel`. Devuelve lista de resultados."""
+    data = await asyncio.to_thread(_post_to_data, post)
+    results = []
+    new_tg_msg   = 0
+    new_tweet_id = ""
+
+    if "telegram" in sel:
+        msg_id = await publish_to_channel(context.bot, data, post["link"])
+        if msg_id:
+            new_tg_msg = msg_id
+            results.append("✅ Publicado en canal Telegram")
+        else:
+            results.append("❌ Error publicando en Telegram")
+
+    if "twitter" in sel:
+        tw_url = await asyncio.to_thread(post_tweet, data, post["link"])
+        if tw_url:
+            new_tweet_id = tw_url.rsplit("/", 1)[-1]
+            results.append(f"✅ Tweet: {tw_url}")
+        else:
+            err = get_last_twitter_error() or "(sin detalle)"
+            results.append(f"❌ Error Twitter: {err[:120]}")
+
+    if "linkedin" in sel:
+        li_url = await asyncio.to_thread(post_linkedin, data, post["link"])
+        results.append(f"✅ LinkedIn: {li_url}" if li_url else "❌ Error LinkedIn")
+
+    for net in ("facebook", "instagram", "whatsapp"):
+        if net not in sel:
+            continue
+        copy_text = _pubx_copy(net, post["title"], _pubx_excerpt(post),
+                               post["link"].rstrip("/"), post["id"])
+        target = chat_id or ADMIN_CHAT_ID
+        if target:
+            await context.bot.send_message(
+                chat_id=target, text=copy_text,
+                parse_mode="Markdown", disable_web_page_preview=True,
+            )
+        results.append(f"📋 Copy {_PUBX_NET_LABEL[net]} enviado al chat")
+
+    if new_tg_msg or new_tweet_id:
+        await asyncio.to_thread(
+            append_social_meta,
+            post["id"], post.get("content", ""), new_tweet_id, new_tg_msg,
+        )
+
+    return results
+
+
+async def _pubx_fire_social(context: ContextTypes.DEFAULT_TYPE):
+    """Job programado: dispara publicación en redes al horario indicado."""
+    job_data  = context.job.data
+    post      = job_data["post"]
+    sel       = set(job_data["sel"])
+    chat_id   = job_data.get("chat_id")
+
+    results = await _pubx_do_social(context, post, sel, chat_id=chat_id)
+    txt = "⏰ *Publicación programada ejecutada*\n\n" + "\n".join(results)
+    if chat_id:
+        await context.bot.send_message(chat_id=chat_id, text=txt, parse_mode="Markdown")
+
+
+async def cmd_publicador(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Uso: /publicador <URL o ID de la nota>"""
+    args = " ".join(context.args).strip()
+    if not args:
+        await update.message.reply_text(
+            "Uso: /publicador <URL o ID>\n"
+            "Ejemplo: /publicador https://mundoempresarial.ar/mi-nota/"
+        )
+        return
+
+    msg = await update.message.reply_text("Buscando nota...")
+    post = await asyncio.to_thread(find_post, args)
+    if not post:
+        await msg.edit_text("No encontré la nota. Verificá la URL o el ID.")
+        return
+
+    context.user_data["pubx_post"]      = post
+    context.user_data["pubx_links_sel"] = set()
+    context.user_data["pubx_rep_sel"]   = {"telegram"}
+    context.user_data["pubx_del_sel"]   = set()
+
+    await msg.edit_text(
+        f"📄 *{md_escape(post['title'])}*\n{post['link']}",
+        parse_mode="Markdown",
+        reply_markup=_build_pubx_main_kb(),
+    )
+
+
+async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    d = query.data
+
+    if d == "pubx_cancel":
+        for k in ("pubx_post", "pubx_links_sel", "pubx_rep_sel", "pubx_del_sel"):
+            context.user_data.pop(k, None)
+        await query.edit_message_text("Menú cerrado.")
+        return
+
+    post = context.user_data.get("pubx_post")
+
+    if d == "pubx_main":
+        if not post:
+            await query.edit_message_text("No hay nota activa. Usá /publicador <URL>")
+            return
+        await query.edit_message_text(
+            f"📄 *{md_escape(post['title'])}*\n{post['link']}",
+            parse_mode="Markdown",
+            reply_markup=_build_pubx_main_kb(),
+        )
+        return
+
+    if not post:
+        await query.edit_message_text("No hay nota activa. Usá /publicador <URL>")
+        return
+
+    # ── Traer links ──────────────────────────────────────────────────────────
+
+    if d == "pubx_links":
+        sel = context.user_data.get("pubx_links_sel", set())
+        await query.edit_message_text(
+            "📋 *Traer links*\n\nSeleccioná las redes:",
+            parse_mode="Markdown",
+            reply_markup=_build_pubx_links_kb(sel),
+        )
+        return
+
+    if d.startswith("pubx_lt_"):
+        net = d[len("pubx_lt_"):]
+        sel = context.user_data.get("pubx_links_sel", set()).copy()
+        if net in sel:
+            sel.discard(net)
+        else:
+            sel.add(net)
+        context.user_data["pubx_links_sel"] = sel
+        await query.edit_message_reply_markup(reply_markup=_build_pubx_links_kb(sel))
+        return
+
+    if d == "pubx_links_send":
+        sel = context.user_data.get("pubx_links_sel", set())
+        if not sel:
+            await query.answer("Seleccioná al menos una red", show_alert=True)
+            return
+        title   = post["title"]
+        url     = post["link"].rstrip("/")
+        excerpt = _pubx_excerpt(post)
+        errors  = []
+        for net in _PUBX_NETS_LINKS:
+            if net not in sel:
+                continue
+            copy_text = _pubx_copy(net, title, excerpt, url, post["id"])
+            # telegram y wp tienen md_escape aplicado en _pubx_copy; el resto es copy-paste plano
+            pm = "Markdown" if net in ("telegram", "wp") else None
+            try:
+                await query.message.reply_text(
+                    copy_text, parse_mode=pm, disable_web_page_preview=True,
+                )
+            except Exception as e:
+                errors.append(f"{_PUBX_NET_LABEL[net]}: {e}")
+        nets_str = ", ".join(_PUBX_NET_LABEL[n] for n in _PUBX_NETS_LINKS if n in sel)
+        status = f"✅ Links enviados: {nets_str}"
+        if errors:
+            status += "\n\n⚠️ " + " | ".join(errors)
+        await query.edit_message_text(
+            f"{status}\n\n_{md_escape(title)}_",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Republicar ───────────────────────────────────────────────────────────
+
+    if d == "pubx_rep":
+        sel = context.user_data.get("pubx_rep_sel", {"telegram"})
+        await query.edit_message_text(
+            "🔁 *Republicar*\n\nSeleccioná redes:",
+            parse_mode="Markdown",
+            reply_markup=_build_pubx_rep_kb(sel),
+        )
+        return
+
+    if d.startswith("pubx_rt_"):
+        net = d[len("pubx_rt_"):]
+        sel = context.user_data.get("pubx_rep_sel", set()).copy()
+        if net in sel:
+            sel.discard(net)
+        else:
+            sel.add(net)
+        context.user_data["pubx_rep_sel"] = sel
+        await query.edit_message_reply_markup(reply_markup=_build_pubx_rep_kb(sel))
+        return
+
+    if d == "pubx_rep_hora":
+        await query.edit_message_text(
+            "⏰ *Programar hora*\n\nSeleccioná la hora (ARG):",
+            parse_mode="Markdown",
+            reply_markup=_build_pubx_hora_kb(),
+        )
+        return
+
+    if d.startswith("pubx_hora_"):
+        sel = context.user_data.get("pubx_rep_sel", set())
+        if not sel:
+            await query.answer("Seleccioná al menos una red primero", show_alert=True)
+            return
+        hour = int(d.split("_")[-1])
+        from datetime import timezone, timedelta
+        tz_arg = timezone(timedelta(hours=-3))
+        now_arg = datetime.now(tz_arg)
+        target  = now_arg.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if target <= now_arg:
+            from datetime import timedelta as td
+            target = target + td(days=1)
+        context.application.job_queue.run_once(
+            _pubx_fire_social,
+            when=target.astimezone(timezone.utc),
+            data={"post": post, "sel": list(sel), "chat_id": query.message.chat_id},
+            name=f"pubx_{post['id']}_{hour:02d}",
+        )
+        nets_str = ", ".join(_PUBX_NET_LABEL[n] for n in _PUBX_NETS_REP if n in sel)
+        await query.edit_message_text(
+            f"⏰ Programado para las *{hour:02d}:00 ARG*\n"
+            f"Redes: {nets_str}\n\n_{md_escape(post['title'])}_",
+            parse_mode="Markdown",
+        )
+        return
+
+    if d == "pubx_rep_now":
+        sel = context.user_data.get("pubx_rep_sel", set())
+        if not sel:
+            await query.answer("Seleccioná al menos una red", show_alert=True)
+            return
+        await query.edit_message_text("Publicando...")
+        results = await _pubx_do_social(
+            context, post, sel, chat_id=query.message.chat_id,
+        )
+        await query.edit_message_text("\n".join(results) or "Sin resultados.")
+        return
+
+    # ── Borrar ───────────────────────────────────────────────────────────────
+
+    if d == "pubx_del":
+        meta = parse_social_meta(post.get("content", ""))
+        sel = context.user_data.get("pubx_del_sel") or set()
+        if not sel:
+            sel = {"wp"}
+            if meta.get("tg_msg"):
+                sel.add("telegram")
+            if meta.get("tweet_id"):
+                sel.add("twitter")
+            if meta.get("li_urn"):
+                sel.add("linkedin")
+            context.user_data["pubx_del_sel"] = sel
+        await query.edit_message_text(
+            f"🗑️ *Borrar nota*\n\n_{md_escape(post['title'])}_\n\nSeleccioná de dónde borrar:",
+            parse_mode="Markdown",
+            reply_markup=_build_pubx_del_kb(sel, meta),
+        )
+        return
+
+    if d.startswith("pubx_dt_"):
+        net  = d[len("pubx_dt_"):]
+        meta = parse_social_meta(post.get("content", ""))
+        if net == "telegram" and not meta.get("tg_msg"):
+            return
+        if net == "twitter" and not meta.get("tweet_id"):
+            return
+        if net == "linkedin" and not meta.get("li_urn"):
+            return
+        sel = context.user_data.get("pubx_del_sel", set()).copy()
+        if net in sel:
+            sel.discard(net)
+        else:
+            sel.add(net)
+        context.user_data["pubx_del_sel"] = sel
+        await query.edit_message_reply_markup(reply_markup=_build_pubx_del_kb(sel, meta))
+        return
+
+    if d == "pubx_del_confirm":
+        sel = context.user_data.get("pubx_del_sel", set())
+        if not sel:
+            await query.answer("Nada seleccionado", show_alert=True)
+            return
+        await query.edit_message_text("Borrando...")
+        meta    = parse_social_meta(post.get("content", ""))
+        results = []
+
+        if "twitter" in sel and meta.get("tweet_id"):
+            ok = await asyncio.to_thread(delete_tweet, meta["tweet_id"])
+            results.append("✅ Tweet borrado" if ok else "❌ Error borrando tweet")
+
+        if "telegram" in sel and meta.get("tg_msg"):
+            try:
+                ok = await delete_from_channel(context.bot, int(meta["tg_msg"]))
+                results.append("✅ Mensaje TG borrado" if ok
+                               else "❌ Error borrando del canal TG")
+            except (ValueError, Exception) as e:
+                results.append(f"❌ Error TG: {e}")
+
+        if "linkedin" in sel and meta.get("li_urn"):
+            ok = await asyncio.to_thread(delete_linkedin_post, meta["li_urn"])
+            results.append("✅ LinkedIn borrado" if ok else "❌ Error borrando LinkedIn")
+
+        if "wp" in sel:
+            ok = await asyncio.to_thread(trash_post, post["id"])
+            results.append("✅ WP → papelera" if ok else "❌ Error borrando de WP")
+
+        for k in ("pubx_post", "pubx_links_sel", "pubx_rep_sel", "pubx_del_sel"):
+            context.user_data.pop(k, None)
+
+        await query.edit_message_text("\n".join(results) or "Nada que borrar.")
+        return
+
+
 async def _handle_edit_photo_url(url: str, post: dict) -> bool:
     """Descarga imagen desde URL y la setea como destacada del post."""
     kw = focus_keyword(post["title"])
@@ -8213,7 +10932,56 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
 
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja foto enviada por Telegram durante edición."""
+    """Maneja foto enviada por Telegram durante edición o flujo sin_imagen."""
+
+    # ── Flujo sin_imagen: Leo envía foto para una nota sin imagen ────────────
+    job_id_photo = context.user_data.get("awaiting_img_url_for")
+    if job_id_photo:
+        context.user_data.pop("awaiting_img_url_for", None)
+        context.user_data.pop("awaiting_img_msg_id", None)
+        msg = await update.message.reply_text("⏳ Subiendo foto a WordPress...")
+        try:
+            photo = update.message.photo[-1]
+            file  = await photo.get_file(read_timeout=30, connect_timeout=15)
+            # Descargar via requests con timeout explícito (más confiable que download_as_bytearray)
+            import requests as _req_ph
+            _dl = await asyncio.to_thread(
+                lambda: _req_ph.get(file.file_path, timeout=30)
+            )
+            img_bytes = _dl.content
+            media_id  = await asyncio.to_thread(upload_image_bytes, img_bytes, "jpg")
+            if media_id:
+                import sys as _sys_ph, json as _js_ph, sqlite3 as _sq_ph
+                _sys_ph.path.insert(0, "/opt/me-harness")
+                import broker as _br_ph
+                job_i = _br_ph.get_job(job_id_photo)
+                cj_i = {}
+                try: cj_i = _js_ph.loads(job_i.get("content_json") or "{}")
+                except Exception: pass
+                cj_i["image_id_override"] = media_id
+                with _sq_ph.connect("/opt/me-harness/harness.db") as _c_ph:
+                    _c_ph.execute(
+                        "UPDATE jobs SET stage='publicacion', content_json=?, updated_at=datetime('now') WHERE id=?",
+                        (_js_ph.dumps(cj_i), job_id_photo)
+                    )
+                await msg.edit_text(
+                    f"✅ <b>Foto subida a WP (#{media_id})</b>\nNota #{job_id_photo} vuelve a publicación.",
+                    parse_mode="HTML"
+                )
+            else:
+                await msg.edit_text(
+                    "❌ No pude subir la foto a WP.",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "🔗 Agregar URL",      "callback_data": f"h_img_url:{job_id_photo}"},
+                        {"text": "➖ Publicar sin foto", "callback_data": f"h_img_skip:{job_id_photo}"},
+                    ]]}
+                )
+        except Exception as e:
+            logger.error(f"handle_photo sin_imagen: {e}")
+            await msg.edit_text(f"❌ Error: {e}")
+        return
+
+    # ── Flujo edición de nota existente ─────────────────────────────────────
     if not context.user_data.get("waiting_for_edit_photo"):
         return
     post = context.user_data.get("edit_post")
@@ -8225,7 +10993,6 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = await update.message.reply_text("Subiendo foto...")
 
     try:
-        # Obtener la foto más grande
         photo = update.message.photo[-1]
         file = await photo.get_file()
         img_bytearr = await file.download_as_bytearray()
@@ -9276,77 +12043,8 @@ async def _send_curador_briefing(bot, chat_id: int, articles: list, suggestion: 
         )
 
 
-async def cmd_c(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agente editorial: /Claude [URL + instrucciones en texto libre]"""
-    user_input = update.message.text
-    # Quitar el comando /Claude o /Claude@botname
-    user_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', user_input).strip()
-    if not user_input:
-        await update.message.reply_text(
-            "Mandame la URL y tus instrucciones. Ejemplo:\n"
-            "`/c https://... publicala en Mundo del vino, título más corto`",
-            parse_mode="Markdown",
-        )
-        return
-
-    msg = await update.message.reply_text("Interpretando tu pedido...")
-    try:
-        plan = await asyncio.to_thread(_cmd_c_plan_sync, user_input)
-    except Exception as e:
-        await msg.edit_text(f"No pude interpretar el pedido: {e}")
-        return
-
-    context.user_data["cmd_c_plan"]  = plan
-    context.user_data["cmd_c_msg_id"] = msg.message_id
-
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
-        InlineKeyboardButton("✏️ Ajustar",  callback_data="cmdc_adjust"),
-        InlineKeyboardButton("❌ Cancelar", callback_data="cmdc_cancel"),
-    ]])
-    await msg.edit_text(_cmd_c_plan_text(plan), parse_mode="Markdown", reply_markup=kb)
 
 
-async def handle_claude_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foto enviada con caption /Claude ... — usa la foto como imagen de portada."""
-    caption = update.message.caption or ""
-    user_input = re.sub(r'^/[Cc]laude?(?:@\S+)?\s*', '', caption).strip()
-    if not user_input:
-        await update.message.reply_text(
-            "Incluí la URL e instrucciones en el caption. Ej:\n"
-            "`/Claude https://... publicala con esta imagen`",
-            parse_mode="Markdown",
-        )
-        return
-
-    msg = await update.message.reply_text("Interpretando tu pedido...")
-
-    # Descargar foto de Telegram (resolución máxima)
-    photo_file = await update.message.photo[-1].get_file()
-    photo_bytes = bytes(await photo_file.download_as_bytearray())
-
-    try:
-        plan = await asyncio.to_thread(_cmd_c_plan_sync, user_input)
-    except Exception as e:
-        await msg.edit_text(f"No pude interpretar el pedido: {e}")
-        return
-
-    if not plan["url"]:
-        await msg.edit_text("No encontré una URL en el caption. Incluí el link.")
-        return
-
-    context.user_data["cmd_c_plan"]       = plan
-    context.user_data["cmd_c_photo_bytes"] = photo_bytes
-
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Ejecutar", callback_data="cmdc_exec"),
-        InlineKeyboardButton("✏️ Ajustar",  callback_data="cmdc_adjust"),
-        InlineKeyboardButton("❌ Cancelar", callback_data="cmdc_cancel"),
-    ]])
-    await msg.edit_text(
-        _cmd_c_plan_text(plan) + "\n\n📎 _Imagen adjunta como portada_",
-        parse_mode="Markdown", reply_markup=kb,
-    )
 
 
 async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9371,6 +12069,303 @@ async def cmd_curador(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_curador_briefing(
         context.bot, update.message.chat_id, articles, suggestion, context,
     )
+
+
+async def cmd_ingesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dispara la ingesta RSS manualmente y reporta cuántas notas encoló."""
+    msg = await update.message.reply_text("📡 Corriendo ingesta RSS...")
+    import sys as _sys
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        from agents import ingesta as _ing
+        n = await asyncio.to_thread(_ing.run)
+        await msg.edit_text(
+            f"✅ <b>Ingesta completada</b>\n"
+            f"{n} notas nuevas encoladas para el Curador.\n"
+            f"Usá /briefing para ver el briefing.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Error en ingesta: {e}")
+
+
+async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista las notas programadas en WP con opción de reprogramar."""
+    import requests as _req_pr, base64 as _b64_pr, sqlite3 as _sq_pr
+    from config import WP_URL as _WP_PR, WP_USER as _WPU_PR, WP_PASS as _WPP_PR
+    _tok_pr = _b64_pr.b64encode(f"{_WPU_PR}:{_WPP_PR}".encode()).decode()
+    _hdrs_pr = {"Authorization": f"Basic {_tok_pr}"}
+
+    with _sq_pr.connect(_HDB) as _c_pr:
+        rows_pr = _c_pr.execute(
+            "SELECT id, title, pub_date, stage FROM jobs "
+            "WHERE pub_date IS NOT NULL AND pub_date != '' "
+            "AND stage NOT IN ('done','rejected') ORDER BY pub_date ASC LIMIT 10"
+        ).fetchall()
+
+    wp_future_pr = []
+    try:
+        _rf_pr = _req_pr.get(
+            f"{_WP_PR}/wp-json/wp/v2/posts?status=future&per_page=20&_fields=id,title,date,link",
+            headers=_hdrs_pr, timeout=10
+        )
+        if _rf_pr.ok:
+            wp_future_pr = _rf_pr.json()
+    except Exception:
+        pass
+
+    if not rows_pr and not wp_future_pr:
+        await update.message.reply_text("No hay notas programadas.")
+        return
+
+    lines_pr = ["🗓 <b>Notas programadas</b>\n"]
+    kb_pr = []
+    for r_pr in rows_pr:
+        jid_pr, title_pr, pub_date_pr, stage_pr = r_pr
+        lines_pr.append(f"⏳ <b>{(title_pr or '')[:55]}</b>\n  📅 {pub_date_pr[:16]}  ·  {stage_pr}")
+        kb_pr.append([
+            {"text": f"✏️ #{jid_pr} {(title_pr or '')[:25]}", "callback_data": f"h_cola_back:{jid_pr}"},
+            {"text": "❌ Cancelar",                             "callback_data": f"h_cola_cancel_job:{jid_pr}"},
+        ])
+    for wp_pr in wp_future_pr:
+        wp_id_pr    = wp_pr["id"]
+        wp_title_pr = wp_pr.get("title", {}).get("rendered", "")[:55]
+        wp_date_pr  = wp_pr.get("date", "")[:16].replace("T", " ")
+        lines_pr.append(f"📅 <b>{wp_title_pr}</b>\n  🗓 {wp_date_pr}")
+        kb_pr.append([
+            {"text": "🕐 Reprogramar", "callback_data": f"h_wp_reschedule:{wp_id_pr}"},
+            {"text": "⚡ Publicar ya",  "callback_data": f"h_wp_publish_now:{wp_id_pr}"},
+            {"text": "📝 Borrador",     "callback_data": f"h_wp_to_draft:{wp_id_pr}"},
+        ])
+    kb_pr.append([
+        {"text": "🔄 Actualizar", "callback_data": "h_cola_ver_programadas"},
+        {"text": "↩ Volver",      "callback_data": "pip_close"},
+    ])
+    await update.message.reply_text(
+        "\n".join(lines_pr), parse_mode="HTML",
+        reply_markup={"inline_keyboard": kb_pr},
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lanza el briefing del Curador (harness) de forma manual."""
+    offset = 0
+    if context.args:
+        try:
+            offset = int(context.args[0])
+        except ValueError:
+            pass
+    msg = await update.message.reply_text("📰 Generando briefing…")
+    import sys as _sys
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        from agents import curador as _cur
+        await asyncio.to_thread(_cur.run_briefing, offset)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Error en briefing: {e}")
+
+
+async def cmd_lector(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Evalúa una nota con el Lector QA a pedido.
+    Uso: /lector <URL_de_la_nota_o_job_id>
+    """
+    import sys as _sys, sqlite3 as _sq, json as _jl
+    _sys.path.insert(0, "/opt/me-harness")
+
+    arg = (context.args[0] if context.args else "").strip()
+    if not arg:
+        await update.message.reply_text(
+            "Uso: <code>/lector &lt;URL_de_la_nota&gt;</code> o <code>/lector &lt;job_id&gt;</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    msg = await update.message.reply_text("🔍 Buscando nota…")
+
+    try:
+        import broker as _brl
+
+        # Resolver: ¿es job_id o URL?
+        job = None
+        if arg.isdigit():
+            job = _brl.get_job(int(arg))
+        else:
+            # Buscar por wp_url o source_url en la DB
+            with _sq.connect(_brl.HARNESS_DB) as _conn:
+                _conn.row_factory = _sq.Row
+                _row = _conn.execute(
+                    "SELECT * FROM jobs WHERE wp_url=? OR source_url=? ORDER BY id DESC LIMIT 1",
+                    (arg, arg)
+                ).fetchone()
+                if _row:
+                    job = dict(_row)
+
+        if not job:
+            # Intentar extraer slug del URL y buscar en content_json
+            _slug = arg.rstrip("/").split("/")[-1]
+            with _sq.connect(_brl.HARNESS_DB) as _conn:
+                _conn.row_factory = _sq.Row
+                _rows = _conn.execute(
+                    "SELECT * FROM jobs WHERE stage='done' ORDER BY id DESC LIMIT 300"
+                ).fetchall()
+            for _r in _rows:
+                _cj = _jl.loads(_r["content_json"] or "{}")
+                _wp = (_cj.get("wp_result") or {}).get("link", "") or _r["wp_url"] or ""
+                if _slug and _slug in _wp:
+                    job = dict(_r)
+                    break
+
+        if not job:
+            await msg.edit_text(f"❌ No encontré ningún job para: <code>{arg}</code>", parse_mode="HTML")
+            return
+
+        wp_url = job.get("wp_url") or ""
+        if not wp_url:
+            _cj2 = _jl.loads(job.get("content_json") or "{}")
+            wp_url = (_cj2.get("wp_result") or {}).get("link", "") or ""
+        if not wp_url:
+            await msg.edit_text(f"❌ Job #{job['id']} no tiene wp_url.", parse_mode="HTML")
+            return
+
+        job_id = job["id"]
+        title  = job.get("title", "")
+        await msg.edit_text(
+            f"🔍 Evaluando job <b>#{job_id}</b>…\n<a href='{wp_url}'>{title[:70]}</a>",
+            parse_mode="HTML", disable_web_page_preview=True
+        )
+
+        from agents import lector as _lect
+        await _lect.evaluate(wp_url, job_id, title=title)
+
+        await msg.delete()
+
+    except Exception as _lerr:
+        await msg.edit_text(f"❌ Error en /lector: {_lerr}", parse_mode="HTML")
+
+
+async def cmd_coladepublicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Muestra la cola de publicación del harness con sugerencias del agente.
+    Leo confirma/ajusta destino → el job pasa a redaccion.
+    """
+    import sys as _sys, json as _js
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        import broker as _br_cola
+        from agents import cola as _cola_agent
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error cargando harness: {e}")
+        return
+
+    msg = await update.message.reply_text("🗂 Cargando cola de publicación…")
+
+    # Ejecutar el agente para asignar sugerencias pendientes
+    try:
+        await asyncio.to_thread(_cola_agent.run_once)
+    except Exception:
+        pass
+
+    jobs = _br_cola.dequeue_cola(limit=20)
+
+    import sqlite3 as _sq_extra
+    with _sq_extra.connect("/opt/me-harness/harness.db") as _c_extra:
+        n_pendientes = _c_extra.execute(
+            "SELECT COUNT(*) FROM jobs WHERE stage IN ('redaccion','publicacion','sin_imagen')"
+        ).fetchone()[0]
+        n_programadas_db = _c_extra.execute(
+            "SELECT COUNT(*) FROM jobs WHERE pub_date IS NOT NULL AND pub_date != '' "
+            "AND stage NOT IN ('done','rejected')"
+        ).fetchone()[0]
+
+    await msg.delete()
+
+    if not jobs and not n_pendientes and not n_programadas_db:
+        await update.message.reply_text(
+            "📭 <b>Cola vacía</b> — no hay notas esperando publicación.\n"
+            "<i>Usá /briefing para curar notas primero.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    # ── Solo el panel resumen — las cards se muestran con "Notas a procesar" ──
+    manualmente = sum(
+        1 for j in jobs
+        if j.get("agent_suggestion") and
+        "cambiado manualmente" in (
+            __import__("json").loads(j["agent_suggestion"]).get("reasoning", "")
+            if j["agent_suggestion"] else ""
+        )
+    )
+
+    resumen = f"🗂 <b>Cola de publicación</b>"
+    if jobs:
+        resumen += f"\n📋 A procesar: <b>{len(jobs)}</b>"
+    if n_pendientes:
+        resumen += f"\n⏳ Pendientes en pipeline: <b>{n_pendientes}</b>"
+    if n_programadas_db:
+        resumen += f"\n🗓 Programadas: <b>{n_programadas_db}</b>"
+
+    kb_resumen = []
+    if jobs:
+        kb_resumen.append([{"text": f"📋 Notas a procesar ({len(jobs)})",
+                            "callback_data": "h_cola_notas_a_procesar"}])
+    _proc_row = []
+    if jobs:
+        _proc_row.append({"text": f"📤 Procesar listado ({manualmente})", "callback_data": "h_cola_process_list"})
+    if n_pendientes:
+        _proc_row.append({"text": f"🔄 Procesar pendientes ({n_pendientes})", "callback_data": "h_cola_process_pend"})
+    if _proc_row:
+        kb_resumen.append(_proc_row)
+    if jobs or n_pendientes:
+        kb_resumen.append([{"text": "🚀 Procesar todo", "callback_data": "h_cola_process_all"}])
+    if n_pendientes:
+        kb_resumen.append([{"text": f"⏳ Ver pendientes ({n_pendientes})",
+                            "callback_data": "h_cola_ver_pendientes"}])
+    kb_resumen.append([{"text": "🗓 Ver notas programadas",
+                        "callback_data": "h_cola_ver_programadas"}])
+    kb_resumen.append([{"text": "🛑 Cancelar publicador", "callback_data": "h_cola_stop_pub"}])
+
+    resumen_msg = await update.message.reply_text(
+        resumen, parse_mode="HTML",
+        reply_markup={"inline_keyboard": kb_resumen}
+    )
+    context.user_data["cola_msg_ids"] = [resumen_msg.message_id]
+
+
+async def cmd_inst(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Aprueba nota del harness con instrucciones: /inst {job_id} {texto}
+    Ej: /inst 42 enfocalo en exportadoras, tono crítico, versión corta
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: <code>/inst {job_id} instrucciones</code>\n"
+            "Ej: <code>/inst 42 enfocalo en pymes exportadoras, tono crítico</code>",
+            parse_mode="HTML"
+        )
+        return
+    import sys as _sys
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        from agents import curador as _cur
+        job_id       = int(context.args[0])
+        instructions = " ".join(context.args[1:])
+        ok = _cur.approve(job_id, instructions=instructions)
+        if ok:
+            await update.message.reply_text(
+                f"✅ Nota #{job_id} aprobada con instrucciones:\n"
+                f"<i>{instructions[:200]}</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(f"❌ No encontré nota #{job_id} en el harness.")
+    except ValueError:
+        await update.message.reply_text("⚠️ job_id debe ser un número.")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {e}")
 
 
 async def _process_url_for_review(url: str) -> dict | None:
@@ -9633,9 +12628,11 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
             pass
 
         # Simular que el usuario pegó el link — ejecutar handle_link
+        _fake_chat = type("FakeChat", (), {"type": "private", "id": query.message.chat_id})()
         fake_message = type("FakeMsg", (), {
             "text": link,
             "chat_id": query.message.chat_id,
+            "chat": _fake_chat,
             "reply_text": query.message.reply_text,
         })()
         fake_update = type("FakeUpdate", (), {
@@ -9661,9 +12658,11 @@ async def handle_curador_feedback(update: Update, context: ContextTypes.DEFAULT_
         except Exception:
             pass
         context.user_data["curador_auto"] = True
+        _fake_chat2 = type("FakeChat", (), {"type": "private", "id": query.message.chat_id})()
         fake_message = type("FakeMsg", (), {
             "text": link,
             "chat_id": query.message.chat_id,
+            "chat": _fake_chat2,
             "reply_text": query.message.reply_text,
         })()
         fake_update = type("FakeUpdate", (), {
@@ -9987,22 +12986,6 @@ async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"_learn_hashtags_daily: {e}")
 
 
-async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
-    """Envía el reporte diario a las 23:00 ARG."""
-    chat_id = ADMIN_CHAT_ID
-    if not chat_id:
-        logger.warning("No hay ADMIN_CHAT_ID para enviar reporte diario")
-        return
-    try:
-        report = build_daily_report()
-        await context.bot.send_message(
-            chat_id=int(chat_id),
-            text=report,
-            parse_mode="Markdown",
-        )
-        logger.info("Reporte diario enviado")
-    except Exception as e:
-        logger.error(f"Error enviando reporte diario: {e}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -10345,7 +13328,10 @@ async def _do_frase_schedule(query, context, target):
             return
 
     try:
-        wp_data = await asyncio.to_thread(_wp_publish_frase, frase, img_bytes, adjusted)
+        import sys as _sys_frs
+        _sys_frs.path.insert(0, "/opt/me-harness")
+        from agents.frases import wp_publish as _frases_wp
+        wp_data = await asyncio.to_thread(_frases_wp, frase, img_bytes, adjusted)
     except Exception as e:
         await _frase_edit(query, caption=f"❌ Error en WordPress: {e}")
         return
@@ -10595,21 +13581,1097 @@ async def handle_horarios_button(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# /edito — Editor editorial
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EDITO_DB        = "/opt/me-harness/harness.db"
+_EDITO_PAGE_SIZE = 6
+
+_NIVEL_EMOJI = {"breaking": "⚡", "dia": "☀️", "semana": "📅", "mes": "📆", "anio": "🗓"}
+_ESTADO_EMOJI = {"activo": "🟢", "saturado": "🟡", "cerrado": "⛔", "lista_negra": "🔴"}
+_NIVEL_LABELS = ["breaking", "dia", "semana", "mes", "anio"]
+
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+def _edito_get_temas():
+    """Retorna temas raíz (sin padre) activos."""
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            rows = conn.execute(
+                "SELECT * FROM temas WHERE estado NOT IN ('cerrado','lista_negra') "
+                "AND (parent_id IS NULL OR parent_id = 0) "
+                "ORDER BY n_notas DESC LIMIT 100"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"_edito_get_temas: {e}")
+        return []
+
+
+def _edito_get_subtemas(parent_id: int):
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            rows = conn.execute(
+                "SELECT * FROM temas WHERE parent_id=? ORDER BY n_notas DESC",
+                (parent_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"_edito_get_subtemas: {e}")
+        return []
+
+
+def _edito_count_subtemas(parent_id: int) -> int:
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM temas WHERE parent_id=?", (parent_id,)
+            ).fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+
+def _edito_set_parent(subtema_id: int, parent_id):
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        conn.execute("UPDATE temas SET parent_id=? WHERE id=?", (parent_id, subtema_id))
+
+
+def _edito_make_independent(subtema_id: int):
+    _edito_set_parent(subtema_id, None)
+
+
+def _edito_unificar(src_id: int, dst_id: int):
+    """Fusiona src en dst: suma n_notas, mueve subtemas de src a dst, cierra src."""
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        src = conn.execute("SELECT n_notas FROM temas WHERE id=?", (src_id,)).fetchone()
+        if src:
+            conn.execute("UPDATE temas SET n_notas = n_notas + ? WHERE id=?", (src[0], dst_id))
+        conn.execute("UPDATE temas SET parent_id=? WHERE parent_id=?", (dst_id, src_id))
+        conn.execute("UPDATE temas SET estado='cerrado' WHERE id=?", (src_id,))
+
+
+def _edito_get_tema(tema_id: int):
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            row = conn.execute("SELECT * FROM temas WHERE id=?", (tema_id,)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _edito_set_tema_estado(tema_id: int, estado: str):
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        conn.execute("UPDATE temas SET estado=? WHERE id=?", (estado, tema_id))
+
+
+def _edito_set_tema_nivel(tema_id: int, nivel: str):
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        conn.execute("UPDATE temas SET nivel=? WHERE id=?", (nivel, tema_id))
+
+
+def _edito_rename_tema(tema_id: int, nuevo_nombre: str):
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        conn.execute("UPDATE temas SET nombre=? WHERE id=?", (nuevo_nombre.strip(), tema_id))
+
+
+def _edito_upsert_tema(nombre: str, nivel: str, parent_id=None):
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+    now = _dt.utcnow().isoformat()
+    with _sq.connect(_EDITO_DB) as conn:
+        row = conn.execute("SELECT id FROM temas WHERE nombre=?", (nombre,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE temas SET nivel=?, estado='activo', ultima_vez=?, parent_id=COALESCE(?,parent_id) WHERE id=?",
+                (nivel, now, parent_id, row[0])
+            )
+            return row[0]
+        cur = conn.execute(
+            "INSERT INTO temas (nombre, nivel, estado, n_notas, primera_vez, ultima_vez, creado_por, parent_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (nombre, nivel, "activo", 0, now, now, "leo", parent_id)
+        )
+        return cur.lastrowid
+
+
+def _edito_get_descubrimientos(limit: int = 30):
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            rows = conn.execute(
+                "SELECT id, title, score, updated_at, content_json FROM jobs "
+                "WHERE stage='descubrimiento' ORDER BY score DESC, id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"_edito_get_descubrimientos: {e}")
+        return []
+
+
+def _edito_promote_disc(job_id: int):
+    import sqlite3 as _sq
+    with _sq.connect(_EDITO_DB) as conn:
+        conn.execute(
+            "UPDATE jobs SET stage='curado', updated_at=datetime('now') WHERE id=?",
+            (job_id,)
+        )
+
+
+def _edito_reject_disc(job_id: int):
+    import sqlite3 as _sq, json as _js
+    with _sq.connect(_EDITO_DB) as conn:
+        row = conn.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+        cj = {}
+        if row and row[0]:
+            try: cj = _js.loads(row[0])
+            except Exception: pass
+        cj["rejected_reason"] = "descartado_leo"
+        conn.execute(
+            "UPDATE jobs SET stage='rejected', content_json=?, updated_at=datetime('now') WHERE id=?",
+            (_js.dumps(cj), job_id)
+        )
+
+
+def _edito_get_notas_tema(tema_id: int, limit: int = 20) -> list:
+    """
+    Notas publicadas (stage=done) relacionadas al tema.
+    Usa el embedding del tema vs content_json embeddings si están disponibles;
+    sino, busca por palabras clave del nombre.
+    """
+    import sqlite3 as _sq, json as _js
+    _STOP = {"hoy","para","como","pero","con","los","las","del","que","una",
+             "uno","este","esta","por","sus","más","sin","sobre","entre",
+             "desde","hasta","será","fueron","son","hay","ser","hace",
+             "tras","ante","bajo","según","cuyo","cuya","este","esos"}
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            row = conn.execute(
+                "SELECT nombre, wp_cat_id FROM temas WHERE id=?", (tema_id,)
+            ).fetchone()
+            if not row:
+                return []
+            nombre, wp_cat_id = row[0], row[1]
+
+            # ── Ruta 1: por wp_cat_id (exacta, si el tema viene de WP) ───────
+            if wp_cat_id:
+                rows = conn.execute(
+                    "SELECT title, wp_url, updated_at, content_json FROM jobs "
+                    "WHERE stage='done' ORDER BY updated_at DESC LIMIT 500"
+                ).fetchall()
+                results = []
+                for title, url, updated_at, cj_raw in rows:
+                    if not cj_raw:
+                        continue
+                    try:
+                        cj = _js.loads(cj_raw)
+                        cats = cj.get("categories") or cj.get("category_ids") or []
+                        if wp_cat_id in cats or str(wp_cat_id) in [str(x) for x in cats]:
+                            results.append({
+                                "title": title, "url": url,
+                                "date": (updated_at or "")[:10]
+                            })
+                    except Exception:
+                        pass
+                if results:
+                    return results[:limit]
+
+            # ── Ruta 2: keyword sobre título ─────────────────────────────────
+            words = [w.strip(".,;:()") for w in nombre.lower().split()
+                     if len(w) > 3 and w.strip(".,;:()") not in _STOP][:4]
+            if not words:
+                words = nombre.lower().split()[:2]
+            cond   = " OR ".join(f"LOWER(title) LIKE ?" for _ in words)
+            params = [f"%{w}%" for w in words] + [limit]
+            rows   = conn.execute(
+                f"SELECT title, wp_url, updated_at FROM jobs "
+                f"WHERE stage='done' AND ({cond}) ORDER BY updated_at DESC LIMIT ?",
+                params
+            ).fetchall()
+            return [{"title": r[0], "url": r[1], "date": (r[2] or "")[:10]} for r in rows]
+
+    except Exception as e:
+        logger.warning(f"_edito_get_notas_tema: {e}")
+        return []
+
+
+def _edito_get_living_notes():
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            rows = conn.execute("SELECT * FROM living_notes ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"_edito_get_living_notes: {e}")
+        return []
+
+
+# ── Keyboard builders ─────────────────────────────────────────────────────────
+
+def _edito_main_kb(temas_count: int = 0, disc_count: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"📋 Temas ({temas_count})",          callback_data="edito_temas_0"),
+            InlineKeyboardButton(f"🔭 Descubrimientos ({disc_count})", callback_data="edito_disc_0"),
+        ],
+        [
+            InlineKeyboardButton("📌 Living notes", callback_data="edito_ln"),
+            InlineKeyboardButton("➕ Agregar tema", callback_data="edito_add"),
+        ],
+        [
+            InlineKeyboardButton("🗂 Seed desde WP",   callback_data="edito_seedwp"),
+            InlineKeyboardButton("🔄 Scan publicados", callback_data="edito_rebuild"),
+        ],
+        [InlineKeyboardButton("❌ Cerrar", callback_data="edito_close")],
+    ])
+
+
+def _edito_temas_kb(temas: list, page: int) -> InlineKeyboardMarkup:
+    start = page * _EDITO_PAGE_SIZE
+    chunk = temas[start:start + _EDITO_PAGE_SIZE]
+    rows = []
+    for t in chunk:
+        ne    = _NIVEL_EMOJI.get(t["nivel"], "📄")
+        ee    = _ESTADO_EMOJI.get(t["estado"], "")
+        nsub  = _edito_count_subtemas(t["id"])
+        badge = f" [{nsub}]" if nsub else ""
+        label = f"{ne}{ee} {t['nombre'][:28]}{badge}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"edito_tema_{t['id']}")])
+    nav = []
+    total_pages = max(1, (len(temas) + _EDITO_PAGE_SIZE - 1) // _EDITO_PAGE_SIZE)
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"edito_temas_{page-1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="edito_noop"))
+    if start + _EDITO_PAGE_SIZE < len(temas):
+        nav.append(InlineKeyboardButton("▶", callback_data=f"edito_temas_{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("↩ Menú", callback_data="edito_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_tema_detail_kb(tema_id: int, nsub: int = 0, parent_id: int = None) -> InlineKeyboardMarkup:
+    """KB unificado para temas raíz y subtemas. parent_id!=None indica que es subtema."""
+    is_sub = parent_id is not None
+    rows = [
+        [
+            InlineKeyboardButton("⏱ Temporalidad", callback_data=f"edito_nivel_{tema_id}"),
+            InlineKeyboardButton("✏️ Renombrar",    callback_data=f"edito_rename_{tema_id}"),
+        ]
+    ]
+    if nsub:
+        rows.append([InlineKeyboardButton(
+            f"📂 Subtemas ({nsub})", callback_data=f"edito_subtemas_{tema_id}"
+        )])
+    rows.append([InlineKeyboardButton(
+        "📰 Ver notas publicadas", callback_data=f"edito_notas_{tema_id}"
+    )])
+    rows.append([
+        InlineKeyboardButton("➕ Agregar subtema", callback_data=f"edito_addsub_{tema_id}"),
+        InlineKeyboardButton("🔗 Unificar con...", callback_data=f"edito_unificar_{tema_id}"),
+    ])
+    if is_sub:
+        rows.append([
+            InlineKeyboardButton("⬆️ Hacer independiente", callback_data=f"edito_indep_{tema_id}"),
+            InlineKeyboardButton("🔀 Cambiar padre",        callback_data=f"edito_chpadre_{tema_id}"),
+        ])
+    else:
+        rows.append([InlineKeyboardButton(
+            "🔀 Mover como subtema de...", callback_data=f"edito_chpadre_{tema_id}"
+        )])
+    rows.append([
+        InlineKeyboardButton("❌ Cerrar",      callback_data=f"edito_cerrar_{tema_id}"),
+        InlineKeyboardButton("🚫 Lista negra", callback_data=f"edito_negra_{tema_id}"),
+    ])
+    back_cb = f"edito_subtemas_{parent_id}" if is_sub else "edito_temas_0"
+    rows.append([InlineKeyboardButton("↩ Volver", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_subtemas_kb(subtemas: list, parent_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for st in subtemas:
+        ne    = _NIVEL_EMOJI.get(st["nivel"], "📄")
+        ee    = _ESTADO_EMOJI.get(st["estado"], "")
+        label = f"{ne}{ee} {st['nombre'][:32]}  · {st.get('n_notas',0)} notas"
+        rows.append([InlineKeyboardButton(label, callback_data=f"edito_tema_{st['id']}")])
+    rows.append([
+        InlineKeyboardButton("➕ Agregar subtema", callback_data=f"edito_addsub_{parent_id}"),
+        InlineKeyboardButton("↩ Volver",          callback_data=f"edito_tema_{parent_id}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_chpadre_kb(subtema_id: int, temas_raiz: list) -> InlineKeyboardMarkup:
+    rows = []
+    for t in temas_raiz[:10]:
+        ne    = _NIVEL_EMOJI.get(t["nivel"], "📄")
+        label = f"{ne} {t['nombre'][:30]}"
+        rows.append([InlineKeyboardButton(
+            label, callback_data=f"edito_setpadre_{subtema_id}_{t['id']}"
+        )])
+    rows.append([InlineKeyboardButton("↩ Cancelar", callback_data=f"edito_tema_{subtema_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_unificar_kb(src_id: int, temas: list) -> InlineKeyboardMarkup:
+    rows = []
+    for t in temas[:10]:
+        ne    = _NIVEL_EMOJI.get(t["nivel"], "📄")
+        label = f"{ne} {t['nombre'][:30]}"
+        rows.append([InlineKeyboardButton(
+            label, callback_data=f"edito_unif_{src_id}_{t['id']}"
+        )])
+    rows.append([InlineKeyboardButton("↩ Cancelar", callback_data=f"edito_tema_{src_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_nivel_kb(tema_id: int) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for n in _NIVEL_LABELS:
+        e = _NIVEL_EMOJI.get(n, "")
+        row.append(InlineKeyboardButton(f"{e} {n}", callback_data=f"edito_setnivel_{tema_id}_{n}"))
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩ Volver", callback_data=f"edito_tema_{tema_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edito_disc_kb(job_id: int, pos: int, total: int) -> InlineKeyboardMarkup:
+    nav = []
+    if pos > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"edito_disc_{pos-1}"))
+    nav.append(InlineKeyboardButton(f"{pos+1}/{total}", callback_data="edito_noop"))
+    if pos < total - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"edito_disc_{pos+1}"))
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Enviar a briefing", callback_data=f"edito_discok_{job_id}_{pos}"),
+            InlineKeyboardButton("🗑 Descartar",         callback_data=f"edito_discdel_{job_id}_{pos}"),
+        ],
+        nav,
+        [InlineKeyboardButton("↩ Menú", callback_data="edito_main")],
+    ])
+
+
+def _edito_add_nivel_kb() -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for n in _NIVEL_LABELS:
+        e = _NIVEL_EMOJI.get(n, "")
+        row.append(InlineKeyboardButton(f"{e} {n}", callback_data=f"edito_addnivel_{n}"))
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩ Cancelar", callback_data="edito_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── Text helpers ──────────────────────────────────────────────────────────────
+
+def _edito_main_text(temas_count: int, disc_count: int) -> str:
+    return (
+        f"🗞 <b>EDITOR EDITORIAL</b>\n\n"
+        f"• Temas de agenda: <b>{temas_count}</b>\n"
+        f"• Descubrimientos pendientes: <b>{disc_count}</b>"
+    )
+
+
+def _edito_temas_text(temas: list, page: int) -> str:
+    total = len(temas)
+    if not total:
+        return "📋 <b>Temas activos</b>\n\nNo hay temas aún. Usá 🔄 Actualizar temas."
+    start = page * _EDITO_PAGE_SIZE
+    end   = min(start + _EDITO_PAGE_SIZE, total)
+    lines = [f"📋 <b>Temas de agenda</b> ({start+1}–{end} de {total})\n"]
+    for t in temas[start:end]:
+        ne    = _NIVEL_EMOJI.get(t["nivel"], "📄")
+        ee    = _ESTADO_EMOJI.get(t["estado"], "")
+        nivel = t.get("nivel", "dia")
+        lines.append(f"{ne}{ee} <b>{t['nombre']}</b>\n    ⏱ {nivel} · {t.get('n_notas',0)} notas")
+    return "\n".join(lines)
+
+
+def _edito_tema_detail_text(t: dict, nsub: int = 0, parent_nombre: str = "") -> str:
+    ne      = _NIVEL_EMOJI.get(t["nivel"], "📄")
+    ee      = _ESTADO_EMOJI.get(t["estado"], "")
+    pv      = (t.get("primera_vez") or "")[:10]
+    uv      = (t.get("ultima_vez") or "")[:10]
+    sub_txt = f"\nSubtemas: <b>{nsub}</b>" if nsub else ""
+    pad_txt = f"\nSubtema de: <i>{parent_nombre}</i>" if parent_nombre else ""
+    icono   = "🔹" if parent_nombre else "📌"
+    return (
+        f"{icono} <b>{t['nombre']}</b>{pad_txt}\n\n"
+        f"Temporalidad: {ne} <b>{t['nivel']}</b>  |  Estado: {ee} {t['estado']}\n"
+        f"Notas cubierta: <b>{t.get('n_notas',0)}</b>{sub_txt}\n"
+        f"Primera nota: {pv or '—'}  |  Última: {uv or '—'}"
+    )
+
+
+def _edito_notas_text(notas: list, tema_nombre: str) -> str:
+    if not notas:
+        return f"📰 <b>{tema_nombre}</b>\n\nNo se encontraron notas publicadas sobre este tema."
+    lines = [f"📰 <b>{tema_nombre}</b> — {len(notas)} notas relacionadas\n"]
+    for n in notas:
+        title = (n["title"] or "sin título")[:80]
+        url   = n.get("url") or ""
+        date  = n.get("date") or "—"
+        entry = f"<a href=\"{url}\">{title}</a>" if url else title
+        lines.append(f"• {entry}  <i>{date}</i>")
+    return "\n".join(lines)
+
+
+def _edito_subtemas_text(subtemas: list, parent_nombre: str) -> str:
+    if not subtemas:
+        return (
+            f"📂 <b>Subtemas de «{parent_nombre}»</b>\n\n"
+            f"No hay subtemas todavía. Usá ➕ para crear uno."
+        )
+    lines = [f"📂 <b>Subtemas de «{parent_nombre}»</b> ({len(subtemas)})\n"]
+    for st in subtemas:
+        ne    = _NIVEL_EMOJI.get(st["nivel"], "📄")
+        ee    = _ESTADO_EMOJI.get(st["estado"], "")
+        nivel = st.get("nivel", "dia")
+        lines.append(f"{ne}{ee} <b>{st['nombre']}</b>\n    ⏱ {nivel} · {st.get('n_notas',0)} notas")
+    return "\n".join(lines)
+
+
+def _edito_disc_text(job: dict, pos: int, total: int) -> str:
+    import json as _js
+    title   = job.get("title") or "sin título"
+    score   = round(job.get("score") or 0, 1)
+    cj = {}
+    try: cj = _js.loads(job.get("content_json") or "{}")
+    except Exception: pass
+    source  = cj.get("source_name") or "desconocida"
+    excerpt = (cj.get("excerpt") or "")[:200]
+    txt = (
+        f"🔭 <b>Descubrimiento {pos+1}/{total}</b>\n\n"
+        f"<b>{title}</b>\n"
+        f"Fuente: {source}  |  Score: {score}"
+    )
+    if excerpt:
+        txt += f"\n\n{excerpt}"
+    return txt
+
+
+def _edito_ln_text(notes: list) -> str:
+    if not notes:
+        return "📌 <b>Living Notes</b>\n\nNo hay living notes configuradas."
+    from datetime import datetime as _dt
+    lines = ["📌 <b>Living Notes</b>\n"]
+    for ln in notes:
+        last = ln.get("ultimo_update")
+        if last:
+            try:
+                diff = _dt.utcnow() - _dt.fromisoformat(last)
+                h = int(diff.total_seconds() // 3600)
+                last_str = f"hace {h}h" if h < 48 else f"hace {h//24}d"
+            except Exception:
+                last_str = last[:10]
+        else:
+            last_str = "nunca"
+        icon = "🟢" if ln.get("wp_post_id") else "⚪"
+        lines.append(f"{icon} <b>{ln['tema']}</b> — {last_str}")
+    return "\n".join(lines)
+
+
+# ── /pipeline ─────────────────────────────────────────────────────────────────
+
+# Condición SQL y etiqueta para cada estado del pipeline
+_PIP_COND = {
+    "ingesta":     "stage='ingesta'",
+    "curado":      "stage='curado'",
+    "cola":        "stage='cola'",
+    "redaccion":   "stage='redaccion'",
+    "publicacion": "stage='publicacion'",
+    "sin_imagen":  "stage='sin_imagen'",
+    "programadas": "stage='done' AND tg_pending=1",
+    "sin_evaluar": "stage='done' AND (tg_pending IS NULL OR tg_pending=0) AND lector_evaluated=0",
+    "evaluadas":   "stage='done' AND lector_evaluated=1 AND lector_score IS NOT NULL",
+    "rechazadas":  "stage='rejected'",
+}
+_PIP_LABEL = {
+    "ingesta":     "🔵 Ingesta",
+    "curado":      "📋 Briefing",
+    "cola":        "📌 Cola",
+    "redaccion":   "✍️ Redacción",
+    "publicacion": "📤 Publicación",
+    "sin_imagen":  "🖼️ Sin imagen",
+    "programadas": "📅 Programadas",
+    "sin_evaluar": "⏳ Sin evaluar",
+    "evaluadas":   "🔍 QA+Lector",
+    "rechazadas":  "🚫 Rechazadas",
+}
+
+
+def _pipeline_stats() -> tuple:
+    """Retorna (text, counts_dict) con el estado actual del pipeline."""
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y-%m-%d")
+    db = "/opt/me-harness/harness.db"
+    with _sq.connect(db) as c:
+        def n(cond): return c.execute(f"SELECT COUNT(*) FROM jobs WHERE {cond}").fetchone()[0]
+        counts = {k: n(v) for k, v in _PIP_COND.items()}
+        # Para rechazadas y evaluadas: solo hoy en el resumen
+        counts["rechazadas_hoy"] = n(f"stage='rejected' AND DATE(updated_at)='{today}'")
+        counts["evaluadas_hoy"]  = n(f"stage='done' AND lector_evaluated=1 AND lector_score IS NOT NULL AND DATE(updated_at)='{today}'")
+        avg_r = c.execute(
+            f"SELECT AVG(lector_score) FROM jobs WHERE stage='done' AND lector_evaluated=1 "
+            f"AND lector_score IS NOT NULL AND DATE(updated_at)='{today}'"
+        ).fetchone()
+        avg = round((avg_r[0] or 0), 1)
+
+    w = " ⚠️" if counts["sin_imagen"] else ""
+    lns = [f"📊 <b>Pipeline</b> — {today}\n"]
+    lns += [
+        f"🔵 Ingesta           <b>{counts['ingesta']}</b>",
+        f"📋 Curado            <b>{counts['curado']}</b>",
+        f"📌 Cola              <b>{counts['cola']}</b>",
+        f"✍️ Redacción         <b>{counts['redaccion']}</b>",
+        f"📤 Publicación       <b>{counts['publicacion']}</b>",
+        f"🖼️ Sin imagen        <b>{counts['sin_imagen']}</b>{w}",
+        "──────────────────────────",
+        f"📅 Programadas       <b>{counts['programadas']}</b>",
+        f"⏳ Sin evaluar        <b>{counts['sin_evaluar']}</b>",
+    ]
+    eval_line = f"🔍 QA+Lector (hoy)   <b>{counts['evaluadas_hoy']}</b>"
+    if avg and counts["evaluadas_hoy"]:
+        eval_line += f"  · avg {avg}/10"
+    lns.append(eval_line)
+    lns.append(f"🚫 Rechazadas (hoy)  <b>{counts['rechazadas_hoy']}</b>")
+    lns.append("\n<i>Tocá una etapa para ver las notas.</i>")
+    return "\n".join(lns), counts
+
+
+def _pipeline_kb(counts: dict) -> dict:
+    """Keyboard con un botón por etapa mostrando el conteo."""
+    def btn(key):
+        label = _PIP_LABEL[key]
+        c = counts.get(key, 0)
+        warn = "⚠️ " if key == "sin_imagen" and c else ""
+        return {"text": f"{warn}{label} ({c})", "callback_data": f"pip_stage_{key}"}
+
+    return {"inline_keyboard": [
+        [btn("ingesta"),     btn("curado")],
+        [btn("cola"),        btn("redaccion")],
+        [btn("publicacion"), btn("sin_imagen")],
+        [btn("programadas"), btn("sin_evaluar")],
+        [btn("evaluadas"),   btn("rechazadas")],
+        [{"text": "🔄 Refrescar", "callback_data": "pip_refresh"}],
+    ]}
+
+
+def _pipeline_stage_detail(key: str) -> str:
+    """Muestra las últimas 10 notas de una etapa/estado específico."""
+    import sqlite3 as _sq
+    cond  = _PIP_COND.get(key)
+    label = _PIP_LABEL.get(key, key)
+    if not cond:
+        return "Etapa desconocida."
+    db = "/opt/me-harness/harness.db"
+    is_eval = key == "evaluadas"
+    is_prog = key == "programadas"
+    with _sq.connect(db) as c:
+        if is_eval:
+            rows = c.execute(
+                f"SELECT id, title, lector_score, updated_at FROM jobs WHERE {cond} "
+                "ORDER BY updated_at DESC LIMIT 10"
+            ).fetchall()
+        elif is_prog:
+            rows = c.execute(
+                f"SELECT id, title, tg_pending_at, updated_at FROM jobs WHERE {cond} "
+                "ORDER BY tg_pending_at ASC LIMIT 10"
+            ).fetchall()
+        else:
+            rows = c.execute(
+                f"SELECT id, title, updated_at FROM jobs WHERE {cond} "
+                "ORDER BY updated_at DESC LIMIT 10"
+            ).fetchall()
+
+    if not rows:
+        return f"{label}\n\nNo hay notas en esta etapa."
+
+    lines = [f"<b>{label}</b> — últimas {len(rows)}\n"]
+    for row in rows:
+        jid   = row[0]
+        title = (row[1] or "")[:52]
+        if is_eval:
+            score = row[2]
+            sc_str = f"  ⭐{score}/10" if score else ""
+            lines.append(f"#{jid} {title}{sc_str}")
+        elif is_prog:
+            sched = (row[2] or "")[:16].replace("T", " ")
+            lines.append(f"#{jid} {title}\n      📅 {sched}")
+        else:
+            lines.append(f"#{jid} {title}")
+    return "\n".join(lines)
+
+
+async def cmd_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Estado del pipeline editorial: cuántas notas hay en cada etapa."""
+    msg = await update.message.reply_text("📊 Calculando…")
+    try:
+        text, counts = await asyncio.to_thread(_pipeline_stats)
+        kb = _pipeline_kb(counts)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
+        return
+    await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ── Command + callback ────────────────────────────────────────────────────────
+
+async def cmd_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menú del Editor editorial — agenda temática, descubrimientos, living notes."""
+    temas = await asyncio.to_thread(_edito_get_temas)
+    discs = await asyncio.to_thread(_edito_get_descubrimientos)
+    await update.message.reply_text(
+        _edito_main_text(len(temas), len(discs)),
+        parse_mode="HTML",
+        reply_markup=_edito_main_kb(len(temas), len(discs)),
+    )
+
+
+async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    d = query.data
+
+    if d == "edito_noop":
+        return
+
+    if d == "edito_close":
+        await query.edit_message_text("🗞 Editor cerrado.")
+        return
+
+    # ── Actualizar temas ahora ────────────────────────────────────────────────
+    if d == "edito_seedwp":
+        await query.edit_message_text("🗂 Importando categorías de WordPress... (puede tardar ~15s)")
+        import sys as _sys
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import editor as _ed
+            result = await asyncio.to_thread(_ed.seed_temas_from_wp_categories)
+            temas  = await asyncio.to_thread(_edito_get_temas)
+            discs  = await asyncio.to_thread(_edito_get_descubrimientos)
+            await query.edit_message_text(
+                _edito_main_text(len(temas), len(discs)) +
+                f"\n\n✅ <i>{result['raiz']} temas raíz + {result['sub']} subtemas importados desde WP</i>",
+                parse_mode="HTML",
+                reply_markup=_edito_main_kb(len(temas), len(discs)),
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error al importar: {e}")
+        return
+
+    if d == "edito_rebuild":
+        await query.edit_message_text("🔄 Escaneando últimos 30 días... (puede tardar ~60s)")
+        import sys as _sys
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import editor as _ed
+            n      = await asyncio.to_thread(_ed.build_temas_from_published, 30)
+            temas  = await asyncio.to_thread(_edito_get_temas)
+            discs  = await asyncio.to_thread(_edito_get_descubrimientos)
+            await query.edit_message_text(
+                _edito_main_text(len(temas), len(discs)) +
+                f"\n\n✅ <i>{n} temas procesados desde los últimos 30 días</i>",
+                parse_mode="HTML",
+                reply_markup=_edito_main_kb(len(temas), len(discs)),
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error al actualizar: {e}")
+        return
+
+    # ── Menú principal ────────────────────────────────────────────────────────
+    if d == "edito_main":
+        temas = await asyncio.to_thread(_edito_get_temas)
+        discs = await asyncio.to_thread(_edito_get_descubrimientos)
+        await query.edit_message_text(
+            _edito_main_text(len(temas), len(discs)),
+            parse_mode="HTML",
+            reply_markup=_edito_main_kb(len(temas), len(discs)),
+        )
+        return
+
+    # ── Lista de temas paginada ───────────────────────────────────────────────
+    if d.startswith("edito_temas_"):
+        page  = int(d.split("_")[2])
+        temas = await asyncio.to_thread(_edito_get_temas)
+        await query.edit_message_text(
+            _edito_temas_text(temas, page),
+            parse_mode="HTML",
+            reply_markup=_edito_temas_kb(temas, page),
+        )
+        return
+
+    # ── Detalle de un tema (raíz o subtema) ──────────────────────────────────
+    if d.startswith("edito_tema_"):
+        tema_id   = int(d.split("_")[2])
+        t         = await asyncio.to_thread(_edito_get_tema, tema_id)
+        if not t:
+            await query.answer("Tema no encontrado", show_alert=True)
+            return
+        nsub      = await asyncio.to_thread(_edito_count_subtemas, tema_id)
+        parent_id = t.get("parent_id")
+        if parent_id:
+            parent  = await asyncio.to_thread(_edito_get_tema, parent_id)
+            pnombre = parent["nombre"] if parent else ""
+        else:
+            pnombre = ""
+        await query.edit_message_text(
+            _edito_tema_detail_text(t, nsub, pnombre),
+            parse_mode="HTML",
+            reply_markup=_edito_tema_detail_kb(tema_id, nsub, parent_id),
+        )
+        return
+
+    # ── Lista de subtemas de un tema ──────────────────────────────────────────
+    if d.startswith("edito_subtemas_"):
+        parent_id = int(d.split("_")[2])
+        parent    = await asyncio.to_thread(_edito_get_tema, parent_id)
+        subtemas  = await asyncio.to_thread(_edito_get_subtemas, parent_id)
+        pnombre   = parent["nombre"] if parent else f"#{parent_id}"
+        await query.edit_message_text(
+            _edito_subtemas_text(subtemas, pnombre),
+            parse_mode="HTML",
+            reply_markup=_edito_subtemas_kb(subtemas, parent_id),
+        )
+        return
+
+    # ── Hacer independiente ───────────────────────────────────────────────────
+    if d.startswith("edito_indep_"):
+        tema_id = int(d.split("_")[2])
+        await asyncio.to_thread(_edito_make_independent, tema_id)
+        await query.answer("⬆️ Ahora es tema independiente", show_alert=False)
+        t    = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nsub = await asyncio.to_thread(_edito_count_subtemas, tema_id)
+        await query.edit_message_text(
+            _edito_tema_detail_text(t, nsub),
+            parse_mode="HTML",
+            reply_markup=_edito_tema_detail_kb(tema_id, nsub, None),
+        )
+        return
+
+    # ── Selector de nuevo padre ───────────────────────────────────────────────
+    if d.startswith("edito_chpadre_"):
+        tema_id    = int(d.split("_")[2])
+        t          = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nombre     = t["nombre"] if t else f"#{tema_id}"
+        temas_raiz = await asyncio.to_thread(_edito_get_temas)
+        temas_raiz = [x for x in temas_raiz if x["id"] != tema_id]
+        await query.edit_message_text(
+            f"🔀 <b>«{nombre}»</b> → elegí el tema padre:",
+            parse_mode="HTML",
+            reply_markup=_edito_chpadre_kb(tema_id, temas_raiz),
+        )
+        return
+
+    if d.startswith("edito_setpadre_"):
+        parts      = d.split("_")
+        tema_id    = int(parts[2])
+        parent_id  = int(parts[3])
+        await asyncio.to_thread(_edito_set_parent, tema_id, parent_id)
+        parent  = await asyncio.to_thread(_edito_get_tema, parent_id)
+        pnombre = parent["nombre"] if parent else f"#{parent_id}"
+        await query.answer(f"✅ Padre: «{pnombre}»", show_alert=False)
+        t    = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nsub = await asyncio.to_thread(_edito_count_subtemas, tema_id)
+        await query.edit_message_text(
+            _edito_tema_detail_text(t, nsub, pnombre),
+            parse_mode="HTML",
+            reply_markup=_edito_tema_detail_kb(tema_id, nsub, parent_id),
+        )
+        return
+
+    # ── Renombrar tema ────────────────────────────────────────────────────────
+    if d.startswith("edito_rename_"):
+        tema_id = int(d.split("_")[2])
+        t = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nombre = t["nombre"] if t else f"#{tema_id}"
+        context.user_data["edito_rename_id"] = tema_id
+        await query.edit_message_text(
+            f"✏️ <b>Renombrar tema</b>\n\nNombre actual: <i>{nombre}</i>\n\nEscribí el nuevo nombre:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩ Cancelar", callback_data=f"edito_tema_{tema_id}")]
+            ]),
+        )
+        return
+
+    # ── Cambiar nivel / temporalidad ─────────────────────────────────────────
+    if d.startswith("edito_nivel_"):
+        tema_id = int(d.split("_")[2])
+        t = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nombre = t["nombre"] if t else f"#{tema_id}"
+        await query.edit_message_text(
+            f"🔄 <b>{nombre}</b>\n\nElegí el nuevo nivel temporal:",
+            parse_mode="HTML",
+            reply_markup=_edito_nivel_kb(tema_id),
+        )
+        return
+
+    if d.startswith("edito_setnivel_"):
+        parts   = d.split("_")
+        tema_id = int(parts[2])
+        nivel   = parts[3]
+        await asyncio.to_thread(_edito_set_tema_nivel, tema_id, nivel)
+        t         = await asyncio.to_thread(_edito_get_tema, tema_id)
+        nsub      = await asyncio.to_thread(_edito_count_subtemas, tema_id)
+        parent_id = t.get("parent_id") if t else None
+        pnombre   = ""
+        if parent_id:
+            p = await asyncio.to_thread(_edito_get_tema, parent_id)
+            pnombre = p["nombre"] if p else ""
+        if t:
+            await query.edit_message_text(
+                _edito_tema_detail_text(t, nsub, pnombre),
+                parse_mode="HTML",
+                reply_markup=_edito_tema_detail_kb(tema_id, nsub, parent_id),
+            )
+        await query.answer(f"✅ Temporalidad → {nivel}", show_alert=False)
+        return
+
+    # ── Cerrar tema ───────────────────────────────────────────────────────────
+    if d.startswith("edito_cerrar_"):
+        tema_id = int(d.split("_")[2])
+        await asyncio.to_thread(_edito_set_tema_estado, tema_id, "cerrado")
+        temas = await asyncio.to_thread(_edito_get_temas)
+        discs = await asyncio.to_thread(_edito_get_descubrimientos)
+        await query.edit_message_text(
+            _edito_main_text(len(temas), len(discs)),
+            parse_mode="HTML",
+            reply_markup=_edito_main_kb(len(temas), len(discs)),
+        )
+        await query.answer("⛔ Tema cerrado", show_alert=False)
+        return
+
+    # ── Lista negra ───────────────────────────────────────────────────────────
+    if d.startswith("edito_negra_"):
+        tema_id = int(d.split("_")[2])
+        await asyncio.to_thread(_edito_set_tema_estado, tema_id, "lista_negra")
+        temas = await asyncio.to_thread(_edito_get_temas)
+        discs = await asyncio.to_thread(_edito_get_descubrimientos)
+        await query.edit_message_text(
+            _edito_main_text(len(temas), len(discs)),
+            parse_mode="HTML",
+            reply_markup=_edito_main_kb(len(temas), len(discs)),
+        )
+        await query.answer("🚫 En lista negra — no atraerá más material", show_alert=False)
+        return
+
+    # ── Descubrimientos — acciones ok/del ────────────────────────────────────
+    if d.startswith("edito_discok_") or d.startswith("edito_discdel_"):
+        is_ok   = d.startswith("edito_discok_")
+        parts   = d.split("_")
+        job_id  = int(parts[2])
+        pos     = int(parts[3])
+        if is_ok:
+            await asyncio.to_thread(_edito_promote_disc, job_id)
+            await query.answer("✅ Enviado a briefing", show_alert=False)
+        else:
+            await asyncio.to_thread(_edito_reject_disc, job_id)
+            await query.answer("🗑 Descartado", show_alert=False)
+        discs = await asyncio.to_thread(_edito_get_descubrimientos)
+        if not discs:
+            temas = await asyncio.to_thread(_edito_get_temas)
+            await query.edit_message_text(
+                _edito_main_text(len(temas), 0),
+                parse_mode="HTML",
+                reply_markup=_edito_main_kb(len(temas), 0),
+            )
+        else:
+            new_pos = min(pos, len(discs) - 1)
+            job     = discs[new_pos]
+            await query.edit_message_text(
+                _edito_disc_text(job, new_pos, len(discs)),
+                parse_mode="HTML",
+                reply_markup=_edito_disc_kb(job["id"], new_pos, len(discs)),
+            )
+        return
+
+    # ── Descubrimientos — navegar ─────────────────────────────────────────────
+    if d.startswith("edito_disc_"):
+        pos   = int(d.split("_")[2])
+        discs = await asyncio.to_thread(_edito_get_descubrimientos)
+        if not discs:
+            await query.edit_message_text(
+                "🔭 No hay descubrimientos pendientes.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩ Menú", callback_data="edito_main")]
+                ]),
+            )
+            return
+        pos = max(0, min(pos, len(discs) - 1))
+        job = discs[pos]
+        await query.edit_message_text(
+            _edito_disc_text(job, pos, len(discs)),
+            parse_mode="HTML",
+            reply_markup=_edito_disc_kb(job["id"], pos, len(discs)),
+        )
+        return
+
+    # ── Living notes ──────────────────────────────────────────────────────────
+    if d == "edito_ln":
+        notes = await asyncio.to_thread(_edito_get_living_notes)
+        await query.edit_message_text(
+            _edito_ln_text(notes),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩ Menú", callback_data="edito_main")]
+            ]),
+        )
+        return
+
+    # ── Ver notas publicadas de un tema ──────────────────────────────────────
+    if d.startswith("edito_notas_"):
+        tema_id = int(d.split("_")[2])
+        t       = await asyncio.to_thread(_edito_get_tema, tema_id)
+        notas   = await asyncio.to_thread(_edito_get_notas_tema, tema_id)
+        nombre  = t["nombre"] if t else f"#{tema_id}"
+        parent_id = t.get("parent_id") if t else None
+        await query.edit_message_text(
+            _edito_notas_text(notas, nombre),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩ Volver", callback_data=f"edito_tema_{tema_id}")]
+            ]),
+        )
+        return
+
+    # ── Agregar subtema ───────────────────────────────────────────────────────
+    if d.startswith("edito_addsub_"):
+        parent_id = int(d.split("_")[2])
+        parent    = await asyncio.to_thread(_edito_get_tema, parent_id)
+        pnombre   = parent["nombre"] if parent else f"#{parent_id}"
+        context.user_data["edito_add_tema"]      = True
+        context.user_data["edito_add_parent_id"] = parent_id
+        await query.edit_message_text(
+            f"➕ <b>Nuevo subtema de «{pnombre}»</b>\n\nEscribí el nombre del subtema:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩ Cancelar", callback_data=f"edito_tema_{parent_id}")]
+            ]),
+        )
+        return
+
+    # ── Unificar — selector ───────────────────────────────────────────────────
+    if d.startswith("edito_unificar_"):
+        src_id  = int(d.split("_")[2])
+        src     = await asyncio.to_thread(_edito_get_tema, src_id)
+        snombre = src["nombre"] if src else f"#{src_id}"
+        temas   = await asyncio.to_thread(_edito_get_temas)
+        temas   = [t for t in temas if t["id"] != src_id]
+        await query.edit_message_text(
+            f"🔗 <b>Unificar «{snombre}» dentro de...</b>\n\n"
+            f"El tema seleccionado absorbe a «{snombre}» (sus notas y subtemas pasan al destino):",
+            parse_mode="HTML",
+            reply_markup=_edito_unificar_kb(src_id, temas),
+        )
+        return
+
+    # ── Unificar — confirmar ──────────────────────────────────────────────────
+    if d.startswith("edito_unif_"):
+        parts  = d.split("_")
+        src_id = int(parts[2])
+        dst_id = int(parts[3])
+        await asyncio.to_thread(_edito_unificar, src_id, dst_id)
+        dst = await asyncio.to_thread(_edito_get_tema, dst_id)
+        dname = dst["nombre"] if dst else f"#{dst_id}"
+        await query.answer(f"✅ Unificado en «{dname}»", show_alert=False)
+        nsub = await asyncio.to_thread(_edito_count_subtemas, dst_id)
+        await query.edit_message_text(
+            _edito_tema_detail_text(dst, nsub) if dst else "Tema destino no encontrado.",
+            parse_mode="HTML",
+            reply_markup=_edito_tema_detail_kb(dst_id, nsub) if dst else None,
+        )
+        return
+
+    # ── Agregar tema ──────────────────────────────────────────────────────────
+    if d == "edito_add":
+        context.user_data["edito_add_tema"] = True
+        await query.edit_message_text(
+            "➕ <b>Agregar tema</b>\n\nEscribí el nombre del tema en el chat:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩ Cancelar", callback_data="edito_main")]
+            ]),
+        )
+        return
+
+    if d.startswith("edito_addnivel_"):
+        nivel     = d.split("_")[2]
+        nombre    = context.user_data.pop("edito_add_nombre", None)
+        parent_id = context.user_data.pop("edito_add_parent_id", None)
+        if not nombre:
+            await query.answer("No encontré el nombre del tema", show_alert=True)
+            return
+        tid = await asyncio.to_thread(_edito_upsert_tema, nombre, nivel, parent_id)
+        await query.answer(f"✅ «{nombre}» creado como {nivel}", show_alert=False)
+        if parent_id:
+            # Volver al detalle del padre
+            parent  = await asyncio.to_thread(_edito_get_tema, parent_id)
+            nsub    = await asyncio.to_thread(_edito_count_subtemas, parent_id)
+            pparent = parent.get("parent_id") if parent else None
+            await query.edit_message_text(
+                _edito_tema_detail_text(parent, nsub) if parent else "✅ Subtema creado.",
+                parse_mode="HTML",
+                reply_markup=_edito_tema_detail_kb(parent_id, nsub, pparent) if parent else None,
+            )
+        else:
+            temas = await asyncio.to_thread(_edito_get_temas)
+            discs = await asyncio.to_thread(_edito_get_descubrimientos)
+            await query.edit_message_text(
+                _edito_main_text(len(temas), len(discs)),
+                parse_mode="HTML",
+                reply_markup=_edito_main_kb(len(temas), len(discs)),
+            )
+        return
+
+
 async def _post_init(application: Application) -> None:
     from telegram import BotCommand
     await application.bot.set_my_commands([
-        BotCommand("curador", "Briefing on-demand de las últimas 24h"),
-        BotCommand("horarios", "Ver y configurar horarios del curador"),
-        BotCommand("fuentes", "Gestionar fuentes RSS"),
-        BotCommand("cola", "Notas programadas pendientes"),
-        BotCommand("stats", "Estadísticas del día"),
-        BotCommand("creditos", "Estado de servicios y créditos"),
-        BotCommand("frases", "Crear y publicar frases con imagen"),
-        BotCommand("feedback_ver", "Ver lo que aprendió el curador"),
-        BotCommand("borrar", "Eliminar una nota publicada"),
-        BotCommand("editar", "Editar una nota publicada"),
-        BotCommand("cotizaciones", "Panel de cotizaciones en tiempo real"),
-        BotCommand("comandos", "Ver todos los comandos"),
+        # ── Pipeline editorial ────────────────────────────────────────────────
+        BotCommand("pipeline",          "Estado del pipeline editorial — todas las etapas"),
+        BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
+        BotCommand("briefing",          "Briefing editorial — revisar notas pendientes"),
+        BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
+        BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
+        BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
+        # ── Contenido ─────────────────────────────────────────────────────────
+        BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
+        BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
+        BotCommand("editar",            "Editar una nota ya publicada"),
+        BotCommand("borrar",            "Eliminar una nota publicada"),
+        # ── Información ───────────────────────────────────────────────────────
+        BotCommand("stats",             "Estadísticas del día (publicadas, errores)"),
+        BotCommand("feedback_ver",      "Ver pesos aprendidos por el EDITOR"),
+        # ── Configuración ─────────────────────────────────────────────────────
+        BotCommand("fuentes",           "Gestionar fuentes RSS del EDITOR"),
     ])
     logger.info("BotCommands registrados en Telegram")
 
@@ -10628,21 +14690,31 @@ def main():
     app.add_handler(CommandHandler("editar", cmd_editar))
     app.add_handler(CommandHandler("hilo", cmd_hilo))
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
-    app.add_handler(CommandHandler("Claude", cmd_c))
     app.add_handler(CommandHandler("curador", cmd_curador))
+    app.add_handler(CommandHandler("ingesta", cmd_ingesta))
+    app.add_handler(CommandHandler("briefing", cmd_briefing))
+    app.add_handler(CommandHandler("programadas", cmd_programadas))
+    app.add_handler(CommandHandler("coladepublicacion", cmd_coladepublicacion))
+    app.add_handler(CommandHandler("inst", cmd_inst))
     app.add_handler(CommandHandler("horarios", cmd_horarios))
     app.add_handler(CommandHandler("feedback_ver", cmd_feedback_ver))
+    app.add_handler(CommandHandler("reglas", cmd_reglas))
+    app.add_handler(CommandHandler("publinotas", cmd_publinotas))
+    app.add_handler(CommandHandler("kwtemp", cmd_kwtemp))
     app.add_handler(CommandHandler("cola", cmd_cola))
     app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("frases", cmd_frases))
     app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
-    app.add_handler(CommandHandler("cotizaciones", cotizaciones.cmd_cotizaciones))
-    app.add_handler(CommandHandler("cotiz_horario", cotizaciones.cmd_cotiz_horario))
+    app.add_handler(CommandHandler("publicador", cmd_publicador))
+    app.add_handler(CommandHandler("lector", cmd_lector))
+    app.add_handler(CommandHandler("editor", cmd_editor))
+    app.add_handler(CommandHandler("pipeline", cmd_pipeline))
+    app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
+    app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
-    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"(?i)^/[Cc]laude"), handle_claude_photo))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
@@ -10651,19 +14723,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_horarios_button, pattern="^ch_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
-    app.add_handler(CallbackQueryHandler(cotizaciones.handle_cotiz_button, pattern="^cotiz_"))
     app.add_handler(CallbackQueryHandler(handle_button))
-
-    # Inicializar módulo cotizaciones con credenciales del entorno
-    cotizaciones.init(
-        channel=TELEGRAM_CHANNEL,
-        tw_key=TWITTER_API_KEY,
-        tw_secret=TWITTER_API_SECRET,
-        tw_token=TWITTER_TOKEN,
-        tw_tsecret=TWITTER_SECRET,
-        admin_chat_id=ADMIN_CHAT_ID,
-        paused_fn=lambda: BOT_PAUSED,
-    )
 
     # Programar tareas automáticas en Argentina (UTC-3)
     from datetime import timezone, timedelta
@@ -10675,13 +14735,6 @@ def main():
     curador_slots = curador_cfg.get("slots", _DEFAULT_CURADOR_SLOTS)
     _reschedule_curador_jobs(job_queue, curador_slots)
 
-    # Reporte de stats a las 23:00 ARG
-    job_queue.run_daily(
-        send_daily_report,
-        time=dtime(hour=23, minute=0, tzinfo=tz_arg),
-        name="daily_report",
-    )
-    logger.info("Reporte diario programado para las 23:00 ARG")
 
     # Aprendizaje de hashtags a las 23:15 ARG
     job_queue.run_daily(
@@ -10708,9 +14761,6 @@ def main():
         name="weekly_credits",
     )
     logger.info("Weekly credits check programado para los lunes 09:00 ARG")
-
-    # Cotizaciones: jobs de monitoring, alertas y resúmenes
-    cotizaciones.register_jobs(job_queue, tz_arg)
 
     # Re-registrar scheduled jobs persistidos (sobreviven redeploys)
     try:
