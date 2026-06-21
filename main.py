@@ -5205,6 +5205,32 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
 
+    # ── Resumen finde (flujo 8AM): correcciones / reprogramar hora ──────────────
+    if context.user_data.get("awaiting_finde_corr"):
+        _fdate = context.user_data.pop("awaiting_finde_corr")
+        import sqlite3 as _sqf
+        from datetime import datetime as _dtf
+        with _sqf.connect("/opt/me-harness/harness.db") as _c:
+            _c.execute("UPDATE finde_approval SET status='corregir', feedback=?, updated_at=? WHERE date=?",
+                       (text_in, _dtf.utcnow().isoformat(), _fdate))
+        await update.message.reply_text("✏️ Listo, rehago el texto con tus indicaciones y te lo reenvío para revisar.")
+        return
+    if context.user_data.get("awaiting_finde_reprog"):
+        _fdate = context.user_data.pop("awaiting_finde_reprog")
+        import re as _ref, sqlite3 as _sqf
+        from datetime import datetime as _dtf
+        m = _ref.match(r'^(\d{1,2}):(\d{2})$', text_in.strip())
+        if not m:
+            context.user_data["awaiting_finde_reprog"] = _fdate
+            await update.message.reply_text("Hora inválida. Escribila como HH:MM (ej: 10:30):")
+            return
+        hh, mm = int(m.group(1)), int(m.group(2))
+        with _sqf.connect("/opt/me-harness/harness.db") as _c:
+            _c.execute("UPDATE finde_approval SET publish_at=?, updated_at=? WHERE date=?",
+                       (f"{_fdate}T{hh:02d}:{mm:02d}:00", _dtf.utcnow().isoformat(), _fdate))
+        await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
+        return
+
     # ── Editor: esperando nuevo nombre para renombrar tema ───────────────────
     rename_id = context.user_data.pop("edito_rename_id", None)
     if rename_id:
@@ -13567,6 +13593,61 @@ async def _post_init(application: Application) -> None:
     logger.info("BotCommands registrados en Telegram")
 
 
+async def on_finde_approval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botones del resumen finde (8AM): aprobar / no publicar / corregir / reprogramar / cancelar.
+    Escribe la decisión en harness.db (tabla finde_approval); el harness postea según eso."""
+    import sqlite3 as _sqf
+    from datetime import datetime as _dtf
+    query = update.callback_query
+    await query.answer()
+    try:
+        action, fdate = query.data.split(":", 1)
+    except ValueError:
+        return
+    action = action[len("fap_"):]
+    HDB = "/opt/me-harness/harness.db"
+
+    def _set(**fields):
+        fields["updated_at"] = _dtf.utcnow().isoformat()
+        with _sqf.connect(HDB) as conn:
+            ex = conn.execute("SELECT 1 FROM finde_approval WHERE date=?", (fdate,)).fetchone()
+            if ex:
+                cols = ", ".join(f"{k}=?" for k in fields)
+                conn.execute(f"UPDATE finde_approval SET {cols} WHERE date=?", (*fields.values(), fdate))
+            else:
+                keys = ["date"] + list(fields)
+                conn.execute(
+                    f"INSERT INTO finde_approval ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
+                    (fdate, *fields.values()))
+
+    def _hora():
+        with _sqf.connect(HDB) as conn:
+            r = conn.execute("SELECT publish_at FROM finde_approval WHERE date=?", (fdate,)).fetchone()
+        return ((r[0] if r and r[0] else "") or "")[11:16] or "09:00"
+
+    if action == "aprobar":
+        _set(status="aprobado")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
+        await query.message.reply_text(f"✅ Aprobado — el resumen sale al canal a las {_hora()}.")
+    elif action == "nopub":
+        _set(status="no_publicar")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
+        await query.message.reply_text("🚫 Listo, el resumen NO se publica en el canal.")
+    elif action == "cancel":
+        _set(status="cancelado")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
+        await query.message.reply_text(f"✖️ Cerrado. Sigue todo igual: sale a las {_hora()}.")
+    elif action == "corregir":
+        context.user_data["awaiting_finde_corr"] = fdate
+        await query.message.reply_text("✏️ Escribí las recomendaciones para rehacer el texto del resumen:")
+    elif action == "reprog":
+        context.user_data["awaiting_finde_reprog"] = fdate
+        await query.message.reply_text("🕘 Escribí la nueva hora en formato HH:MM (ej: 10:30):")
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -13609,6 +13690,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
+    app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
