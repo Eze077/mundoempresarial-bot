@@ -5998,25 +5998,44 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _sys_ct.path.insert(0, "/opt/me-harness")
         try:
             import sqlite3 as _sq_ct
+            _wp_pid_ct = None
+            _stage_ct  = ""
             with _sq_ct.connect("/opt/me-harness/harness.db") as _c_ct:
                 # Guardar título original antes de cambiar
                 row_ct = _c_ct.execute(
-                    "SELECT title, content_json FROM jobs WHERE id=?", (job_id,)
+                    "SELECT title, content_json, wp_post_id, stage FROM jobs WHERE id=?", (job_id,)
                 ).fetchone()
                 if row_ct:
                     orig_title = row_ct[0] or ""
                     cj_ct = _js_ct.loads(row_ct[1] or "{}")
+                    _wp_pid_ct = row_ct[2]
+                    _stage_ct  = row_ct[3] or ""
                     if "original_title" not in cj_ct:  # guardar solo la primera vez
                         cj_ct["original_title"] = orig_title
+                    # Título de Leo = máxima prioridad: candado para que el redactor NO lo pise,
+                    # y lo dejamos en content_json.title para que viaje con la nota.
+                    cj_ct["title"]        = new_title
+                    cj_ct["title_locked"] = True
                     _c_ct.execute(
                         "UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
                         (new_title, _js_ct.dumps(cj_ct), job_id)
                     )
+            # Si la nota YA está publicada, actualizar el post vivo en WP (sin tocar el slug → URL estable)
+            _wp_updated = False
+            if _wp_pid_ct and _stage_ct == "done":
+                try:
+                    _wp_updated = await asyncio.to_thread(
+                        update_post, int(_wp_pid_ct),
+                        {"title": new_title, "meta": {"rank_math_title": _meta_safe(new_title)[:60]}}
+                    )
+                except Exception as _ewp:
+                    logger.warning(f"update_post título #{job_id}: {_ewp}")
             if prompt_id:
                 try: await context.bot.delete_message(update.message.chat_id, prompt_id)
                 except Exception: pass
+            _extra_ct = "\n\n🌐 Actualizado también en la web." if _wp_updated else ""
             await update.message.reply_text(
-                f"✅ Título actualizado:\n<b>{new_title}</b>\n\n"
+                f"✅ Título actualizado:\n<b>{new_title}</b>{_extra_ct}\n\n"
                 f"<i>Usá '↩ Restaurar original' en el menú para volver al título anterior.</i>",
                 parse_mode="HTML"
             )
