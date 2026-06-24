@@ -13037,28 +13037,34 @@ def _edito_ln_text(notes: list) -> str:
 
 # Condición SQL y etiqueta para cada estado del pipeline
 _PIP_COND = {
-    "ingesta":     "stage='ingesta'",
-    "curado":      "stage='curado'",
-    "cola":        "stage='cola'",
-    "redaccion":   "stage='redaccion'",
-    "publicacion": "stage='publicacion'",
-    "sin_imagen":  "stage='sin_imagen'",
-    "programadas": "stage='done' AND tg_pending=1",
-    "sin_evaluar": "stage='done' AND (tg_pending IS NULL OR tg_pending=0) AND lector_evaluated=0",
-    "evaluadas":   "stage='done' AND lector_evaluated=1 AND lector_score IS NOT NULL",
-    "rechazadas":  "stage='rejected'",
+    "ingesta":       "stage='ingesta'",
+    "descubrimiento":"stage='descubrimiento'",
+    "curado":        "stage='curado'",
+    "cola":          "stage='cola'",
+    "redaccion":     "stage='redaccion'",
+    "revision":      "stage='revision'",
+    "publicacion":   "stage='publicacion'",
+    "sin_imagen":    "stage='sin_imagen'",
+    "publinota":     "stage='publinota'",
+    "programadas":   "stage='done' AND tg_pending=1",
+    "sin_evaluar":   "stage='done' AND (tg_pending IS NULL OR tg_pending=0) AND lector_evaluated=0",
+    "evaluadas":     "stage='done' AND lector_evaluated=1 AND lector_score IS NOT NULL",
+    "rechazadas":    "stage='rejected'",
 }
 _PIP_LABEL = {
-    "ingesta":     "🔵 Ingesta",
-    "curado":      "📋 Briefing",
-    "cola":        "📌 Cola",
-    "redaccion":   "✍️ Redacción",
-    "publicacion": "📤 Publicación",
-    "sin_imagen":  "🖼️ Sin imagen",
-    "programadas": "📅 Programadas",
-    "sin_evaluar": "⏳ Sin evaluar",
-    "evaluadas":   "🔍 QA+Lector",
-    "rechazadas":  "🚫 Rechazadas",
+    "ingesta":       "🔵 Ingesta",
+    "descubrimiento":"🔎 Descubrimiento",
+    "curado":        "📋 Briefing",
+    "cola":          "📌 Cola",
+    "redaccion":     "✍️ Redacción",
+    "revision":      "🛑 Frenadas",
+    "publicacion":   "📤 Publicación",
+    "sin_imagen":    "🖼️ Sin imagen",
+    "publinota":     "💼 Comercial",
+    "programadas":   "📅 Programadas",
+    "sin_evaluar":   "⏳ Sin evaluar",
+    "evaluadas":     "🔍 QA+Lector",
+    "rechazadas":    "🚫 Rechazadas",
 }
 
 
@@ -13080,13 +13086,16 @@ def _pipeline_stats() -> tuple:
         ).fetchone()
         avg = round((avg_r[0] or 0), 1)
 
-    w = " ⚠️" if counts["sin_imagen"] else ""
-    lns = [f"📊 <b>Pipeline</b> — {today}\n"]
+    w  = " ⚠️" if counts["sin_imagen"] else ""
+    rv = " ⚠️" if counts.get("revision") else ""
+    lns = [f"📊 <b>Pipeline</b> — línea de trabajo · {today}\n"]
     lns += [
         f"🔵 Ingesta           <b>{counts['ingesta']}</b>",
+        f"🔎 Descubrimiento    <b>{counts['descubrimiento']}</b>",
         f"📋 Curado            <b>{counts['curado']}</b>",
         f"📌 Cola              <b>{counts['cola']}</b>",
         f"✍️ Redacción         <b>{counts['redaccion']}</b>",
+        f"🛑 Frenadas (rev.)   <b>{counts['revision']}</b>{rv}",
         f"📤 Publicación       <b>{counts['publicacion']}</b>",
         f"🖼️ Sin imagen        <b>{counts['sin_imagen']}</b>{w}",
         "──────────────────────────",
@@ -13098,6 +13107,8 @@ def _pipeline_stats() -> tuple:
         eval_line += f"  · avg {avg}/10"
     lns.append(eval_line)
     lns.append(f"🚫 Rechazadas (hoy)  <b>{counts['rechazadas_hoy']}</b>")
+    if counts.get("publinota"):
+        lns.append(f"💼 Comercial         <b>{counts['publinota']}</b>")
     lns.append("\n<i>Tocá una etapa para ver las notas.</i>")
     return "\n".join(lns), counts
 
@@ -13110,14 +13121,18 @@ def _pipeline_kb(counts: dict) -> dict:
         warn = "⚠️ " if key == "sin_imagen" and c else ""
         return {"text": f"{warn}{label} ({c})", "callback_data": f"pip_stage_{key}"}
 
-    return {"inline_keyboard": [
-        [btn("ingesta"),     btn("curado")],
-        [btn("cola"),        btn("redaccion")],
+    rows = [
+        [btn("ingesta"),     btn("descubrimiento")],
+        [btn("curado"),      btn("cola")],
+        [btn("redaccion"),   btn("revision")],
         [btn("publicacion"), btn("sin_imagen")],
         [btn("programadas"), btn("sin_evaluar")],
         [btn("evaluadas"),   btn("rechazadas")],
-        [{"text": "🔄 Refrescar", "callback_data": "pip_refresh"}],
-    ]}
+    ]
+    if counts.get("publinota"):
+        rows.append([btn("publinota")])
+    rows.append([{"text": "🔄 Refrescar", "callback_data": "pip_refresh"}])
+    return {"inline_keyboard": rows}
 
 
 def _pipeline_stage_detail(key: str) -> str:
