@@ -11115,6 +11115,34 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja foto enviada por Telegram durante edición o flujo sin_imagen."""
 
+    # ── /notamanual: foto de portada para la columna pendiente ───────────────
+    _nm = context.user_data.get("nota_manual")
+    if _nm and not context.user_data.get("awaiting_img_url_for") and not context.user_data.get("waiting_for_edit_photo"):
+        msg = await update.message.reply_text("⏳ Subiendo la foto a WordPress…")
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file(read_timeout=30, connect_timeout=15)
+            import requests as _rq_nm
+            dl = await asyncio.to_thread(lambda: _rq_nm.get(file.file_path, timeout=30))
+            mid = await asyncio.to_thread(upload_image_bytes, dl.content, "jpg")
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude subir la foto: {e}")
+            return
+        if not mid:
+            await msg.edit_text("❌ No pude subir la foto a WP. Probá de nuevo.")
+            return
+        _nm["image_id_override"] = mid
+        await msg.edit_text(f"✅ Foto cargada (#{mid}) — será la portada de la columna.")
+        try:
+            if _nm.get("_panel_chat_id") and _nm.get("_panel_msg_id"):
+                await context.bot.edit_message_text(
+                    chat_id=_nm["_panel_chat_id"], message_id=_nm["_panel_msg_id"],
+                    text=_nota_manual_panel_text(_nm), parse_mode="HTML",
+                    reply_markup=_nota_manual_kb())
+        except Exception:
+            pass
+        return
+
     # ── Flujo sin_imagen: Leo envía foto para una nota sin imagen ────────────
     job_id_photo = context.user_data.get("awaiting_img_url_for")
     if job_id_photo:
@@ -13880,7 +13908,7 @@ async def on_finde_approval_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 # ════════════════════════════════════════════════════════════════════════════
 
 def _pdf_to_text(path: str):
-    """Extrae texto de un PDF. None si no hay librería; '' si falla la extracción."""
+    """Devuelve (texto, n_imagenes). texto=None si no hay librería; '' si falla."""
     Reader = None
     try:
         from pypdf import PdfReader as Reader
@@ -13888,13 +13916,20 @@ def _pdf_to_text(path: str):
         try:
             from PyPDF2 import PdfReader as Reader
         except ImportError:
-            return None
+            return None, 0
     try:
         reader = Reader(path)
-        return "\n".join((pg.extract_text() or "") for pg in reader.pages).strip()
+        text = "\n".join((pg.extract_text() or "") for pg in reader.pages).strip()
+        nimg = 0
+        try:
+            for pg in reader.pages:
+                nimg += len(getattr(pg, "images", []) or [])
+        except Exception:
+            nimg = 0
+        return text, nimg
     except Exception as e:
         logger.warning(f"_pdf_to_text error: {e}")
-        return ""
+        return "", 0
 
 
 def _gpt_nota_manual_extract(raw_text: str):
@@ -14014,6 +14049,7 @@ def _enqueue_nota_manual(data: dict, scheduled_dt=None) -> int:
         "bullets":       data["bullets"],
         "h2_headings":   data["h2_headings"],
         "image_url":     None,
+        "image_id_override": data.get("image_id_override"),
         "category_ids":  data["category_ids"],
         "tag_names":     data["tag_names"],
         "matched_kw":    [],
@@ -14035,6 +14071,71 @@ def _enqueue_nota_manual(data: dict, scheduled_dt=None) -> int:
             ("publicacion", data["source_url"], data["title"],
              json.dumps(cj, ensure_ascii=False), 8.0, 3, instr, _dt.utcnow().isoformat()))
         return cur.lastrowid
+
+
+def _html_to_telegram_text(html: str) -> str:
+    """Convierte el HTML del cuerpo a texto legible para mostrarlo en Telegram."""
+    t = html or ""
+    t = re.sub(r'(?i)<h2[^>]*>', '\n\n▸ ', t)
+    t = re.sub(r'(?i)</h2>', '\n', t)
+    t = re.sub(r'(?i)<li[^>]*>', '\n• ', t)
+    t = re.sub(r'(?i)</p>|</div>', '\n\n', t)
+    t = re.sub(r'(?i)<br\s*/?>', '\n', t)
+    t = re.sub(r'<[^>]+>', '', t)
+    t = t.replace('&hellip;', '…').replace('&amp;', '&').replace('&nbsp;', ' ')
+    t = re.sub(r'&#?\w+;', ' ', t)
+    t = re.sub(r'[ \t]+', ' ', t)
+    t = re.sub(r'\n{3,}', '\n\n', t).strip()
+    return t
+
+
+def _chunks(s: str, n: int = 3900) -> list:
+    """Parte un texto en pedazos <= n respetando párrafos (límite Telegram 4096)."""
+    out, cur = [], ""
+    for para in (s or "").split("\n\n"):
+        while len(para) > n:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(para[:n]); para = para[n:]
+        if len(cur) + len(para) + 2 > n:
+            if cur:
+                out.append(cur)
+            cur = para
+        else:
+            cur = (cur + "\n\n" + para) if cur else para
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _nota_manual_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✅ Publicar ahora", "callback_data": "nm_pub"},
+         {"text": "🗓️ Programar", "callback_data": "nm_prog"}],
+        [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+
+
+def _nota_manual_panel_text(data: dict) -> str:
+    import html as _html
+    def esc(s): return _html.escape(str(s or ""))
+    if data.get("image_id_override"):
+        foto = f"✅ cargada (#{data['image_id_override']})"
+    elif data.get("pdf_images"):
+        foto = f"el PDF trae {data['pdf_images']} imagen(es) — mandá una foto para portada, o va el logo ME"
+    else:
+        foto = "sin foto → se publica con el logo ME (placeholder). Mandá una imagen si querés portada propia"
+    return (
+        "📝 <b>Nota manual lista para revisar</b>\n\n"
+        f"<b>Título:</b> {esc(data['title'])}\n"
+        f"<b>Bajada:</b> {esc(data['excerpt'])}\n"
+        f"<b>Autor:</b> {esc(data['autor']) or '— (no detectado)'}\n"
+        f"<b>Categoría:</b> {esc(_cat_names(data['category_ids']))}\n"
+        f"<b>Etiquetas:</b> {esc(', '.join(data['tag_names']) or '—')}\n"
+        f"<b>Hashtags:</b> {esc(' '.join(data['hashtags']) or '—')}\n"
+        f"<b>📷 Foto:</b> {esc(foto)}\n"
+        f"<b>Cuerpo:</b> {len(data['content_html'])} car · "
+        f"{len(data['h2_headings'])} secciones · {len(data['bullets'])} bullets ☝️ (arriba)\n\n"
+        "Se publica con el formato y SEO de siempre (Capa 3 · Opinión). ¿Avanzamos?")
 
 
 async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14065,7 +14166,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f = await doc.get_file()
         path = _os.path.join(_tmp.gettempdir(), f"nm_{doc.file_unique_id}.pdf")
         await f.download_to_drive(path)
-        text = await asyncio.to_thread(_pdf_to_text, path)
+        text, pdf_imgs = await asyncio.to_thread(_pdf_to_text, path)
         try: _os.remove(path)
         except Exception: pass
     except Exception as e:
@@ -14078,11 +14179,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("⚠️ No pude extraer texto suficiente del PDF (¿es escaneado/imagen?). Probá pegando el texto.")
         return
     await msg.edit_text("🧩 Procesando la columna…")
-    await _process_nota_manual(update, context, text, status_msg=msg)
+    await _process_nota_manual(update, context, text, status_msg=msg, pdf_images=pdf_imgs)
 
 
-async def _process_nota_manual(update, context, raw_text: str, status_msg=None):
-    import html as _html
+async def _process_nota_manual(update, context, raw_text: str, status_msg=None, pdf_images=0):
     raw_text = (raw_text or "").strip()
     if len(raw_text) < 400:
         await update.message.reply_text("⚠️ El texto es muy corto para una nota. Pegá la columna completa (mín. ~400 caracteres).")
@@ -14094,26 +14194,26 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None):
         else: await update.message.reply_text(m)
         return
     data = await asyncio.to_thread(_build_nota_manual_data, ex)
+    data["pdf_images"] = pdf_images
     context.user_data["nota_manual"] = data
-    def esc(s): return _html.escape(str(s or ""))
-    txt = (
-        "📝 <b>Nota manual lista para revisar</b>\n\n"
-        f"<b>Título:</b> {esc(data['title'])}\n"
-        f"<b>Bajada:</b> {esc(data['excerpt'])}\n"
-        f"<b>Autor:</b> {esc(data['autor']) or '— (no detectado)'}\n"
-        f"<b>Categoría:</b> {esc(_cat_names(data['category_ids']))}\n"
-        f"<b>Etiquetas:</b> {esc(', '.join(data['tag_names']) or '—')}\n"
-        f"<b>Hashtags:</b> {esc(' '.join(data['hashtags']) or '—')}\n"
-        f"<b>Cuerpo:</b> {len(data['content_html'])} car · "
-        f"{len(data['h2_headings'])} secciones · {len(data['bullets'])} bullets\n\n"
-        "Se publica con el formato y SEO de siempre (Capa 3 · Opinión). ¿Avanzamos?")
-    kb = [[{"text": "✅ Publicar ahora", "callback_data": "nm_pub"},
-           {"text": "🗓️ Programar", "callback_data": "nm_prog"}],
-          [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]
+    # 1) Cuerpo tal como se va a publicar (bullets + cuerpo formateado)
+    parts = []
+    if data["bullets"]:
+        parts.append("📌 Lo que tenés que saber:\n" + "\n".join("• " + b for b in data["bullets"]))
+    parts.append(_html_to_telegram_text(data["content_html"]))
+    body_txt = "\n\n".join(parts)
+    intro = "📄 <b>Cuerpo de la nota</b> (así se va a publicar):"
     if status_msg:
-        await status_msg.edit_text(txt, parse_mode="HTML", reply_markup={"inline_keyboard": kb})
+        await status_msg.edit_text(intro, parse_mode="HTML")
     else:
-        await update.message.reply_text(txt, parse_mode="HTML", reply_markup={"inline_keyboard": kb})
+        await update.message.reply_text(intro, parse_mode="HTML")
+    for chunk in _chunks(body_txt, 3900):
+        await update.message.reply_text(chunk, disable_web_page_preview=True)
+    # 2) Panel con metadatos + foto + botones
+    sent = await update.message.reply_text(
+        _nota_manual_panel_text(data), parse_mode="HTML", reply_markup=_nota_manual_kb())
+    data["_panel_chat_id"] = sent.chat_id
+    data["_panel_msg_id"] = sent.message_id
 
 
 async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
