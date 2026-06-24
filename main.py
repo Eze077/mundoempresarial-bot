@@ -5259,6 +5259,30 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Harness: esperando título exacto para nota del BRIEFING (lo bloquea) ─
+    if context.user_data.get("awaiting_brief_title_for"):
+        job_id = context.user_data.pop("awaiting_brief_title_for")
+        import json as _js, sqlite3 as _sq
+        new_title = text_in.strip()
+        try:
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                row = _c.execute("SELECT title, content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if row:
+                    cj = _js.loads(row[1] or "{}")
+                    if "original_title" not in cj:
+                        cj["original_title"] = row[0] or ""
+                    cj["title"] = new_title
+                    cj["title_locked"] = True
+                    _c.execute(
+                        "UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
+                        (new_title, _js.dumps(cj), job_id))
+            await update.message.reply_text(
+                f"✏️ Título fijado y <b>bloqueado</b> — nota #{job_id}:\n<b>{new_title}</b>\n"
+                f"El redactor lo usa tal cual.", parse_mode="HTML")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
     # ── Harness: esperando fecha para programar nota desde el BRIEFING ──────
     # Guarda el override en content_json (pub_dest_override='fecha' + fecha); el
     # agente cola lo prioriza cuando Leo aprueba la nota. No confirma todavía.
@@ -8254,6 +8278,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
                 await query.answer()
+
+            # ── Título exacto desde el briefing (lo fija Leo y se bloquea) ─
+            elif action == "h_cur_title" and arg:
+                job_id = int(arg)
+                context.user_data["awaiting_brief_title_for"] = job_id
+                try:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=(f"✏️ <b>Título — nota #{job_id}</b>\n\n"
+                              f"Escribí el título exacto. Se usa tal cual "
+                              f"(el redactor no lo cambia)."),
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+                await query.answer("Escribí el título…")
 
             elif action == "h_cur_setdest" and len(parts) >= 3:
                 job_id = int(parts[1]); dest = parts[2]
