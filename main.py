@@ -5259,6 +5259,45 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Harness: esperando fecha para programar nota desde el BRIEFING ──────
+    # Guarda el override en content_json (pub_dest_override='fecha' + fecha); el
+    # agente cola lo prioriza cuando Leo aprueba la nota. No confirma todavía.
+    if context.user_data.get("awaiting_brief_prog_for"):
+        job_id = context.user_data.pop("awaiting_brief_prog_for")
+        import re as _re, json as _js, sqlite3 as _sq
+        from datetime import datetime as _dt, timedelta as _td
+        try:
+            txt = text_in.strip().lower()
+            now = _dt.now(); pub_dt = None
+            if "mañana" in txt or "manana" in txt:
+                base = now + _td(days=1)
+                m = _re.search(r'(\d{1,2}):(\d{2})', txt)
+                if m:
+                    pub_dt = base.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                                          second=0, microsecond=0)
+            if not pub_dt:
+                m = _re.search(r'(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\s+(\d{1,2}):(\d{2})', txt)
+                if m:
+                    d, mo, yr, hh, mm = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4)), int(m.group(5))
+                    pub_dt = _dt(int(yr) if yr else now.year, mo, d, hh, mm)
+            if not pub_dt:
+                await update.message.reply_text(
+                    "⚠️ No entendí la fecha. Usá: <code>30/05 18:30</code>", parse_mode="HTML")
+                return
+            pub_date_str = pub_dt.strftime("%Y-%m-%dT%H:%M:00")
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                st = _js.loads(row[0]) if row and row[0] else {}
+                st["pub_dest_override"] = "fecha"
+                st["pub_date_override"] = pub_date_str
+                _c.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js.dumps(st), job_id))
+            await update.message.reply_text(
+                f"🗓 Programada para <b>{pub_dt.strftime('%d/%m %H:%M')}</b> — nota #{job_id}.\n"
+                f"Aprobala con ✅ Publicar y sale en esa fecha.", parse_mode="HTML")
+        except Exception as _e:
+            await update.message.reply_text(f"❌ Error: {_e}")
+        return
+
     # ── Harness: esperando fecha de programación para nota en cola ──────────
     if context.user_data.get("awaiting_cola_prog_for"):
         job_id = context.user_data.pop("awaiting_cola_prog_for")
@@ -8197,6 +8236,61 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              + (f"\n📝 <i>{inst[:80]}</i>" if inst else ""),
                         parse_mode="HTML"
                     )
+
+            # ── Programar: override del destino desde el briefing ─────────
+            elif action == "h_cur_program" and arg:
+                job_id = int(arg)
+                _dest_rows = [
+                    [{"text": "📌 Hoy portada",  "callback_data": f"h_cur_setdest:{job_id}:hoy_portada"},
+                     {"text": "📰 Hoy",          "callback_data": f"h_cur_setdest:{job_id}:hoy_normal"}],
+                    [{"text": "📊 Mejor horario","callback_data": f"h_cur_setdest:{job_id}:mejor_horario"},
+                     {"text": "📅 Finde",         "callback_data": f"h_cur_setdest:{job_id}:finde"}],
+                    [{"text": "🗓 Fecha específica","callback_data": f"h_cur_setdest:{job_id}:fecha"}],
+                    [{"text": "🤖 Que decida el agente","callback_data": f"h_cur_setdest:{job_id}:auto"}],
+                    [{"text": "↩ Volver",        "callback_data": f"h_cur_setdest:{job_id}:back"}],
+                ]
+                try:
+                    await query.edit_message_reply_markup(reply_markup={"inline_keyboard": _dest_rows})
+                except Exception:
+                    pass
+                await query.answer()
+
+            elif action == "h_cur_setdest" and len(parts) >= 3:
+                job_id = int(parts[1]); dest = parts[2]
+                import sys as _sys_sd
+                _sys_sd.path.insert(0, "/opt/me-harness")
+                from agents import curador as _cur
+                _DEST_SHORT = {"hoy_portada": "📌 Hoy portada", "hoy_normal": "📰 Hoy",
+                               "mejor_horario": "📊 Mejor horario", "finde": "📅 Finde"}
+                state = _load_state(job_id)
+                if dest == "fecha":
+                    context.user_data["awaiting_brief_prog_for"] = job_id
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=(f"🗓 <b>Programar — nota #{job_id}</b>\n\n"
+                              f"Escribí la fecha y hora:\n"
+                              f"<code>30/05 18:30</code>  ·  <code>mañana 10:00</code>"),
+                        parse_mode="HTML")
+                    await query.answer("Esperando fecha…")
+                else:
+                    _msg = ""
+                    if dest == "auto":
+                        state.pop("pub_dest_override", None)
+                        state.pop("pub_date_override", None)
+                        _save_state(job_id, state)
+                        _msg = "🤖 Decide el agente"
+                    elif dest != "back":
+                        state["pub_dest_override"] = dest
+                        state.pop("pub_date_override", None)
+                        _save_state(job_id, state)
+                        _msg = f"✅ {_DEST_SHORT.get(dest, dest)}"
+                    await query.answer(_msg) if _msg else await query.answer()
+                # Redibujar la tarjeta (el botón Programar muestra el override)
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=_cur.build_card_keyboard(job_id, _load_state(job_id)))
+                except Exception:
+                    pass
 
             # ── Consolidar fuentes similares en una sola nota ────────────
             elif action == "h_cur_consolidar" and arg:
