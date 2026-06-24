@@ -5548,13 +5548,28 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import sys as _sys, sqlite3 as _sq, json as _js
         _sys.path.insert(0, "/opt/me-harness")
         try:
+            import re as _re_inst
             from agents import curador as _cur
+            _txt = text_in.strip()
+            # Atajo: si arranca con "titulo/título/title", es un TÍTULO → fijar y
+            # bloquear (no guardarlo como instrucción de enfoque). Cubre la costumbre de Leo.
+            _is_title = bool(_re_inst.match(r'^(t[íi]tulo|title)\b', _txt, _re_inst.IGNORECASE))
             with _sq.connect("/opt/me-harness/harness.db") as _c:
-                row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
-                state = _js.loads(row[0]) if row and row[0] else {}
-                state["instructions"] = text_in
-                _c.execute("UPDATE jobs SET content_json=?, instructions=? WHERE id=?",
-                           (_js.dumps(state), text_in, job_id))
+                row = _c.execute("SELECT title, content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+                state = _js.loads(row[1]) if row and row[1] else {}
+                if _is_title:
+                    _new_title = _re_inst.sub(r'^(t[íi]tulo|title)\s*:?\s*', '', _txt,
+                                              flags=_re_inst.IGNORECASE).strip()
+                    if "original_title" not in state:
+                        state["original_title"] = (row[0] or "") if row else ""
+                    state["title"] = _new_title
+                    state["title_locked"] = True
+                    _c.execute("UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
+                               (_new_title, _js.dumps(state), job_id))
+                else:
+                    state["instructions"] = text_in
+                    _c.execute("UPDATE jobs SET content_json=?, instructions=? WHERE id=?",
+                               (_js.dumps(state), text_in, job_id))
             # Actualizar tarjeta original
             card_msg_id = state.get("card_msg_id")
             if card_msg_id:
@@ -5567,7 +5582,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
-            await update.message.reply_text(f"📝 Instrucción guardada. Usá ✅ Publicar para aprobar.")
+            if _is_title:
+                await update.message.reply_text(
+                    f"✏️ Detecté un título → fijado y <b>bloqueado</b>:\n<b>{_new_title}</b>\n"
+                    f"Usá ✅ Publicar para aprobar.", parse_mode="HTML")
+            else:
+                await update.message.reply_text("📝 Instrucción guardada. Usá ✅ Publicar para aprobar.")
         except Exception as _e:
             await update.message.reply_text(f"❌ Error guardando instrucción: {_e}")
         return
