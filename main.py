@@ -5231,6 +5231,42 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
         return
 
+    # ── /notamanual: columna de autor pegada como texto ────────────────────────
+    if context.user_data.get("awaiting_nota_manual"):
+        context.user_data.pop("awaiting_nota_manual")
+        await _process_nota_manual(update, context, text_in)
+        return
+    if context.user_data.get("awaiting_nota_manual_sched"):
+        context.user_data.pop("awaiting_nota_manual_sched")
+        _nm = context.user_data.get("nota_manual")
+        if not _nm:
+            await update.message.reply_text("⚠️ Se perdió la nota. Reiniciá con /notamanual.")
+            return
+        _m = re.match(r'^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\s+(\d{1,2}):(\d{2})$', text_in.strip())
+        if not _m:
+            context.user_data["awaiting_nota_manual_sched"] = True
+            await update.message.reply_text("Formato inválido. Escribí DD/MM HH:MM (ej: 27/06 09:00):")
+            return
+        from datetime import datetime as _dtn, timezone as _tzn, timedelta as _tdn
+        _dd, _mmo, _yy, _hh, _mi = _m.groups()
+        _ar = _tzn(_tdn(hours=-3))
+        _year = int(_yy) if _yy else _dtn.now(_ar).year
+        if _year < 100:
+            _year += 2000
+        try:
+            _dt = _dtn(_year, int(_mmo), int(_dd), int(_hh), int(_mi), tzinfo=_ar)
+        except ValueError:
+            context.user_data["awaiting_nota_manual_sched"] = True
+            await update.message.reply_text("Fecha inválida. Probá de nuevo (DD/MM HH:MM):")
+            return
+        try:
+            _jid = await asyncio.to_thread(_enqueue_nota_manual, _nm, _dt)
+            context.user_data.pop("nota_manual", None)
+            await update.message.reply_text(f"🗓️ Columna #{_jid} programada para {_dt.strftime('%d/%m %H:%M')}.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error al programar: {e}")
+        return
+
     # ── Editor: esperando nuevo nombre para renombrar tema ───────────────────
     rename_id = context.user_data.pop("edito_rename_id", None)
     if rename_id:
@@ -13769,6 +13805,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
         # ── Contenido ─────────────────────────────────────────────────────────
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
+        BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
         BotCommand("editar",            "Editar una nota ya publicada"),
         BotCommand("borrar",            "Eliminar una nota publicada"),
@@ -13835,6 +13872,277 @@ async def on_finde_approval_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("🕘 Escribí la nueva hora en formato HH:MM (ej: 10:30):")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# /notamanual — Columna de autor (contenido 100% propio de ME): PDF o texto pegado.
+# Detecta título, bajada, autor, cuerpo, categoría, etiquetas y hashtags, y la
+# maqueta con el MISMO esquema de redacción (_gpt_format_article) y SEO/publicación
+# (publicador del harness vía stage='publicacion'). No inventa ni altera el contenido.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _pdf_to_text(path: str):
+    """Extrae texto de un PDF. None si no hay librería; '' si falla la extracción."""
+    Reader = None
+    try:
+        from pypdf import PdfReader as Reader
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader as Reader
+        except ImportError:
+            return None
+    try:
+        reader = Reader(path)
+        return "\n".join((pg.extract_text() or "") for pg in reader.pages).strip()
+    except Exception as e:
+        logger.warning(f"_pdf_to_text error: {e}")
+        return ""
+
+
+def _gpt_nota_manual_extract(raw_text: str):
+    """GPT separa la columna cruda en campos. Preserva la voz del autor; no inventa."""
+    if not OPENAI_API_KEY:
+        return None
+    prompt = (
+        "Sos el editor de MundoEmpresarial.ar. Te paso el texto COMPLETO de una columna de "
+        "opinión escrita por un empresario o lector (contenido propio, NO de otra web). "
+        "Devolvé SOLO un JSON con esta forma exacta:\n"
+        '{\n'
+        '  "title": "título de la nota; si el texto trae uno usalo, si no proponé uno fiel y sin clickbait",\n'
+        '  "bajada": "1-2 oraciones que resuman el enfoque de la columna",\n'
+        '  "autor": "nombre del autor y, si aparece, su cargo/empresa (ej: Juan Perez, presidente de CAME); si no se identifica, vacio",\n'
+        '  "cuerpo": "el cuerpo de la columna, limpio, sin el titulo ni la firma, respetando las palabras e ideas del autor",\n'
+        '  "tags": ["3 a 6 etiquetas: entidades, personas y temas mencionados"],\n'
+        '  "hashtags": ["3 a 5 hashtags para redes, sin espacios, ej #Pymes"]\n'
+        '}\n'
+        "REGLAS: No inventes datos. No cambies la postura ni la tesis del autor. "
+        "Espanol rioplatense. Devolve SOLO el JSON.\n\n"
+        "TEXTO:\n" + raw_text[:9000]
+    )
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini",
+                  "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0.2,
+                  "response_format": {"type": "json_object"}},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            logger.warning(f"_gpt_nota_manual_extract {r.status_code}: {r.text[:200]}")
+            return None
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw).strip()
+        d = json.loads(raw)
+        if not d.get("title") or not d.get("cuerpo"):
+            return None
+        return d
+    except Exception as e:
+        logger.warning(f"_gpt_nota_manual_extract error: {e}")
+        return None
+
+
+_CAT_NAME_CACHE = {}
+def _cat_names(ids: list) -> str:
+    if not ids:
+        return "—"
+    missing = [i for i in ids if i not in _CAT_NAME_CACHE]
+    if missing:
+        try:
+            r = requests.get(f"{WP_URL}/wp-json/wp/v2/categories",
+                             params={"include": ",".join(map(str, missing)),
+                                     "_fields": "id,name", "per_page": 100}, timeout=15)
+            for c in r.json():
+                _CAT_NAME_CACHE[c["id"]] = c["name"]
+        except Exception:
+            pass
+    return ", ".join(_CAT_NAME_CACHE.get(i, str(i)) for i in ids)
+
+
+def _build_nota_manual_data(ex: dict) -> dict:
+    """Toma lo extraído por GPT y arma el data listo para publicar (formato + SEO)."""
+    title  = (ex.get("title") or "").strip()
+    bajada = (ex.get("bajada") or "").strip()
+    autor  = (ex.get("autor") or "").strip()
+    cuerpo = (ex.get("cuerpo") or "").strip()
+    kw = focus_keyword(title)
+    instr = (f"Es una COLUMNA DE OPINION firmada por {autor or 'un lector'}. "
+             "Respeta su voz, ideas y postura; NO inventes datos, NO agregues opiniones "
+             "ni cambies su tesis. Solo estructura en secciones y limpia.")
+    fmt = _gpt_format_article(title, cuerpo, source_url="columna-de-autor", kw=kw,
+                              redactor_instr=instr) or {}
+    body_html = fmt.get("html") or ("<p>" + "</p><p>".join(
+        p.strip() for p in cuerpo.split("\n\n") if p.strip()) + "</p>")
+    bullets = fmt.get("bullets", []) or []
+    h2      = fmt.get("h2_headings", []) or []
+    if autor:
+        byline = ('<p style="font-size:14px;color:#15487F;border-left:4px solid #E97C1E;'
+                  'padding-left:12px;margin:0 0 20px;">Por <strong>' + autor + '</strong></p>')
+        body_html = byline + body_html
+    try:
+        cat_ids = detect_categories(title, cuerpo, bajada) or []
+    except Exception:
+        cat_ids = []
+    cat_ids = [91] + [c for c in cat_ids if c != 91]   # Opinión (91) primero
+    gtags = [t.strip() for t in (ex.get("tags") or []) if t and str(t).strip()]
+    tags  = list(dict.fromkeys(gtags + extract_tags(title)))[:6]
+    hts = []
+    for h in (ex.get("hashtags") or []):
+        h = re.sub(r"\s+", "", str(h).strip())
+        if h and not h.startswith("#"):
+            h = "#" + h
+        if len(h) > 1:
+            hts.append(h)
+    hts = list(dict.fromkeys(hts))[:5]
+    if not hts:
+        hts = ["#" + re.sub(r"\s+", "", t) for t in tags[:4]]
+    return {"title": title, "excerpt": bajada or cuerpo[:160], "content_html": body_html,
+            "bullets": bullets, "h2_headings": h2, "category_ids": cat_ids,
+            "tag_names": tags, "hashtags": hts, "focus_keyword": kw, "autor": autor,
+            "source_url": f"columna://{url_slug(title) or 'autor'}"}
+
+
+def _enqueue_nota_manual(data: dict, scheduled_dt=None) -> int:
+    """Inserta la columna en harness.db stage='publicacion' (formato continua + SEO).
+    pre_passed=True bypasea el gate Lector PRE: NO se reescribe contenido humano."""
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+    cj = {
+        "title":         data["title"],
+        "excerpt":       data["excerpt"],
+        "content_html":  data["content_html"],
+        "bullets":       data["bullets"],
+        "h2_headings":   data["h2_headings"],
+        "image_url":     None,
+        "category_ids":  data["category_ids"],
+        "tag_names":     data["tag_names"],
+        "matched_kw":    [],
+        "formato":       "continua",
+        "portada":       False,
+        "meta_desc":     (data["excerpt"] or "")[:155],
+        "focus_keyword": data["focus_keyword"],
+        "source":        data["source_url"],
+        "source_url":    data["source_url"],
+        "fuente_propia": True,
+        "pre_passed":    True,
+        "autor":         data.get("autor", ""),
+    }
+    instr = f"programar:{scheduled_dt.isoformat()}" if scheduled_dt else None
+    with _sq.connect("/opt/me-harness/harness.db") as conn:
+        cur = conn.execute(
+            "INSERT INTO jobs (stage, source_url, title, content_json, score, hilo, instructions, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("publicacion", data["source_url"], data["title"],
+             json.dumps(cj, ensure_ascii=False), 8.0, 3, instr, _dt.utcnow().isoformat()))
+        return cur.lastrowid
+
+
+async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if BOT_PAUSED:
+        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+        return
+    context.user_data["awaiting_nota_manual"] = True
+    await update.message.reply_text(
+        "📝 <b>Nota manual — columna de autor</b>\n\n"
+        "Pegá el <b>texto completo</b> de la columna, o subí el <b>PDF</b>.\n\n"
+        "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
+        "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
+        parse_mode="HTML")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_nota_manual"):
+        return
+    doc = update.message.document
+    fn = (doc.file_name or "").lower()
+    if not (fn.endswith(".pdf") or (doc.mime_type or "") == "application/pdf"):
+        await update.message.reply_text("Subí un PDF, o pegá el texto de la columna directamente.")
+        return
+    context.user_data.pop("awaiting_nota_manual", None)
+    msg = await update.message.reply_text("📄 Leyendo el PDF…")
+    import tempfile as _tmp, os as _os
+    try:
+        f = await doc.get_file()
+        path = _os.path.join(_tmp.gettempdir(), f"nm_{doc.file_unique_id}.pdf")
+        await f.download_to_drive(path)
+        text = await asyncio.to_thread(_pdf_to_text, path)
+        try: _os.remove(path)
+        except Exception: pass
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude descargar el PDF: {e}")
+        return
+    if text is None:
+        await msg.edit_text("⚠️ No tengo lector de PDF instalado todavía. Pegá el texto de la columna directamente con /notamanual.")
+        return
+    if not text or len(text) < 400:
+        await msg.edit_text("⚠️ No pude extraer texto suficiente del PDF (¿es escaneado/imagen?). Probá pegando el texto.")
+        return
+    await msg.edit_text("🧩 Procesando la columna…")
+    await _process_nota_manual(update, context, text, status_msg=msg)
+
+
+async def _process_nota_manual(update, context, raw_text: str, status_msg=None):
+    import html as _html
+    raw_text = (raw_text or "").strip()
+    if len(raw_text) < 400:
+        await update.message.reply_text("⚠️ El texto es muy corto para una nota. Pegá la columna completa (mín. ~400 caracteres).")
+        return
+    ex = await asyncio.to_thread(_gpt_nota_manual_extract, raw_text)
+    if not ex:
+        m = "❌ No pude procesar el texto (GPT). Reintentá en un momento."
+        if status_msg: await status_msg.edit_text(m)
+        else: await update.message.reply_text(m)
+        return
+    data = await asyncio.to_thread(_build_nota_manual_data, ex)
+    context.user_data["nota_manual"] = data
+    def esc(s): return _html.escape(str(s or ""))
+    txt = (
+        "📝 <b>Nota manual lista para revisar</b>\n\n"
+        f"<b>Título:</b> {esc(data['title'])}\n"
+        f"<b>Bajada:</b> {esc(data['excerpt'])}\n"
+        f"<b>Autor:</b> {esc(data['autor']) or '— (no detectado)'}\n"
+        f"<b>Categoría:</b> {esc(_cat_names(data['category_ids']))}\n"
+        f"<b>Etiquetas:</b> {esc(', '.join(data['tag_names']) or '—')}\n"
+        f"<b>Hashtags:</b> {esc(' '.join(data['hashtags']) or '—')}\n"
+        f"<b>Cuerpo:</b> {len(data['content_html'])} car · "
+        f"{len(data['h2_headings'])} secciones · {len(data['bullets'])} bullets\n\n"
+        "Se publica con el formato y SEO de siempre (Capa 3 · Opinión). ¿Avanzamos?")
+    kb = [[{"text": "✅ Publicar ahora", "callback_data": "nm_pub"},
+           {"text": "🗓️ Programar", "callback_data": "nm_prog"}],
+          [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]
+    if status_msg:
+        await status_msg.edit_text(txt, parse_mode="HTML", reply_markup={"inline_keyboard": kb})
+    else:
+        await update.message.reply_text(txt, parse_mode="HTML", reply_markup={"inline_keyboard": kb})
+
+
+async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    act = q.data[len("nm_"):]
+    data = context.user_data.get("nota_manual")
+    if act == "cancel":
+        context.user_data.pop("nota_manual", None)
+        await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    if not data:
+        await q.edit_message_text("⚠️ Se perdió la nota en memoria. Reiniciá con /notamanual.")
+        return
+    if act == "pub":
+        try:
+            jid = await asyncio.to_thread(_enqueue_nota_manual, data, None)
+            context.user_data.pop("nota_manual", None)
+            await q.edit_message_text(
+                f"✅ Columna #{jid} encolada en publicación. Sale en breve con el formato y SEO de siempre.")
+        except Exception as e:
+            await q.edit_message_text(f"❌ Error al encolar: {e}")
+    elif act == "prog":
+        context.user_data["awaiting_nota_manual_sched"] = True
+        await q.edit_message_text(
+            "🗓️ ¿Para cuándo? Escribí <code>DD/MM HH:MM</code> (ej: 27/06 09:00):",
+            parse_mode="HTML")
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -13867,17 +14175,20 @@ def main():
     app.add_handler(CommandHandler("lector", cmd_lector))
     app.add_handler(CommandHandler("editor", cmd_editor))
     app.add_handler(CommandHandler("pipeline", cmd_pipeline))
+    app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
+    app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
