@@ -5,24 +5,20 @@ from PIL import Image, ImageDraw, ImageFont
 
 BASE_PATH = "/opt/mundoempresarial-bot/assets/frases_base.png"
 
-# Área del placeholder en la imagen base (1080x1080)
-# Rectángulo a borrar (cubre "[ Insertá aquí tu frase motivacional ]")
-PLACEHOLDER_RECT = (40, 425, 1040, 520)
-# Color de fondo del área de contenido
-BG_COLOR = "#f0f0f0"
+# Marco navy nuevo (diseño Claude Design): texto BLANCO, sin placeholder que borrar.
+# La comilla naranja está arriba; la frase va en el área libre debajo, alineada a la izq.
+FRASE_X_PAD = 72       # padding horizontal (igual que el diseño)
+FRASE_Y_TOP = 400      # debajo de la comilla naranja
+FRASE_Y_BOT = 770      # arriba del footer de marca
+FONT_SIZE   = 60
+TEXT_COLOR  = "#ffffff"
 
-# Área donde va la frase (centro vertical del bloque de contenido)
-FRASE_X_PAD = 60       # padding horizontal
-FRASE_Y_TOP = 430      # inicio del área de contenido disponible
-FRASE_Y_BOT = 970      # fin del área de contenido
-FONT_SIZE   = 62       # ~doble del placeholder original
-
-# Rutas de fuente en orden de preferencia
+# Rutas de fuente (bold primero, para acercarse a Poppins del diseño)
 _FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
 ]
 
 
@@ -61,22 +57,21 @@ def generate_frase_image(frase: str) -> bytes:
     draw = ImageDraw.Draw(img)
     font = _load_font(FONT_SIZE)
 
-    # 1. Borrar el área del placeholder
-    draw.rectangle(PLACEHOLDER_RECT, fill=BG_COLOR)
+    # Frase entre comillas angulares, como el diseño
+    clean = frase.strip().strip('«»"“”')
+    texto = "«" + clean + "»"
 
-    # 2. Calcular área disponible y centrar el texto
-    max_w  = img.width - FRASE_X_PAD * 2
-    lines  = _wrap(draw, frase, font, max_w)
-    line_h = int(FONT_SIZE * 1.3)
+    # Área libre debajo de la comilla; bloque centrado verticalmente, alineado a la izq.
+    max_w   = img.width - FRASE_X_PAD * 2
+    lines   = _wrap(draw, texto, font, max_w)
+    line_h  = int(FONT_SIZE * 1.32)
     block_h = len(lines) * line_h
 
     area_cy = (FRASE_Y_TOP + FRASE_Y_BOT) // 2
     y0 = area_cy - block_h // 2
 
     for i, line in enumerate(lines):
-        lw = int(draw.textlength(line, font=font))
-        x  = (img.width - lw) // 2
-        draw.text((x, y0 + i * line_h), line, fill="#333333", font=font)
+        draw.text((FRASE_X_PAD, y0 + i * line_h), line, fill=TEXT_COLOR, font=font)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
