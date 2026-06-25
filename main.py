@@ -1366,6 +1366,12 @@ def wp_auth():
     return {"Authorization": f"Basic {token}"}
 
 
+# Ferozo bloquea los writes REST directos del VPS (responde 415 + HTML del WAF):
+# upload de media, update/delete/create de posts y tags. WARP (Cloudflare) los saltea,
+# mismo patrón que el harness (_WARP en publicador.py). Reads siguen directos (no se bloquean).
+_WP_PROXIES = {"http": "socks5://127.0.0.1:40000", "https": "socks5://127.0.0.1:40000"}
+
+
 def get_or_create_tags(names: list) -> list:
     ids = []
     h = {**wp_auth(), "Content-Type": "application/json"}
@@ -1373,7 +1379,7 @@ def get_or_create_tags(names: list) -> list:
         try:
             r = requests.post(
                 f"{WP_URL}/wp-json/wp/v2/tags", headers=h,
-                json={"name": name}, timeout=10
+                json={"name": name}, proxies=_WP_PROXIES, timeout=10
             )
             if r.status_code == 201:
                 ids.append(r.json()["id"])
@@ -1396,16 +1402,17 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=nota.{ext}",
              "Content-Type": ctype}
         r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img.content, timeout=30
+            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img.content,
+            proxies=_WP_PROXIES, timeout=60
         )
-        if r.status_code == 201:
+        if r.ok:
             media_id = r.json()["id"]
             if alt:
                 requests.post(
                     f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
                     headers={**wp_auth(), "Content-Type": "application/json"},
                     json={"alt_text": alt, "caption": alt},
-                    timeout=10,
+                    proxies=_WP_PROXIES, timeout=10,
                 )
             return media_id
         logger.warning(f"Media {r.status_code}: {r.text[:200]}")
@@ -1420,14 +1427,15 @@ def upload_image_bytes(img_bytes: bytes, ext: str = "jpg", alt: str = "") -> int
         ctype = f"image/{ext}"
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=nota.{ext}",
              "Content-Type": ctype}
-        r = requests.post(f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes, timeout=30)
-        if r.status_code == 201:
+        r = requests.post(f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes,
+                          proxies=_WP_PROXIES, timeout=60)
+        if r.ok:
             media_id = r.json()["id"]
             if alt:
                 requests.post(
                     f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
                     headers={**wp_auth(), "Content-Type": "application/json"},
-                    json={"alt_text": alt, "caption": alt}, timeout=10,
+                    json={"alt_text": alt, "caption": alt}, proxies=_WP_PROXIES, timeout=10,
                 )
             return media_id
         logger.warning(f"upload_image_bytes {r.status_code}: {r.text[:200]}")
@@ -1608,7 +1616,7 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     h = {**wp_auth(), "Content-Type": "application/json"}
     global _LAST_WP_ERROR
     _LAST_WP_ERROR = ""
-    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
+    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, proxies=_WP_PROXIES, timeout=30)
     if r.status_code == 201:
         body = r.json()
         return {"link": body.get("link"), "id": body.get("id"), "content": content, "slug": s_slug}
@@ -9904,7 +9912,8 @@ def find_post(query: str) -> dict | None:
 
 def trash_post(post_id: int) -> bool:
     h = {**wp_auth(), "Content-Type": "application/json"}
-    r = requests.delete(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}", headers=h, timeout=15)
+    r = requests.delete(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}", headers=h,
+                        proxies=_WP_PROXIES, timeout=15)
     return r.status_code in (200, 201)
 
 
@@ -9913,7 +9922,7 @@ def update_post(post_id: int, payload: dict) -> bool:
     h = {**wp_auth(), "Content-Type": "application/json"}
     r = requests.post(
         f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
-        headers=h, json=payload, timeout=30
+        headers=h, json=payload, proxies=_WP_PROXIES, timeout=30
     )
     if r.status_code in (200, 201):
         return True
@@ -11098,9 +11107,10 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=editada.{ext}",
              "Content-Type": ctype}
         r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes, timeout=30
+            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img_bytes,
+            proxies=_WP_PROXIES, timeout=60
         )
-        if r.status_code != 201:
+        if not r.ok:
             logger.error(f"Upload photo: {r.status_code} {r.text[:200]}")
             return False
         media_id = r.json()["id"]
@@ -11111,7 +11121,7 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
             f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
             headers={**wp_auth(), "Content-Type": "application/json"},
             json={"alt_text": alt, "caption": alt},
-            timeout=10,
+            proxies=_WP_PROXIES, timeout=10,
         )
         return update_post(post["id"], {"featured_media": media_id})
     except Exception as e:
@@ -12518,7 +12528,7 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
     else:
         payload["status"] = "publish"
 
-    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, timeout=30)
+    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", headers=h, json=payload, proxies=_WP_PROXIES, timeout=30)
     if r.status_code == 201:
         body = r.json()
         return {"link": body["link"], "id": body["id"]}
