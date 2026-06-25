@@ -8464,6 +8464,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "h_cur_nopub" and arg:
                 job_id = int(arg)
                 reasons = [
+                    ("✅ Ya publicada en ME",        "ya_publicada"),
                     ("📋 Nota repetida",             "repetida"),
                     ("😐 Nota de poco interés",      "poco_interes"),
                     ("🚫 No es tema del diario",     "offtopic"),
@@ -8475,8 +8476,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         for r in reasons]
                 rows.append([{"text": "📢 Publinota",
                               "callback_data": f"h_cur_publinota:{job_id}"}])
-                rows.append([{"text": "📝 Publicar con instrucción",
-                              "callback_data": f"h_cur_instruct:{job_id}"}])
                 rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
                 try:
                     await query.edit_message_text(
@@ -8538,7 +8537,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
 
-                    if reason == "repetida":
+                    if reason == "ya_publicada":
+                        # Tema YA publicado en ME: señal fuerte de dedup. Cascade reject del
+                        # grupo de similares + feedback para el aprendizaje de temas
+                        # (consolidar/actualizar/descartar — ver plan dedup). El título queda
+                        # registrado para que el dedup frene futuras notas del mismo tema.
+                        _cascade_reject(job_id)
+                        _br_rj.record_feedback(job_id, "curador", "reject_ya_publicada",
+                                               after={"reason": "ya_publicada", "title": _title_rj})
+                    elif reason == "repetida":
                         # Sin penalización. Cascade reject grupo.
                         _cascade_reject(job_id)
                         _br_rj.record_feedback(job_id, "curador", "reject_repetida",
