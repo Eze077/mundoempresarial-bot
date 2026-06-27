@@ -6465,6 +6465,35 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # h_tip_skip:{tip_id}    → Leo ignora el tip
     # h_tip_fix:{job_id}     → desde alerta score bajo, registra tarea
     # h_tip_qaok:{job_id}    → descarta alerta QA
+    # ── Impacto (Fase 11): guardar/descartar aprendizajes propuestos al playbook ──
+    if query.data.startswith("h_imp_save:") or query.data.startswith("h_imp_skip:"):
+        import sys as _sysimp
+        _sysimp.path.insert(0, "/opt/me-harness"); _sysimp.path.insert(0, "/opt/me-harness/agents")
+        try:
+            from telegram import InlineKeyboardMarkup
+            pi = query.data.split(":")
+            acti = pi[0]; aidi = int(pi[1]); idxi = int(pi[2]) if len(pi) >= 3 else 0
+            if acti == "h_imp_save":
+                import impacto as _imp
+                lec = _imp.aplicar_aprendizaje(aidi, idxi)
+                footer = (f"\n\n✅ <b>Guardado #{idxi+1}</b> al playbook — la próxima campaña lo aplica."
+                          if lec else f"\n\n⚠️ No se pudo guardar #{idxi+1}.")
+            else:
+                footer = f"\n\n❌ Descartado #{idxi+1}."
+            kb = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+            nueva = [r for r in kb if not (r and (r[0].callback_data or "").endswith(f":{aidi}:{idxi}"))]
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(
+                base + footer, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(nueva) if nueva else None,
+                disable_web_page_preview=True)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(None)
+            except Exception:
+                pass
+        return
+
     if (query.data.startswith("h_tip_accept:") or
             query.data.startswith("h_tip_skip:") or
             query.data.startswith("h_tip_fix:") or
