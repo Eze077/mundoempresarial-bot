@@ -6523,6 +6523,36 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── Eventos: armar la campaña de un evento propuesto (mínima/media/máxima) ──
+    if query.data.startswith("h_evt_build:") or query.data.startswith("h_evt_no:"):
+        import sys as _sysev
+        _sysev.path.insert(0, "/opt/me-harness"); _sysev.path.insert(0, "/opt/me-harness/agents")
+        try:
+            pv = query.data.split(":")
+            if pv[0] == "h_evt_build":
+                evid = pv[1]; esf = pv[2] if len(pv) >= 3 else "media"
+                await query.edit_message_text(f"⏳ Armando campaña <b>{evid}</b> ({esf})…", parse_mode="HTML")
+                import eventos as _ev
+                r = _ev.build_campaign(evid, esf)
+                if r.get("ok"):
+                    nl = r.get("newsletter", {})
+                    pend = (" · Pendiente: " + ", ".join(r.get("pendientes"))) if r.get("pendientes") else ""
+                    await query.edit_message_text(
+                        f"✅ <b>Campaña {evid} ({esf})</b> armada — newsletter DRAFT #{nl.get('campaign_id')}.\n"
+                        f"Revisalo, curá las notas y aprobá el envío.{pend}",
+                        parse_mode="HTML", disable_web_page_preview=True)
+                else:
+                    await query.edit_message_text(
+                        f"❌ No se pudo armar: {r.get('error') or r.get('newsletter')}", parse_mode="HTML")
+            else:
+                await query.edit_message_text("❌ Campaña descartada esta vez.", parse_mode="HTML")
+        except Exception as e:
+            try:
+                await query.edit_message_text(f"❌ Error armando la campaña: {str(e)[:150]}", parse_mode="HTML")
+            except Exception:
+                pass
+        return
+
     if (query.data.startswith("h_tip_accept:") or
             query.data.startswith("h_tip_skip:") or
             query.data.startswith("h_tip_fix:") or
