@@ -6494,6 +6494,35 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── EDITOR (gran articulador): aplicar/descartar correcciones del esquema ──
+    if query.data.startswith("h_edit_apply:") or query.data.startswith("h_edit_skip:"):
+        import sys as _sysed
+        _sysed.path.insert(0, "/opt/me-harness"); _sysed.path.insert(0, "/opt/me-harness/agents")
+        try:
+            from telegram import InlineKeyboardMarkup
+            pe = query.data.split(":")
+            acte = pe[0]; eide = int(pe[1]); idxe = int(pe[2]) if len(pe) >= 3 else 0
+            if acte == "h_edit_apply":
+                import editor as _ed
+                res = _ed.aplicar_correccion(eide, idxe)
+                footer = (f"\n\n✅ <b>Aplicada #{idxe+1}</b> — {res}" if res
+                          else f"\n\n⚠️ No se pudo aplicar #{idxe+1}.")
+            else:
+                footer = f"\n\n❌ Descartada #{idxe+1}."
+            kb = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+            nueva = [r for r in kb if not (r and (r[0].callback_data or "").endswith(f":{eide}:{idxe}"))]
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(
+                base + footer, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(nueva) if nueva else None,
+                disable_web_page_preview=True)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(None)
+            except Exception:
+                pass
+        return
+
     if (query.data.startswith("h_tip_accept:") or
             query.data.startswith("h_tip_skip:") or
             query.data.startswith("h_tip_fix:") or
