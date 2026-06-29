@@ -8589,33 +8589,41 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-            elif action == "h_cur_auto_renew" and arg:
-                # proponer: descarta las que sigan en 'curado' (sin aprobar) y propone esa
-                # misma cantidad para completar el trío. h_cur_auto_renew:{ids}
-                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
-                pending = []
-                for jid in jids:
+            elif action == "h_cur_auto_renew" and arg is not None:
+                # proponer: conserva las MARCADAS (☑) y reemplaza las sin marcar.
+                # h_cur_auto_renew:{mask}:{ids}
+                mask = arg
+                ids  = parts[2] if len(parts) >= 3 else ""
+                jids = [x for x in ids.split("-") if x.strip().isdigit()]
+                keep = [int(jid) for i, jid in enumerate(jids)
+                        if i < len(mask) and mask[i] == "1"]
+                drop = [int(jid) for i, jid in enumerate(jids)
+                        if not (i < len(mask) and mask[i] == "1")]
+                needed = max(0, 3 - len(keep))
+                if needed == 0:
                     try:
-                        jb = _br.get_job(jid)
-                        if jb and jb.get("stage") == "curado":
-                            pending.append(jid)
+                        await query.edit_message_text("Ya marcaste las 3 — tocá «Aprobar marcadas».")
                     except Exception:
                         pass
-                for jid in pending:
+                else:
+                    for jid in drop:
+                        try:
+                            jb = _br.get_job(jid)
+                            if jb and jb.get("stage") == "curado":
+                                _br.update_stage(jid, "rejected")
+                        except Exception:
+                            pass
                     try:
-                        _br.update_stage(jid, "rejected")
+                        await query.edit_message_text(
+                            f"🔄 Conservo {len(keep)}, busco {needed} para completar el trío…")
                     except Exception:
                         pass
-                needed = len(pending) or 3
-                try:
-                    await query.edit_message_text(f"🔄 Busco {needed} nota(s) para completar el trío…")
-                except Exception:
-                    pass
-                try:
-                    import threading as _thr
-                    _thr.Thread(target=lambda: _cur.run_briefing_auto(needed), daemon=True).start()
-                except Exception:
-                    pass
+                    try:
+                        import threading as _thr
+                        _keep = keep or None
+                        _thr.Thread(target=lambda: _cur.run_briefing_auto(3, _keep), daemon=True).start()
+                    except Exception:
+                        pass
 
             elif action == "h_cur_auto_cancel":
                 try:
