@@ -5239,6 +5239,57 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
         return
 
+    # ── Boletín semanal a Lectores: conversación (pregunta → opciones → slugs) ──
+    if context.user_data.get("awaiting_bol_pregunta"):
+        context.user_data.pop("awaiting_bol_pregunta")
+        context.user_data["bol_pregunta"] = text_in
+        context.user_data["awaiting_bol_opciones"] = True
+        await update.message.reply_text(
+            "📊 Ahora las OPCIONES de la encuesta, una por línea (2 a 4).\n\n"
+            "Ej:\nLa designación del jefe de Gabinete\nLa subida del dólar\nLos vencimientos de ARCA")
+        return
+    if context.user_data.get("awaiting_bol_opciones"):
+        context.user_data.pop("awaiting_bol_opciones")
+        ops = [l.strip(" -•\t") for l in text_in.split("\n") if l.strip(" -•\t")]
+        if len(ops) < 2:
+            context.user_data["awaiting_bol_opciones"] = True
+            await update.message.reply_text("Necesito al menos 2 opciones (una por línea). Reenviá:")
+            return
+        context.user_data["bol_opciones"] = ops
+        context.user_data["awaiting_bol_slugs"] = True
+        await update.message.reply_text(
+            f"✅ {len(ops)} opciones cargadas.\n📰 Ahora pasame los SLUGS o URLs de las notas, "
+            "en orden, separados por coma.")
+        return
+    if context.user_data.get("awaiting_bol_slugs"):
+        context.user_data.pop("awaiting_bol_slugs")
+        slugs = text_in
+        preg = context.user_data.pop("bol_pregunta", "")
+        ops  = context.user_data.pop("bol_opciones", None)
+        await update.message.reply_text("⏳ Armando el boletín a Lectores…")
+        import sys as _sb
+        _sb.path.insert(0, "/opt/me-harness"); _sb.path.insert(0, "/opt/me-harness/agents")
+        try:
+            import eventos as _ev
+            res = await asyncio.to_thread(_ev.build_boletin, slugs, preg, ops)
+            if not res.get("ok"):
+                await update.message.reply_text(
+                    f"❌ No se pudo armar: {res.get('mensaje') or res.get('issues') or res.get('status')}")
+                return
+            cid = res["campaign_id"]
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Enviar a Lectores", callback_data=f"h_bol_send:{cid}"),
+                InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{cid}")]])
+            await update.message.reply_text(
+                f"📋 <b>Boletín listo — DRAFT #{cid}</b> → <b>Lectores</b>\n"
+                f"Asunto: {res.get('subject','')}\n"
+                f"Encuesta: {len(ops or [])} opciones · Notas: {slugs.count(',') + 1}\n\n"
+                f"Previsualizá: {res.get('preview')}\n\n¿Lo envío a Lectores?",
+                parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error armando el boletín: {str(e)[:160]}")
+        return
+
     # ── /notamanual: columna de autor pegada como texto ────────────────────────
     if context.user_data.get("awaiting_nota_manual"):
         context.user_data.pop("awaiting_nota_manual")
@@ -6551,6 +6602,44 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Error armando la campaña: {str(e)[:150]}", parse_mode="HTML")
             except Exception:
                 pass
+        return
+
+    # ── Boletín semanal: arrancar la conversación (pregunta → opciones → slugs) ──
+    if query.data == "h_bol_start":
+        context.user_data["awaiting_bol_pregunta"] = True
+        await query.edit_message_text(
+            "🗳️ <b>Boletín semanal — Lectores</b>\n\nPasame la <b>PREGUNTA</b> de la encuesta.\n"
+            "Ej: ¿Qué va a influir más esta semana en tu empresa o negocio?", parse_mode="HTML")
+        return
+
+    # ── Boletín: autorizar (enviar a Lectores) o cancelar ───────────────────────
+    if query.data.startswith("h_bol_send:") or query.data.startswith("h_bol_cancel:"):
+        import sys as _sbs
+        _sbs.path.insert(0, "/opt/me-harness"); _sbs.path.insert(0, "/opt/me-harness/agents")
+        pv = query.data.split(":"); cid = pv[1]
+        if pv[0] == "h_bol_cancel":
+            await query.edit_message_text(f"❌ Boletín #{cid} cancelado (queda como draft en FluentCRM).",
+                                          parse_mode="HTML")
+            return
+        try:
+            await query.edit_message_text(f"⏳ Enviando el boletín #{cid} a Lectores…", parse_mode="HTML")
+            import newsletter as _nl
+            from datetime import datetime, timezone, timedelta
+            now_ar = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+            lr = _nl._req("GET", "/wp-json/fluent-crm/v2/subscribers?tags[]=8&per_page=1")
+            n = (lr.json().get("subscribers", {}) or {}).get("total", 0) if lr.ok else 0
+            r = await asyncio.to_thread(_nl.schedule_send, cid, now_ar, n)
+            if r.get("ok"):
+                warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
+                await query.edit_message_text(
+                    f"✅ <b>Boletín #{cid} enviado a Lectores</b> ({n}).\n"
+                    f"A las +24h te paso el feedback del funnel, nutro las bases y saco mejoras.{warn}",
+                    parse_mode="HTML")
+            else:
+                _w = (" ⚠️ " + r["warn"]) if r.get("warn") else ""
+                await query.edit_message_text(f"❌ No se pudo enviar: {r.get('error')}{_w}", parse_mode="HTML")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error enviando: {str(e)[:160]}", parse_mode="HTML")
         return
 
     if (query.data.startswith("h_tip_accept:") or
