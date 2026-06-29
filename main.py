@@ -5271,6 +5271,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🎯 ¿A qué público de la base lo mando?", reply_markup=kb)
         return
+    if context.user_data.get("awaiting_bol_hora"):
+        import re as _reh
+        info = context.user_data.get("awaiting_bol_hora")
+        m = _reh.match(r'^(\d{1,2}):(\d{2})$', text_in.strip())
+        if not m:
+            await update.message.reply_text("Hora inválida. Escribila como HH:MM (ej: 14:00):")
+            return
+        context.user_data.pop("awaiting_bol_hora")
+        hh, mm = int(m.group(1)), int(m.group(2))
+        await update.message.reply_text(f"⏳ Programando #{info['cid']} ({hh:02d}:{mm:02d})…")
+        ok, txt = await asyncio.to_thread(_boletin_programar, info["cid"], info["publico"], hh, mm)
+        await update.message.reply_text(txt, parse_mode="HTML", disable_web_page_preview=True)
+        return
 
     # ── /notamanual: columna de autor pegada como texto ────────────────────────
     if context.user_data.get("awaiting_nota_manual"):
@@ -6374,6 +6387,25 @@ async def _do_schedule(query, context, data, target):
         )
 
 
+def _boletin_programar(cid, publico, hh, mm):
+    """Programa el envío del boletín #cid HOY a las hh:mm (AR) al público dado. (ok, texto)."""
+    import sys as _s
+    _s.path.insert(0, "/opt/me-harness"); _s.path.insert(0, "/opt/me-harness/agents")
+    try:
+        import newsletter as _nl
+        from datetime import datetime, timezone, timedelta
+        now_ar = datetime.now(timezone.utc) - timedelta(hours=3)
+        sched = now_ar.replace(hour=hh, minute=mm, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        r = _nl.schedule_send(cid, sched)
+        if r.get("ok"):
+            warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
+            return True, (f"✅ <b>Boletín #{cid} programado</b> → {publico} ({r.get('recipients')} dest.)\n"
+                          f"🕐 Sale: {sched} (AR).\nA +24h: feedback del funnel + nutrir bases + mejoras.{warn}")
+        return False, f"❌ No se pudo programar #{cid}: {r.get('error')}"
+    except Exception as e:
+        return False, f"❌ Error programando #{cid}: {str(e)[:160]}"
+
+
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
@@ -6615,49 +6647,41 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML")
                 return
             cid = res["campaign_id"]
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"✅ Enviar a {publico}", callback_data=f"h_bol_send:{cid}:{publico}"),
-                InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{cid}")]])
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📅 Programar 10:30", callback_data=f"h_bol_sched:{cid}:{publico}:1030")],
+                [InlineKeyboardButton("🕐 Ajustar hora", callback_data=f"h_bol_horaask:{cid}:{publico}")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{cid}")]])
             await query.edit_message_text(
                 f"📋 <b>Boletín listo — DRAFT #{cid}</b> → <b>{publico}</b>\n"
                 f"Asunto: {res.get('subject','')}\n"
                 f"Encuesta: {len(ops or [])} opciones · Notas: {slugs.count(',') + 1} · Intro GPT ✅\n\n"
-                f"Previsualizá: {res.get('preview')}\n\n¿Lo envío a {publico}?",
+                f"Previsualizá: {res.get('preview')}\n\n¿Cuándo lo mando? (default 10:30)",
                 parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
         except Exception as e:
             await query.edit_message_text(f"❌ Error armando el boletín: {str(e)[:160]}", parse_mode="HTML")
         return
 
-    # ── Boletín: autorizar (enviar al público) o cancelar ───────────────────────
-    if query.data.startswith("h_bol_send:") or query.data.startswith("h_bol_cancel:"):
-        import sys as _sbs
-        _sbs.path.insert(0, "/opt/me-harness"); _sbs.path.insert(0, "/opt/me-harness/agents")
+    # ── Boletín: ajustar hora (pedir HH:MM) ─────────────────────────────────────
+    if query.data.startswith("h_bol_horaask:"):
+        pv = query.data.split(":")
+        context.user_data["awaiting_bol_hora"] = {"cid": pv[1], "publico": pv[2] if len(pv) >= 3 else "lectores"}
+        await query.edit_message_text("🕐 Escribí la hora de envío (hoy), formato HH:MM. Ej: 14:00",
+                                      parse_mode="HTML")
+        return
+
+    # ── Boletín: programar el envío (hora fija 10:30 o ajustada) o cancelar ──────
+    if query.data.startswith("h_bol_sched:") or query.data.startswith("h_bol_cancel:"):
         pv = query.data.split(":"); cid = pv[1]
-        publico = pv[2] if len(pv) >= 3 else "lectores"
         if pv[0] == "h_bol_cancel":
             await query.edit_message_text(f"❌ Boletín #{cid} cancelado (queda como draft en FluentCRM).",
                                           parse_mode="HTML")
             return
-        try:
-            await query.edit_message_text(f"⏳ Enviando el boletín #{cid} a {publico}…", parse_mode="HTML")
-            import newsletter as _nl
-            from datetime import datetime, timezone, timedelta
-            now_ar = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
-            _q = {"lectores": "tags[]=8&", "activos": "tags[]=9&", "base": ""}.get(publico, "")
-            lr = _nl._req("GET", f"/wp-json/fluent-crm/v2/subscribers?{_q}per_page=1")
-            n = (lr.json().get("subscribers", {}) or {}).get("total", 0) if lr.ok else 0
-            r = await asyncio.to_thread(_nl.schedule_send, cid, now_ar, n)
-            if r.get("ok"):
-                warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
-                await query.edit_message_text(
-                    f"✅ <b>Boletín #{cid} enviado a {publico}</b> ({n}).\n"
-                    f"A las +24h te paso el feedback del funnel, nutro las bases y saco mejoras.{warn}",
-                    parse_mode="HTML")
-            else:
-                _w = (" ⚠️ " + r["warn"]) if r.get("warn") else ""
-                await query.edit_message_text(f"❌ No se pudo enviar: {r.get('error')}{_w}", parse_mode="HTML")
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error enviando: {str(e)[:160]}", parse_mode="HTML")
+        publico = pv[2] if len(pv) >= 3 else "lectores"
+        hhmm = pv[3] if len(pv) >= 4 else "1030"
+        hh, mm = int(hhmm[:2]), int(hhmm[2:])
+        await query.edit_message_text(f"⏳ Programando #{cid} ({hh:02d}:{mm:02d})…", parse_mode="HTML")
+        ok, txt = await asyncio.to_thread(_boletin_programar, cid, publico, hh, mm)
+        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     if (query.data.startswith("h_tip_accept:") or
