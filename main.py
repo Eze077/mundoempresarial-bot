@@ -8575,7 +8575,30 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                 try:
-                    await query.edit_message_text("❌ Briefing AUTO descartado.")
+                    await query.edit_message_text("❌ Descarté esas notas.")
+                except Exception:
+                    pass
+
+            elif action == "h_curauto_renew" and arg:
+                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
+                for jid in jids:
+                    try:
+                        _cur.broker.update_stage(jid, "rejected")
+                    except Exception:
+                        pass
+                try:
+                    await query.edit_message_text("🔄 Descarté esas 3, te busco otras…")
+                except Exception:
+                    pass
+                try:
+                    import threading as _thr
+                    _thr.Thread(target=_cur.run_briefing_auto, daemon=True).start()
+                except Exception:
+                    pass
+
+            elif action == "h_curauto_cancel":
+                try:
+                    await query.edit_message_text("✖️ Cancelado. Las dejo en la cola.")
                 except Exception:
                     pass
 
