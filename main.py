@@ -8544,6 +8544,41 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML"
                     )
 
+            # ── Briefing AUTO (Fase 3): aprobar / descartar las 3 de un toque ──
+            elif action == "h_curauto_ok" and arg:
+                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
+                done = 0
+                for jid in jids:
+                    try:
+                        if _cur.approve(jid):
+                            done += 1
+                    except Exception:
+                        pass
+                try:
+                    from agents import cola as _cola_a
+                    import threading as _thr
+                    _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                except Exception:
+                    pass
+                try:
+                    await query.edit_message_text(
+                        f"✅ <b>{done} notas aprobadas</b> → cola de redacción. Salen hoy.",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+
+            elif action == "h_curauto_no" and arg:
+                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
+                for jid in jids:
+                    try:
+                        _cur.broker.update_stage(jid, "rejected")
+                    except Exception:
+                        pass
+                try:
+                    await query.edit_message_text("❌ Briefing AUTO descartado.")
+                except Exception:
+                    pass
+
             # ── Programar: override del destino desde el briefing ─────────
             elif action == "h_cur_program" and arg:
                 job_id = int(arg)
