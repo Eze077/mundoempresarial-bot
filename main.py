@@ -6596,6 +6596,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Boletín: elegido el público → armar el draft (GPT redacta la intro) ─────
     if query.data.startswith("h_bol_pub:"):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         publico = query.data.split(":")[1]
         slugs = context.user_data.pop("bol_slugs", "")
         preg  = context.user_data.pop("bol_pregunta", "")
