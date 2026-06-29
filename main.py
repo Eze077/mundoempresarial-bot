@@ -8544,84 +8544,66 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML"
                     )
 
-            # ── Briefing AUTO (Fase 3): aprobar / descartar las 3 de un toque ──
-            elif action == "h_curauto_ok" and arg:
-                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
+            # ── Briefing AUTO (Fase 3): box de checklist ──────────────────────
+            elif action == "h_cur_auto_tog" and arg is not None:
+                # toggle de una casilla: h_cur_auto_tog:{i}:{mask}:{ids}
+                try:
+                    i    = int(arg)
+                    mask = parts[2]
+                    ids  = parts[3]
+                    ml = list(mask)
+                    ml[i] = "0" if ml[i] == "1" else "1"
+                    newmask = "".join(ml)
+                    n = len(ids.split("-"))
+                    await query.edit_message_reply_markup(
+                        reply_markup=_cur._checklist_kb(ids, newmask, n))
+                except Exception:
+                    pass
+
+            elif action == "h_cur_auto_okm" and arg is not None:
+                # aprobar marcadas: h_cur_auto_okm:{mask}:{ids}
+                mask = arg
+                ids  = parts[2] if len(parts) >= 3 else ""
+                jids = [x for x in ids.split("-") if x.strip().isdigit()]
                 done = 0
-                for jid in jids:
-                    try:
-                        if _cur.approve(jid):
-                            done += 1
-                    except Exception:
-                        pass
-                try:
-                    from agents import cola as _cola_a
-                    import threading as _thr
-                    _thr.Thread(target=_cola_a.run_once, daemon=True).start()
-                except Exception:
-                    pass
-                try:
-                    await query.edit_message_text(
-                        f"✅ <b>{done} notas aprobadas</b> → cola de redacción. Salen hoy.",
-                        parse_mode="HTML")
-                except Exception:
-                    pass
-
-            elif action == "h_curauto_no" and arg:
-                jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
-                for jid in jids:
-                    try:
-                        _cur.broker.update_stage(jid, "rejected")
-                    except Exception:
-                        pass
-                try:
-                    await query.edit_message_text("❌ Descarté esas notas.")
-                except Exception:
-                    pass
-
-            elif action == "h_curauto_one" and arg:
-                jid = int(arg)
-                jb = None
-                try:
-                    jb = _cur.broker.get_job(jid)
-                except Exception:
-                    pass
-                if jb and jb.get("stage") == "curado":
-                    try:
-                        _cur.approve(jid)
-                    except Exception:
-                        pass
+                for idx_j, jid in enumerate(jids):
+                    if idx_j < len(mask) and mask[idx_j] == "1":
+                        try:
+                            jb = _br.get_job(int(jid))
+                            if jb and jb.get("stage") == "curado" and _cur.approve(int(jid)):
+                                done += 1
+                        except Exception:
+                            pass
+                if done:
                     try:
                         from agents import cola as _cola_a
                         import threading as _thr
                         _thr.Thread(target=_cola_a.run_once, daemon=True).start()
                     except Exception:
                         pass
-                    try:
-                        await query.message.reply_text(f"✅ Nota #{jid} → cola de redacción.")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await query.message.reply_text(f"⚠️ La nota #{jid} ya no está disponible.")
-                    except Exception:
-                        pass
+                try:
+                    await query.edit_message_text(
+                        (f"✅ <b>{done} nota(s) aprobadas</b> → cola de redacción."
+                         if done else "No marcaste ninguna nota. Tocá ☐ para marcar y reintentá."),
+                        parse_mode="HTML")
+                except Exception:
+                    pass
 
-            elif action == "h_curauto_renew" and arg:
+            elif action == "h_cur_auto_renew" and arg:
+                # proponer: descarta las que sigan en 'curado' (sin aprobar) y propone esa
+                # misma cantidad para completar el trío. h_cur_auto_renew:{ids}
                 jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
-                # Las que sigan en 'curado' (Leo no aprobó) se descartan y se reemplazan;
-                # se propone esa misma cantidad para completar el trío.
                 pending = []
                 for jid in jids:
                     try:
-                        jb = _cur.broker.get_job(jid)
+                        jb = _br.get_job(jid)
                         if jb and jb.get("stage") == "curado":
                             pending.append(jid)
                     except Exception:
                         pass
                 for jid in pending:
                     try:
-                        _cur.broker.update_stage(jid, "rejected")
+                        _br.update_stage(jid, "rejected")
                     except Exception:
                         pass
                 needed = len(pending) or 3
@@ -8635,7 +8617,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-            elif action == "h_curauto_cancel":
+            elif action == "h_cur_auto_cancel":
                 try:
                     await query.edit_message_text("✖️ Cancelado. Las dejo en la cola.")
                 except Exception:
