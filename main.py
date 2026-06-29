@@ -8579,20 +8579,59 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+            elif action == "h_curauto_one" and arg:
+                jid = int(arg)
+                jb = None
+                try:
+                    jb = _cur.broker.get_job(jid)
+                except Exception:
+                    pass
+                if jb and jb.get("stage") == "curado":
+                    try:
+                        _cur.approve(jid)
+                    except Exception:
+                        pass
+                    try:
+                        from agents import cola as _cola_a
+                        import threading as _thr
+                        _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                    except Exception:
+                        pass
+                    try:
+                        await query.message.reply_text(f"✅ Nota #{jid} → cola de redacción.")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await query.message.reply_text(f"⚠️ La nota #{jid} ya no está disponible.")
+                    except Exception:
+                        pass
+
             elif action == "h_curauto_renew" and arg:
                 jids = [int(x) for x in arg.split("-") if x.strip().isdigit()]
+                # Las que sigan en 'curado' (Leo no aprobó) se descartan y se reemplazan;
+                # se propone esa misma cantidad para completar el trío.
+                pending = []
                 for jid in jids:
+                    try:
+                        jb = _cur.broker.get_job(jid)
+                        if jb and jb.get("stage") == "curado":
+                            pending.append(jid)
+                    except Exception:
+                        pass
+                for jid in pending:
                     try:
                         _cur.broker.update_stage(jid, "rejected")
                     except Exception:
                         pass
+                needed = len(pending) or 3
                 try:
-                    await query.edit_message_text("🔄 Descarté esas 3, te busco otras…")
+                    await query.edit_message_text(f"🔄 Busco {needed} nota(s) para completar el trío…")
                 except Exception:
                     pass
                 try:
                     import threading as _thr
-                    _thr.Thread(target=_cur.run_briefing_auto, daemon=True).start()
+                    _thr.Thread(target=lambda: _cur.run_briefing_auto(needed), daemon=True).start()
                 except Exception:
                     pass
 
