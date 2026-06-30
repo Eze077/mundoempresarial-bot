@@ -6588,6 +6588,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── Reco capa×vertical (Fase C): aprobar → directiva §13 segmentada / descartar ──
+    if query.data.startswith("h_reco_ok:") or query.data.startswith("h_reco_no:"):
+        import sys as _sysrc
+        _sysrc.path.insert(0, "/opt/me-harness"); _sysrc.path.insert(0, "/opt/me-harness/agents")
+        try:
+            prc = query.data.split(":")
+            actrc = prc[0]; rid = int(prc[1])
+            if actrc == "h_reco_ok":
+                import direccion as _dir
+                rc = _dir.aprobar_reco_cv(rid)
+                footer = (f"\n\n✅ <b>Aplicada a la directiva §13</b> (Capa {rc['hilo']} × {rc['vertical']})"
+                          if rc else "\n\n⚠️ No se pudo aplicar.")
+            else:
+                import broker as _bkrc
+                _bkrc.set_reco_cv_status(rid, "skipped")
+                footer = "\n\n❌ Descartada."
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          disable_web_page_preview=True)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(None)
+            except Exception:
+                pass
+        return
+
     # ── Eventos: armar la campaña de un evento propuesto (mínima/media/máxima) ──
     if query.data.startswith("h_evt_build:") or query.data.startswith("h_evt_no:"):
         import sys as _sysev
