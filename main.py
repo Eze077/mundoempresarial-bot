@@ -6588,8 +6588,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    # ── Reco capa×vertical (Fase C): aprobar → directiva §13 segmentada / descartar ──
-    if query.data.startswith("h_reco_ok:") or query.data.startswith("h_reco_no:"):
+    # ── Reco capa×vertical (Fase C): aplicar a directiva / rehacer nota ejemplo / descartar ──
+    if (query.data.startswith("h_reco_ok:") or query.data.startswith("h_reco_no:")
+            or query.data.startswith("h_reco_fix:")):
         import sys as _sysrc
         _sysrc.path.insert(0, "/opt/me-harness"); _sysrc.path.insert(0, "/opt/me-harness/agents")
         try:
@@ -6600,6 +6601,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rc = _dir.aprobar_reco_cv(rid)
                 footer = (f"\n\n✅ <b>Aplicada a la directiva §13</b> (Capa {rc['hilo']} × {rc['vertical']})"
                           if rc else "\n\n⚠️ No se pudo aplicar.")
+            elif actrc == "h_reco_fix":
+                import direccion as _dir
+                res = _dir.rehacer_nota_ejemplo(rid)
+                footer = (f"\n\n🔧 <b>Rehaciendo la nota ejemplo</b> (job #{res['job_id']}) — se regenera "
+                          "con la mejora, sin inventar, y se actualiza el post vivo. Te aviso cuando salga."
+                          if res else "\n\n⚠️ No se pudo rehacer (sin nota ejemplo).")
             else:
                 import broker as _bkrc
                 _bkrc.set_reco_cv_status(rid, "skipped")
