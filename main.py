@@ -14717,6 +14717,7 @@ async def cmd_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Mandame <b>audios/voz, fotos, texto o links</b> del evento (de a uno o varios).\n"
         "• Los audios los transcribo solo (poné el nombre del orador en el epígrafe del audio).\n"
         "• Las fotos van a la portada.\n"
+        "• Los links de <b>YouTube</b> los transcribo (no subas el video, mandá el link).\n"
         "• Los links de otros medios se suman como fuentes.\n\n"
         "Cuando termines, tocá <b>✅ Procesar</b> y elegís una nota síntesis o varias.",
         parse_mode="HTML", reply_markup=_evento_kb())
@@ -14729,7 +14730,31 @@ async def _evento_add_text(update, context, text_in: str):
     urls = re.findall(r'https?://\S+', text_in or "")
     if urls:
         for u in urls:
-            if u not in ev["links"]:
+            kind = detect_url_kind(u)
+            if kind in ("youtube", "instagram"):
+                # Igual que hoy: NO se sube el video, se transcribe el link.
+                status = await update.message.reply_text(f"🔍 Transcribiendo {kind}…")
+                try:
+                    import sys as _s_ev
+                    _s_ev.path.insert(0, "/opt/me-harness")
+                    from agents.social import analyze as _soc_analyze
+                    data = await asyncio.to_thread(_soc_analyze, u)
+                    txt = (data.get("text") or "").strip()
+                    if txt:
+                        label = data.get("title") or f"{kind.capitalize()} {len(ev['transcripts']) + 1}"
+                        ev["transcripts"].append({"orador": label, "texto": txt})
+                        if data.get("image_url"):
+                            ev.setdefault("image_urls", []).append(data["image_url"])
+                        await status.edit_text(f"✅ «{label}» transcripto ({len(txt.split())} palabras).")
+                    else:
+                        if u not in ev["links"]:
+                            ev["links"].append(u)
+                        await status.edit_text("⚠️ No saqué transcripción; lo dejo como fuente/link.")
+                except Exception as e:
+                    if u not in ev["links"]:
+                        ev["links"].append(u)
+                    await status.edit_text(f"⚠️ No pude transcribir ({e}); lo dejo como link.")
+            elif u not in ev["links"]:
                 ev["links"].append(u)
     else:
         ev["notas"].append(text_in)
@@ -14785,6 +14810,8 @@ def _enqueue_evento(ev: dict, modo: str) -> list:
     fotos = ev.get("fotos") or []
     img_override = fotos[0] if fotos else None
     extra_imgs = fotos[1:] if len(fotos) > 1 else []
+    # Si no hay foto propia, usar el thumbnail del video (YouTube/IG) como portada
+    img_url_fallback = (ev.get("image_urls") or [None])[0] if not img_override else None
     links = (ev.get("links") or [])[:2]
     notas = ev.get("notas") or []
     transcripts = ev.get("transcripts") or []
@@ -14806,7 +14833,8 @@ def _enqueue_evento(ev: dict, modo: str) -> list:
         cj = {
             "title": title, "excerpt": "", "source_name": nombre,
             "text": text, "multi_source_urls": links,
-            "image_id_override": img_override, "images": extra_imgs,
+            "image_id_override": img_override, "image_url": img_url_fallback,
+            "images": extra_imgs,
             "matched_kw": [], "fuente_propia_evento": True,
         }
         with _sq.connect("/opt/me-harness/harness.db") as conn:
