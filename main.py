@@ -5209,6 +5209,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text_in = update.message.text.strip()
 
+    # ── /evento: capturar instrucción / texto / link de una cobertura activa ────
+    if context.user_data.get("awaiting_evento_instr"):
+        context.user_data.pop("awaiting_evento_instr", None)
+        _ev = context.user_data.get("evento")
+        if _ev is not None:
+            _ev["instr"] = text_in
+            await update.message.reply_text(
+                "📝 Instrucción guardada para el evento.",
+                parse_mode="HTML", reply_markup=_evento_kb())
+        return
+    if context.user_data.get("evento") is not None:
+        await _evento_add_text(update, context, text_in)
+        return
+
     # Guardar chat_id del operador para reportes
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
@@ -11471,6 +11485,28 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja foto enviada por Telegram durante edición o flujo sin_imagen."""
 
+    # ── /evento: foto del evento (va a la portada) ───────────────────────────
+    _ev = context.user_data.get("evento")
+    if _ev is not None:
+        msg = await update.message.reply_text("⏳ Subiendo la foto del evento a WordPress…")
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file(read_timeout=30, connect_timeout=15)
+            import requests as _rq_ev
+            dl = await asyncio.to_thread(lambda: _rq_ev.get(file.file_path, timeout=30))
+            mid = await asyncio.to_thread(upload_image_bytes, dl.content, "jpg")
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude subir la foto: {e}")
+            return
+        if not mid:
+            await msg.edit_text("❌ No pude subir la foto a WP. Probá de nuevo.")
+            return
+        _ev["fotos"].append(mid)
+        await msg.edit_text(f"✅ Foto del evento cargada (#{mid}).")
+        await update.message.reply_text(
+            _evento_resumen(_ev), parse_mode="HTML", reply_markup=_evento_kb())
+        return
+
     # ── /notamanual: foto de portada para la columna pendiente ───────────────
     _nm = context.user_data.get("nota_manual")
     if _nm and not context.user_data.get("awaiting_img_url_for") and not context.user_data.get("waiting_for_edit_photo"):
@@ -14599,6 +14635,251 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
             parse_mode="HTML")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# /evento — cobertura propia de eventos (audios + texto + links + fotos → harness)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WHISPER_OK_EXT = {".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".wav", ".webm",
+                   ".ogg", ".oga", ".flac"}
+
+
+def _whisper_from_file(path: str) -> str:
+    """Transcribe un archivo de audio/voz local con Whisper API (español).
+    Convierte con ffmpeg a mp3 mono si el formato no es soportado o pesa demasiado."""
+    if not OPENAI_API_KEY:
+        return ""
+    import os as _os, shutil as _sh, subprocess as _sp, tempfile as _tmp
+    src = path
+    tmp_mp3 = None
+    try:
+        ext = _os.path.splitext(path)[1].lower()
+        size_mb = _os.path.getsize(path) / (1024 * 1024)
+        if ext not in _WHISPER_OK_EXT or size_mb > 24.5:
+            if not _sh.which("ffmpeg"):
+                logger.error("_whisper_from_file: ffmpeg no disponible para convertir")
+                return ""
+            fd, tmp_mp3 = _tmp.mkstemp(suffix=".mp3"); _os.close(fd)
+            _sp.run(["ffmpeg", "-y", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+                     "-b:a", "48k", tmp_mp3], check=True, capture_output=True)
+            src = tmp_mp3
+        if _os.path.getsize(src) / (1024 * 1024) > 24.5:
+            logger.error("_whisper_from_file: audio > 25 MB incluso comprimido")
+            return ""
+        with open(src, "rb") as f:
+            r = openai_post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                data={"model": "whisper-1", "language": "es", "response_format": "text"},
+                files={"file": (_os.path.basename(src), f, "audio/mpeg")},
+                timeout=300,
+            )
+        if r.status_code == 200:
+            return r.text.strip()
+        logger.error(f"_whisper_from_file API {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        logger.error(f"_whisper_from_file: {e}")
+    finally:
+        if tmp_mp3:
+            try: _os.remove(tmp_mp3)
+            except Exception: pass
+    return ""
+
+
+def _evento_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✅ Procesar", "callback_data": "ev_process"}],
+        [{"text": "📝 Instrucción", "callback_data": "ev_instr"},
+         {"text": "✖️ Cancelar", "callback_data": "ev_cancel"}]]}
+
+
+def _evento_resumen(ev: dict) -> str:
+    import html as _html
+    extra = f"\n📝 Instrucción: {_html.escape(ev['instr'][:120])}" if ev.get("instr") else ""
+    return (
+        f"🎪 <b>Evento:</b> {_html.escape(ev['nombre'])}\n"
+        f"🎙️ Audios: {len(ev['transcripts'])}  ·  "
+        f"📝 Notas: {len(ev['notas'])}  ·  "
+        f"🔗 Links: {len(ev['links'])}  ·  "
+        f"📷 Fotos: {len(ev['fotos'])}{extra}\n\n"
+        "Seguí mandando material. Cuando termines, tocá <b>✅ Procesar</b>.")
+
+
+async def cmd_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if BOT_PAUSED:
+        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+        return
+    nombre = " ".join(context.args).strip() if context.args else "Evento sin título"
+    context.user_data["evento"] = {
+        "nombre": nombre, "transcripts": [], "notas": [], "links": [], "fotos": [], "instr": ""}
+    context.user_data.pop("awaiting_evento_instr", None)
+    await update.message.reply_text(
+        f"🎪 <b>Cobertura de evento:</b> {nombre}\n\n"
+        "Mandame <b>audios/voz, fotos, texto o links</b> del evento (de a uno o varios).\n"
+        "• Los audios los transcribo solo (poné el nombre del orador en el epígrafe del audio).\n"
+        "• Las fotos van a la portada.\n"
+        "• Los links de otros medios se suman como fuentes.\n\n"
+        "Cuando termines, tocá <b>✅ Procesar</b> y elegís una nota síntesis o varias.",
+        parse_mode="HTML", reply_markup=_evento_kb())
+
+
+async def _evento_add_text(update, context, text_in: str):
+    ev = context.user_data.get("evento")
+    if ev is None:
+        return
+    urls = re.findall(r'https?://\S+', text_in or "")
+    if urls:
+        for u in urls:
+            if u not in ev["links"]:
+                ev["links"].append(u)
+    else:
+        ev["notas"].append(text_in)
+    await update.message.reply_text(
+        _evento_resumen(ev), parse_mode="HTML", reply_markup=_evento_kb())
+
+
+async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe audio/voz durante una cobertura de evento y lo transcribe."""
+    ev = context.user_data.get("evento")
+    if ev is None:
+        return
+    m = update.message
+    media = m.voice or m.audio
+    if not media:
+        return
+    status = await m.reply_text("🎙️ Bajando audio…")
+    import os as _os, tempfile as _tmp
+    path = None
+    try:
+        f = await media.get_file(read_timeout=90, connect_timeout=30)
+        base = getattr(media, "file_name", None) or f"{media.file_unique_id}.ogg"
+        ext = _os.path.splitext(base)[1].lower() or ".ogg"
+        path = _os.path.join(_tmp.gettempdir(), f"ev_{media.file_unique_id}{ext}")
+        await f.download_to_drive(path)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ No pude bajar el audio ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB.")
+        return
+    await status.edit_text("🧠 Transcribiendo… (puede tardar un rato)")
+    texto = await asyncio.to_thread(_whisper_from_file, path)
+    try:
+        if path: _os.remove(path)
+    except Exception:
+        pass
+    if not texto:
+        await status.edit_text("⚠️ No pude transcribir el audio. Probá reenviarlo.")
+        return
+    label = (m.caption or "").strip() or getattr(media, "file_name", None) \
+        or f"Audio {len(ev['transcripts']) + 1}"
+    ev["transcripts"].append({"orador": label, "texto": texto})
+    await status.edit_text(f"✅ «{label}» transcripto ({len(texto.split())} palabras).")
+    await m.reply_text(_evento_resumen(ev), parse_mode="HTML", reply_markup=_evento_kb())
+
+
+def _enqueue_evento(ev: dict, modo: str) -> list:
+    """Encola el/los job(s) del evento en stage='curado' (entra al briefing).
+    modo='one' → una nota síntesis; modo='multi' → una por audio/orador."""
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+    nombre = ev["nombre"]
+    slug = url_slug(nombre) or "evento"
+    fotos = ev.get("fotos") or []
+    img_override = fotos[0] if fotos else None
+    extra_imgs = fotos[1:] if len(fotos) > 1 else []
+    links = (ev.get("links") or [])[:2]
+    notas = ev.get("notas") or []
+    transcripts = ev.get("transcripts") or []
+
+    base_instr = (f"Cobertura propia del evento «{nombre}». No inventes datos: usá solo lo que está "
+                  "en el material provisto. Atribuí cada cita textual a su orador. Formato estándar ME.")
+    if ev.get("instr"):
+        base_instr += " " + ev["instr"]
+
+    def _mk_text(ns, ts):
+        parts = []
+        if ns:
+            parts.append("NOTAS DE CAMPO:\n" + "\n\n".join(ns))
+        for t in ts:
+            parts.append(f"=== {t['orador']} ===\n{t['texto']}")
+        return "\n\n".join(parts).strip()
+
+    def _insert(title, text, src_slug):
+        cj = {
+            "title": title, "excerpt": "", "source_name": nombre,
+            "text": text, "multi_source_urls": links,
+            "image_id_override": img_override, "images": extra_imgs,
+            "matched_kw": [], "fuente_propia_evento": True,
+        }
+        with _sq.connect("/opt/me-harness/harness.db") as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs (stage, source_url, title, content_json, score, hilo, instructions, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("curado", f"evento://{src_slug}", title,
+                 json.dumps(cj, ensure_ascii=False), 9.0, 3, base_instr, _dt.utcnow().isoformat()))
+            return cur.lastrowid
+
+    ids = []
+    if modo == "multi" and len(transcripts) >= 2:
+        for i, t in enumerate(transcripts):
+            title = f"{nombre}: {t['orador']}" if t.get("orador") else nombre
+            sslug = f"{slug}-{url_slug(t.get('orador') or '') or i}"
+            ids.append(_insert(title, _mk_text(notas if i == 0 else [], [t]), sslug))
+    else:
+        ids.append(_insert(nombre, _mk_text(notas, transcripts), slug))
+    return ids
+
+
+async def handle_evento_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    act = q.data[len("ev_"):]
+    ev = context.user_data.get("evento")
+    if act == "cancel":
+        context.user_data.pop("evento", None)
+        context.user_data.pop("awaiting_evento_instr", None)
+        await q.edit_message_text("✖️ Cobertura de evento cancelada.")
+        return
+    if not ev:
+        await q.edit_message_text("⚠️ No hay un evento activo. Reiniciá con /evento &lt;nombre&gt;.")
+        return
+    if act == "instr":
+        context.user_data["awaiting_evento_instr"] = True
+        await q.edit_message_text(
+            "📝 Mandame la instrucción editorial para este evento (tono, enfoque, qué destacar).")
+        return
+    if act == "process":
+        if not ev["transcripts"] and not ev["notas"]:
+            await q.edit_message_text(
+                "⚠️ No cargaste material todavía (audios o texto). Mandá algo y tocá ✅ Procesar de nuevo.")
+            return
+        n = len(ev["transcripts"])
+        rows = [[{"text": "📄 Una nota síntesis", "callback_data": "ev_one"}]]
+        if n >= 2:
+            rows.append([{"text": f"🧩 Varias ({n} — una por audio)", "callback_data": "ev_multi"}])
+        rows.append([{"text": "✖️ Cancelar", "callback_data": "ev_cancel"}])
+        await q.edit_message_text(
+            f"¿Cómo armo la cobertura de «{ev['nombre']}»?\n"
+            f"Material: {n} audio(s) · {len(ev['notas'])} nota(s) · "
+            f"{len(ev['links'])} link(s) · {len(ev['fotos'])} foto(s).",
+            reply_markup={"inline_keyboard": rows})
+        return
+    if act in ("one", "multi"):
+        try:
+            ids = await asyncio.to_thread(_enqueue_evento, ev, act)
+        except Exception as e:
+            await q.edit_message_text(f"❌ Error al encolar el evento: {e}")
+            return
+        context.user_data.pop("evento", None)
+        context.user_data.pop("awaiting_evento_instr", None)
+        if len(ids) == 1:
+            await q.edit_message_text(
+                f"✅ Nota del evento encolada (#{ids[0]}). Aparece en el próximo briefing para que la apruebes.")
+        else:
+            lst = ", #".join(str(i) for i in ids)
+            await q.edit_message_text(
+                f"✅ {len(ids)} notas del evento encoladas (#{lst}). Aparecen en el briefing.")
+        return
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -14632,11 +14913,13 @@ def main():
     app.add_handler(CommandHandler("editor", cmd_editor))
     app.add_handler(CommandHandler("pipeline", cmd_pipeline))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
+    app.add_handler(CommandHandler("evento", cmd_evento))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_evento_media))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
@@ -14645,6 +14928,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
+    app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
