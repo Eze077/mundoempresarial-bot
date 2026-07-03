@@ -3941,32 +3941,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 Las estadísticas del pipeline están en el harness (/coladepublicacion).")
 
 
-async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra las notas programadas pendientes."""
-    fb = await asyncio.to_thread(_load_feedback)
-    pending = fb.get("scheduled_jobs", [])
-
-    if not pending:
-        await update.message.reply_text("📭 No hay notas programadas pendientes.")
-        return
-
-    from datetime import datetime
-    pending = sorted(pending, key=lambda j: j.get("run_at", ""))
-
-    lines = [f"📅 *Cola de publicaciones programadas* ({len(pending)})", ""]
-    for j in pending:
-        try:
-            dt = datetime.fromisoformat(j["run_at"])
-            when = dt.strftime("%A %d/%m %H:%M")
-        except Exception:
-            when = j.get("run_at", "?")
-        title = j.get("data", {}).get("title", "(sin título)")[:70]
-        lines.append(f"• *{when}* — {md_escape(title)}")
-        lines.append(f"  {j.get('post_url', '')}")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
 def _check_credits_status() -> dict:
     """
     Health check sync de TODOS los servicios usados por el bot.
@@ -14238,7 +14212,6 @@ async def _post_init(application: Application) -> None:
         BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
         BotCommand("editar",            "Editar una nota ya publicada"),
-        BotCommand("borrar",            "Eliminar una nota publicada"),
         # ── Información ───────────────────────────────────────────────────────
         BotCommand("stats",             "Estadísticas del día (publicadas, errores)"),
         # ── Configuración ─────────────────────────────────────────────────────
@@ -14940,7 +14913,6 @@ def main():
     app.add_handler(CommandHandler("reglas", cmd_reglas))
     app.add_handler(CommandHandler("publinotas", cmd_publinotas))
     app.add_handler(CommandHandler("kwtemp", cmd_kwtemp))
-    app.add_handler(CommandHandler("cola", cmd_cola))
     app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
