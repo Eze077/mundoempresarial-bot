@@ -14233,6 +14233,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
         # ── Contenido ─────────────────────────────────────────────────────────
+        BotCommand("evento",            "Cobertura de evento propio — audios, fotos y texto → nota"),
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
         BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
