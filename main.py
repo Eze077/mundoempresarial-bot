@@ -8822,6 +8822,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 label = "Portada activada" if state["portada"] else "Portada desactivada"
                 await query.answer(label, show_alert=False)
 
+            elif action == "h_cur_formato" and arg:
+                job_id = int(arg)
+                state = _load_state(job_id)
+                _cf = state.get("formato") or ("desplegable" if state.get("hilo") == 1 else "continua")
+                state["formato"] = "continua" if _cf == "desplegable" else "desplegable"
+                _save_state(job_id, state)
+                await _update_card(job_id, state, query.message.chat_id)
+                await query.answer(f"Formato: {state['formato']}", show_alert=False)
+
             elif action == "h_cur_nopub" and arg:
                 job_id = int(arg)
                 reasons = [
