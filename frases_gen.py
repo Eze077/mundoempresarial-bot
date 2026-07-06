@@ -59,12 +59,24 @@ def generate_frase_image(frase: str) -> bytes:
     img  = Image.open(BASE_PATH).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # Frase entre comillas angulares, como el diseño
-    clean = frase.strip().strip('«»"“”')
+    # Separar la ATRIBUCIÓN (autor) de la cita: si el texto trae una comilla de cierre
+    # con algo corto después ('..." Leo Bilanski'), el autor va FUERA de las «» como
+    # "— Autor" (antes quedaba doble comilla y el autor adentro — feo).
+    raw = frase.strip()
+    autor = ""
+    for qch in ('"', '”', '»'):
+        pos = raw.rfind(qch)
+        if 0 < pos < len(raw) - 1:
+            resto = raw[pos + 1:].strip(" -—–")
+            if 0 < len(resto) <= 50 and not resto.endswith((".", "!", "?")):
+                autor = resto
+                raw = raw[:pos]
+                break
+    clean = raw.strip().strip('«»"“”').strip()
     texto = "«" + clean + "»"
 
-    # AUTO-FIT: arranca en FONT_SIZE (máximo) y baja hasta que el bloque entre en el
-    # área libre [FRASE_Y_TOP, FRASE_Y_BOT] — las frases largas nunca pisan el footer.
+    # AUTO-FIT: arranca en FONT_SIZE (máximo) y baja hasta que el bloque (cita + autor)
+    # entre en el área libre [FRASE_Y_TOP, FRASE_Y_BOT] — nunca pisa el footer.
     max_w  = img.width - FRASE_X_PAD * 2
     area_h = FRASE_Y_BOT - FRASE_Y_TOP
     size   = FONT_SIZE
@@ -72,7 +84,8 @@ def generate_frase_image(frase: str) -> bytes:
         font    = _load_font(size)
         lines   = _wrap(draw, texto, font, max_w)
         line_h  = int(size * 1.32)
-        block_h = len(lines) * line_h
+        autor_h = int(size * 0.75 * 1.6) if autor else 0   # línea del autor (más chica + aire)
+        block_h = len(lines) * line_h + autor_h
         if block_h <= area_h or size <= FONT_MIN:
             break
         size -= 2
@@ -83,6 +96,11 @@ def generate_frase_image(frase: str) -> bytes:
 
     for i, line in enumerate(lines):
         draw.text((FRASE_X_PAD, y0 + i * line_h), line, fill=TEXT_COLOR, font=font)
+
+    if autor:
+        f_autor = _load_font(int(size * 0.75))
+        y_autor = y0 + len(lines) * line_h + int(size * 0.75 * 0.6)
+        draw.text((FRASE_X_PAD, y_autor), "— " + autor, fill=TEXT_COLOR, font=f_autor)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
