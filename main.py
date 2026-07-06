@@ -3161,6 +3161,21 @@ def detect_hilo(data: dict) -> int:
     return max(scores, key=scores.get)
 
 
+_ENTREVISTA_RE = re.compile(
+    r'\b(entrevista|mano a mano|cara a cara|en di[aá]logo con|columna de opini[oó]n|'
+    r'opini[oó]n de|el an[aá]lisis de|editorial de|palabra de|habl[oó] con)\b', re.I)
+
+
+def es_entrevista_opinion(url: str, title: str, text: str) -> bool:
+    """Entrevistas y opiniones en 1ª persona = CAPA 3 (regla de Leo, 2026-07-06). Detecta por
+    fuente de video (YouTube = casi siempre entrevista/opinión) o marcadores en título/texto."""
+    u = (url or "").lower()
+    if "youtube.com" in u or "youtu.be" in u:
+        return True
+    blob = f"{title or ''} {(text or '')[:600]}"
+    return bool(_ENTREVISTA_RE.search(blob))
+
+
 HILO_NAMES = {1: "Informarse es respetarse", 2: "La voz de las pymes", 3: "Opinión / Análisis"}
 
 
@@ -6317,7 +6332,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not title_hl:
                 context.user_data["pending_manual_url"]     = url
                 context.user_data["pending_manual_excerpt"] = excerpt_hl
-                context.user_data["pending_manual_hilo"]    = hilo_hint or 2
+                context.user_data["pending_manual_hilo"]    = hilo_hint or (
+                    3 if es_entrevista_opinion(url, "", text_hl) else 2)
                 await msg_hl.edit_text(
                     "⚠️ No pude extraer el título. Escribí el título para esta nota:",
                     parse_mode="HTML"
@@ -6327,7 +6343,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Score real (no hardcodeado)
             score_hl = max(7.0, _score_hl(title_hl, text_hl[:500]))
-            hilo_hl  = hilo_hint or 2
+            # Entrevistas / opiniones en 1ª persona = Capa 3 (regla de Leo); si no, default 2.
+            hilo_hl  = hilo_hint or (3 if es_entrevista_opinion(url, title_hl, text_hl) else 2)
             content_hl = {"title": title_hl, "excerpt": excerpt_hl,
                           "source_name": url.split("/")[2] if "/" in url else url,
                           "text": text_hl[:3000]}
@@ -6687,6 +6704,25 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pasame en UN mensaje: tu <b>mirada/opinión</b> sobre el evento, las <b>fuentes</b> "
             "(pegá los links) y los <b>ángulos</b> que quieras. El agente compone la nota con eso "
             "— sin inventar nada.", parse_mode="HTML")
+        return
+
+    # ── Nota rechazada por el gate: publicar igual (release → publicacion) ──
+    if query.data.startswith("h_prerelease:"):
+        jid = int(query.data.split(":")[1])
+        import sys as _syspr
+        _syspr.path.insert(0, "/opt/me-harness"); _syspr.path.insert(0, "/opt/me-harness/agents")
+        try:
+            import lector_pre as _lp
+            ok = await asyncio.to_thread(_lp.release, jid)
+            if ok:
+                await query.edit_message_text(
+                    f"✅ Nota #{jid} liberada — se publica en el próximo ciclo (~2 min).",
+                    parse_mode="HTML")
+            else:
+                await query.edit_message_text(f"❌ No encontré el job #{jid}.", parse_mode="HTML")
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ Error al liberar #{jid}: {str(e)[:150]}", parse_mode="HTML")
         return
 
     # ── Boletín semanal: arrancar la conversación (pregunta → opciones → slugs) ──
