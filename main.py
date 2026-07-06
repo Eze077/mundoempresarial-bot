@@ -32,6 +32,10 @@ WP_URL  = os.environ.get("WP_URL", "https://mundoempresarial.ar").rstrip("/")
 WP_USER = os.environ["WP_USER"]
 WP_PASS = os.environ["WP_PASS"]
 
+# Path a la DB del harness. Global de módulo: algunos handlers (ej. pip_stage_sin_imagen,
+# L6451) lo usaban ANTES de su definición local → NameError. Definido acá una vez.
+_HDB = "/opt/me-harness/harness.db"
+
 TWITTER_API_KEY    = os.environ.get("TW_KEY", "") or os.environ.get("TWITTER_API_KEY", "")
 TWITTER_API_SECRET = os.environ.get("TW_SECRET", "") or os.environ.get("TWITTER_API_SECRET", "")
 TWITTER_TOKEN      = os.environ.get("TW_TOKEN", "") or os.environ.get("TWITTER_ACCESS_TOKEN", "")
