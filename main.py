@@ -5308,6 +5308,27 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
         return
 
+    # ── Ciclaje del briefing: recibir los horarios nuevos y guardar la config ──
+    if context.user_data.get("awaiting_ciclaje_horarios"):
+        context.user_data.pop("awaiting_ciclaje_horarios")
+        import re as _rec
+        slots = [s.strip() for s in text_in.replace(";", ",").split(",") if s.strip()]
+        ok = [s for s in slots if _rec.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", s)]
+        ok = [f"{int(s.split(':')[0]):02d}:{s.split(':')[1]}" for s in ok]
+        if not ok or len(ok) != len(slots):
+            context.user_data["awaiting_ciclaje_horarios"] = True
+            await update.message.reply_text(
+                "Formato inválido. Pasame horarios HH:MM separados por coma, ej: 08:00, 13:00, 19:00")
+            return
+        import sys as _sysc
+        _sysc.path.insert(0, "/opt/me-harness")
+        from agents import curador as _curc
+        _curc.save_briefing_config({"horarios": sorted(set(ok))})
+        await update.message.reply_text(
+            _curc.ciclaje_texto() + "\n\n✅ Horarios actualizados — el tick ya corre con esto.",
+            parse_mode="HTML", reply_markup=None)
+        return
+
     # ── Frases: reemplazar los textos del header (kicker / etiqueta) y regenerar ──
     if context.user_data.get("awaiting_frase_header"):
         campo = context.user_data.pop("awaiting_frase_header")
@@ -6778,6 +6799,53 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             try:
                 await query.edit_message_reply_markup(None)
+            except Exception:
+                pass
+        return
+
+    # ── Loop editorial: expirar reco sin efecto (sale del prompt del redactor) ──
+    if query.data.startswith("h_reco_exp:"):
+        import sys as _sysre
+        _sysre.path.insert(0, "/opt/me-harness"); _sysre.path.insert(0, "/opt/me-harness/agents")
+        try:
+            rid = int(query.data.split(":")[1])
+            import direccion as _dirx
+            res = _dirx.expirar_reco(rid)
+            base = query.message.text_html if query.message.text else ""
+            await query.edit_message_text(base + f"\n\n🗑 <b>Reco #{rid}</b> {res}",
+                                          parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            try:
+                await query.answer(f"Error: {str(e)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    # ── Loop de ESQUEMA: aplicar/descartar/revertir propuestas del comité ──
+    if (query.data.startswith("h_esq_ok:") or query.data.startswith("h_esq_no:")
+            or query.data.startswith("h_esq_rev:")):
+        import sys as _syseq
+        _syseq.path.insert(0, "/opt/me-harness"); _syseq.path.insert(0, "/opt/me-harness/agents")
+        try:
+            peq = query.data.split(":")
+            acteq = peq[0]; pid = int(peq[1])
+            import direccion as _direq
+            if acteq == "h_esq_ok":
+                res = _direq.aplicar_esquema_prop(pid)
+                footer = f"\n\n✅ <b>Esquema #{pid}</b>: {res} — el ciclaje ya corre con la config nueva."
+            elif acteq == "h_esq_rev":
+                res = _direq.revertir_esquema_prop(pid)
+                footer = f"\n\n↩️ <b>Esquema #{pid}</b>: {res}"
+            else:
+                import broker as _bkeq
+                _bkeq.set_esquema_prop_status(pid, "dismissed")
+                footer = f"\n\n❌ Propuesta #{pid} descartada."
+            base = query.message.text_html if query.message.text else ""
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          disable_web_page_preview=True)
+        except Exception as e:
+            try:
+                await query.answer(f"Error: {str(e)[:150]}", show_alert=True)
             except Exception:
                 pass
         return
@@ -8869,10 +8937,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if i < len(mask) and mask[i] == "1"]
                 drop = [int(jid) for i, jid in enumerate(jids)
                         if not (i < len(mask) and mask[i] == "1")]
-                needed = max(0, 3 - len(keep))
+                _n_cfg = int(_cur.get_briefing_config().get("n", 5))
+                needed = max(0, _n_cfg - len(keep))
                 if needed == 0:
                     try:
-                        await query.edit_message_text("Ya marcaste las 3 — tocá «Aprobar marcadas».")
+                        await query.edit_message_text(
+                            f"Ya marcaste las {_n_cfg} — tocá «Aprobar marcadas».")
                     except Exception:
                         pass
                 else:
@@ -8891,7 +8961,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         import threading as _thr
                         _keep = keep or None
-                        _thr.Thread(target=lambda: _cur.run_briefing_auto(3, _keep), daemon=True).start()
+                        _thr.Thread(target=lambda: _cur.run_briefing_auto(None, _keep), daemon=True).start()
                     except Exception:
                         pass
 
@@ -8900,6 +8970,40 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text("✖️ Cancelado. Las dejo en la cola.")
                 except Exception:
                     pass
+
+            # ── ⚙️ Ciclaje del briefing auto (config editable desde TG) ────
+            elif action == "h_cur_auto_cfg":
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=_cur.ciclaje_texto(), parse_mode="HTML",
+                    reply_markup=_cur.ciclaje_kb())
+
+            elif action == "h_cur_auto_cfg_noop":
+                await query.answer("Elegí 3, 5 u 8 →")
+
+            elif action == "h_cur_auto_cfg_n" and arg:
+                _cur.save_briefing_config({"n": int(arg)})
+                await query.edit_message_text(_cur.ciclaje_texto(), parse_mode="HTML",
+                                              reply_markup=_cur.ciclaje_kb())
+
+            elif action == "h_cur_auto_cfg_pause":
+                _cfgp = _cur.get_briefing_config()
+                _cur.save_briefing_config({"pausado": not _cfgp.get("pausado")})
+                await query.edit_message_text(_cur.ciclaje_texto(), parse_mode="HTML",
+                                              reply_markup=_cur.ciclaje_kb())
+
+            elif action == "h_cur_auto_cfg_hor":
+                context.user_data["awaiting_ciclaje_horarios"] = True
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=("🕘 Pasame los HORARIOS de corrida separados por coma (hora ARG).\n"
+                          "Ej: <code>08:00, 13:00, 19:00</code>"), parse_mode="HTML")
+                await query.answer("Esperando horarios…")
+
+            elif action == "h_cur_auto_cfg_run":
+                await query.answer("Corriendo briefing…")
+                import threading as _thrc
+                _thrc.Thread(target=_cur.run_briefing_auto, daemon=True).start()
 
             # ── Programar: override del destino desde el briefing ─────────
             elif action == "h_cur_program" and arg:
