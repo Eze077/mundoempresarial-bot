@@ -6725,6 +6725,34 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Error al liberar #{jid}: {str(e)[:150]}", parse_mode="HTML")
         return
 
+    # ── Eventos: armar sin nota principal / cancelar la campaña en curso ──
+    if query.data.startswith("h_evt_finalizar:") or query.data.startswith("h_evt_cancel:"):
+        act, evid = query.data.split(":")[0], query.data.split(":")[1]
+        import sys as _sevf
+        _sevf.path.insert(0, "/opt/me-harness"); _sevf.path.insert(0, "/opt/me-harness/agents")
+        try:
+            import eventos as _ev
+            if act == "h_evt_cancel":
+                await asyncio.to_thread(_ev.cancelar_campania)
+                await query.edit_message_text("❌ Campaña cancelada.", parse_mode="HTML")
+            else:
+                await query.edit_message_text(
+                    "⏳ Armando la campaña (sin nota principal)…", parse_mode="HTML")
+                res = await asyncio.to_thread(_ev.finalizar_campania, evid)
+                if res.get("ok"):
+                    nl = res.get("newsletter", {})
+                    await query.edit_message_text(
+                        f"✅ Campaña {evid} armada — newsletter DRAFT #{nl.get('campaign_id')}.\n"
+                        f"Revisala y aprobá el envío. El copy de redes te llegó aparte.",
+                        parse_mode="HTML", disable_web_page_preview=True)
+                else:
+                    await query.edit_message_text(
+                        f"❌ No se pudo armar: {res.get('error') or res.get('newsletter')}",
+                        parse_mode="HTML")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error: {str(e)[:150]}", parse_mode="HTML")
+        return
+
     # ── Boletín semanal: arrancar la conversación (pregunta → opciones → slugs) ──
     if query.data == "h_bol_start":
         context.user_data["awaiting_bol_pregunta"] = True
@@ -14294,6 +14322,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
         # ── Contenido ─────────────────────────────────────────────────────────
         BotCommand("evento",            "Cobertura de evento propio — audios, fotos y texto → nota"),
+        BotCommand("campania",          "Campaña de evento en curso — revivir, armar o cancelar"),
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
         BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
@@ -14773,6 +14802,46 @@ def _evento_resumen(ev: dict) -> str:
         "Seguí mandando material. Cuando termines, tocá <b>✅ Procesar</b>.")
 
 
+async def cmd_campania(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra la campaña de evento en curso + botones para revivir/armar/cancelar."""
+    import sys as _sc
+    _sc.path.insert(0, "/opt/me-harness"); _sc.path.insert(0, "/opt/me-harness/agents")
+    try:
+        import eventos as _ev
+        p = await asyncio.to_thread(_ev._leer_campania_pend)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error leyendo el estado: {e}")
+        return
+    if not p or not p.get("evento_id"):
+        await update.message.reply_text(
+            "📭 No hay ninguna campaña de evento en curso.\n"
+            "Se arranca desde el evento que te propone el agente (o el chequeo diario).")
+        return
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    estado = p.get("estado"); cur = p.get("curadas", {}); evid = p["evento_id"]
+    txt = (f"🗳 <b>Campaña en curso: {p.get('nombre')}</b> ({p.get('esfuerzo')})\n"
+           f"Ángulo: {p.get('angulo')}\n"
+           f"Notas curadas: {len(cur.get('opinion', []))} opinión + "
+           f"{len(cur.get('noticias', []))} noticias\n"
+           f"Estado: <b>{estado}</b>")
+    rows = []
+    if estado == "esperando_insumos":
+        rows.append([InlineKeyboardButton("📝 Aportar insumos y armar",
+                                          callback_data=f"h_evt_insumos:{evid}")])
+        rows.append([InlineKeyboardButton("⏭ Armar sin nota principal",
+                                          callback_data=f"h_evt_finalizar:{evid}")])
+    elif estado == "armada":
+        txt += "\n\n✅ Ya está armada (newsletter en borrador — revisá y aprobá el envío)."
+    else:
+        rows.append([InlineKeyboardButton("✅ Armar ahora",
+                                          callback_data=f"h_evt_finalizar:{evid}")])
+    rows.append([InlineKeyboardButton("❌ Cancelar campaña",
+                                      callback_data=f"h_evt_cancel:{evid}")])
+    await update.message.reply_text(
+        txt, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+
+
 async def cmd_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if BOT_PAUSED:
         await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
@@ -15010,6 +15079,7 @@ def main():
     app.add_handler(CommandHandler("pipeline", cmd_pipeline))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CommandHandler("evento", cmd_evento))
+    app.add_handler(CommandHandler("campania", cmd_campania))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
