@@ -9743,7 +9743,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "fs_morning", "fs_noon", "fs_evening",
         "fs_custom", "fs_hour_write", "fs_confirm_custom",
         "frase_tweet", "frase_no_tweet", "frase_change_ht",
-        "frase_set_kicker", "frase_set_tag",
+        "frase_set_kicker", "frase_set_tag", "frase_set_texto",
     ) or query.data.startswith("fs_day_") or query.data.startswith("fs_h_"):
 
         fp = context.user_data.get("frase_pending")
@@ -9792,20 +9792,26 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if query.data in ("frase_set_kicker", "frase_set_tag"):
+        if query.data in ("frase_set_kicker", "frase_set_tag", "frase_set_texto"):
             if not fp:
                 await query.edit_message_caption(caption="Error: no hay frase pendiente.")
                 return
-            campo = "kicker" if query.data == "frase_set_kicker" else "tag"
+            campo = {"frase_set_kicker": "kicker", "frase_set_tag": "tag",
+                     "frase_set_texto": "texto"}[query.data]
             context.user_data["awaiting_frase_header"] = campo
-            ejemplo = ("Día de la Independencia Argentina" if campo == "kicker"
-                       else "9 de julio del 2026")
-            actual = ("FRASE DESTACADA" if campo == "kicker" else "INSPIRACIÓN") \
-                if not fp.get(campo) else fp[campo]
-            await query.message.reply_text(
-                f"🏷 Pasame el texto para reemplazar «{actual}» "
-                f"({'arriba izquierda' if campo == 'kicker' else 'arriba derecha'}).\n"
-                f"Ej: {ejemplo}")
+            if campo == "texto":
+                await query.message.reply_text(
+                    f"✏️ Pasame el texto nuevo de la frase (regenero la placa).\n"
+                    f"Actual: {fp.get('texto', '')[:200]}")
+            else:
+                ejemplo = ("Día de la Independencia Argentina" if campo == "kicker"
+                           else "9 de julio del 2026")
+                actual = ("FRASE DESTACADA" if campo == "kicker" else "INSPIRACIÓN") \
+                    if not fp.get(campo) else fp[campo]
+                await query.message.reply_text(
+                    f"🏷 Pasame el texto para reemplazar «{actual}» "
+                    f"({'arriba izquierda' if campo == 'kicker' else 'arriba derecha'}).\n"
+                    f"Ej: {ejemplo}")
             return
 
         if query.data == "frase_cancel":
@@ -12963,6 +12969,7 @@ def _build_frase_kb(tw_on: bool, tg_on: bool, wp_on: bool = True, li_on: bool = 
             InlineKeyboardButton(li_label, callback_data="frase_toggle_li"),
         ],
         [
+            InlineKeyboardButton("✏️ Texto", callback_data="frase_set_texto"),
             InlineKeyboardButton("🏷 Título sup.", callback_data="frase_set_kicker"),
             InlineKeyboardButton("📅 Etiqueta", callback_data="frase_set_tag"),
         ],
