@@ -5308,6 +5308,35 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
         return
 
+    # ── Frases: reemplazar los textos del header (kicker / etiqueta) y regenerar ──
+    if context.user_data.get("awaiting_frase_header"):
+        campo = context.user_data.pop("awaiting_frase_header")
+        fp = context.user_data.get("frase_pending")
+        if not fp:
+            await update.message.reply_text("Error: no hay frase pendiente (arrancá con /frases).")
+            return
+        fp[campo] = text_in.strip()
+        await update.message.reply_text("🎨 Regenerando placa…")
+        try:
+            from frases_gen import generate_frase_image
+            img_bytes = await asyncio.to_thread(
+                generate_frase_image, fp["texto"], fp.get("kicker"), fp.get("tag"))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error generando imagen: {e}")
+            return
+        fp["img_bytes"] = img_bytes
+        context.user_data["frase_pending"] = fp
+        bio = io.BytesIO(img_bytes)
+        bio.name = "frase.png"
+        await update.message.reply_photo(
+            photo=bio,
+            caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
+            parse_mode="Markdown",
+            reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True),
+                                         fp.get("wp_on", True), fp.get("li_on", False)),
+        )
+        return
+
     # ── Eventos: insumos del Editor para la nota principal → finalizar la campaña ──
     if context.user_data.get("awaiting_evt_insumos"):
         evid = context.user_data.pop("awaiting_evt_insumos")
@@ -9714,6 +9743,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "fs_morning", "fs_noon", "fs_evening",
         "fs_custom", "fs_hour_write", "fs_confirm_custom",
         "frase_tweet", "frase_no_tweet", "frase_change_ht",
+        "frase_set_kicker", "frase_set_tag",
     ) or query.data.startswith("fs_day_") or query.data.startswith("fs_h_"):
 
         fp = context.user_data.get("frase_pending")
@@ -9760,6 +9790,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(
                 reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp.get("wp_on", True), fp["li_on"])
             )
+            return
+
+        if query.data in ("frase_set_kicker", "frase_set_tag"):
+            if not fp:
+                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            campo = "kicker" if query.data == "frase_set_kicker" else "tag"
+            context.user_data["awaiting_frase_header"] = campo
+            ejemplo = ("Día de la Independencia Argentina" if campo == "kicker"
+                       else "9 de julio del 2026")
+            actual = ("FRASE DESTACADA" if campo == "kicker" else "INSPIRACIÓN") \
+                if not fp.get(campo) else fp[campo]
+            await query.message.reply_text(
+                f"🏷 Pasame el texto para reemplazar «{actual}» "
+                f"({'arriba izquierda' if campo == 'kicker' else 'arriba derecha'}).\n"
+                f"Ej: {ejemplo}")
             return
 
         if query.data == "frase_cancel":
@@ -12917,6 +12963,10 @@ def _build_frase_kb(tw_on: bool, tg_on: bool, wp_on: bool = True, li_on: bool = 
             InlineKeyboardButton(li_label, callback_data="frase_toggle_li"),
         ],
         [
+            InlineKeyboardButton("🏷 Título sup.", callback_data="frase_set_kicker"),
+            InlineKeyboardButton("📅 Etiqueta", callback_data="frase_set_tag"),
+        ],
+        [
             InlineKeyboardButton("🚀 Publicar ahora", callback_data="frase_pub"),
             InlineKeyboardButton("⏰ Programar", callback_data="frase_schedule"),
         ],
@@ -13197,7 +13247,8 @@ async def _do_frase_schedule(query, context, target):
     if not img_bytes:
         try:
             from frases_gen import generate_frase_image
-            img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+            img_bytes = await asyncio.to_thread(
+                generate_frase_image, frase, fp.get("kicker"), fp.get("tag"))
         except Exception as e:
             await _frase_edit(query, caption=f"❌ Error generando imagen: {e}")
             return
@@ -13223,6 +13274,8 @@ async def _do_frase_schedule(query, context, target):
         "li_on":     li_on,
         "chat_id":   query.message.chat_id,
         "custom_ht": custom_ht,
+        "kicker":    fp.get("kicker"),
+        "tag":       fp.get("tag"),
     }
     try:
         context.application.job_queue.run_once(
@@ -13265,7 +13318,8 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         from frases_gen import generate_frase_image
-        img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+        img_bytes = await asyncio.to_thread(
+            generate_frase_image, frase, job_data.get("kicker"), job_data.get("tag"))
     except Exception as e:
         img_bytes = None
         results.append(f"❌ Error generando imagen: {e}")
