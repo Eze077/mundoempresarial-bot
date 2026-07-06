@@ -5227,6 +5227,29 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕘 Reprogramado: el resumen sale a las {hh:02d}:{mm:02d}.")
         return
 
+    # ── Eventos: insumos del Editor para la nota principal → finalizar la campaña ──
+    if context.user_data.get("awaiting_evt_insumos"):
+        evid = context.user_data.pop("awaiting_evt_insumos")
+        await update.message.reply_text(
+            "⏳ Componiendo la nota principal + armando el newsletter y el copy de redes…")
+        import sys as _sev2
+        _sev2.path.insert(0, "/opt/me-harness"); _sev2.path.insert(0, "/opt/me-harness/agents")
+        try:
+            import eventos as _ev
+            res = await asyncio.to_thread(_ev.finalizar_campania, evid, text_in)
+            if res.get("ok"):
+                nl = res.get("newsletter", {}); np = res.get("nota_principal") or {}
+                msg = f"✅ Campaña {evid} armada — newsletter DRAFT #{nl.get('campaign_id')}."
+                if np.get("url"):
+                    msg += f"\n📝 Nota principal: {np['url']}"
+                await update.message.reply_text(msg, disable_web_page_preview=True)
+            else:
+                await update.message.reply_text(
+                    f"❌ No se pudo armar: {res.get('error') or res.get('newsletter')}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
+        return
+
     # ── Boletín semanal a Lectores: conversación (pregunta → opciones → slugs) ──
     if context.user_data.get("awaiting_bol_pregunta"):
         context.user_data.pop("awaiting_bol_pregunta")
@@ -6617,15 +6640,27 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pv = query.data.split(":")
             if pv[0] == "h_evt_build":
                 evid = pv[1]; esf = pv[2] if len(pv) >= 3 else "media"
-                await query.edit_message_text(f"⏳ Armando campaña <b>{evid}</b> ({esf})…", parse_mode="HTML")
+                await query.edit_message_text(
+                    f"⏳ Preparando campaña <b>{evid}</b> ({esf})… curando notas al ángulo.", parse_mode="HTML")
                 import eventos as _ev
-                r = _ev.build_campaign(evid, esf)
-                if r.get("ok"):
+                r = await asyncio.to_thread(_ev.build_campaign, evid, esf)
+                if r.get("needs_insumos"):
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    cur = r.get("curadas", {})
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "📝 Aportar insumos", callback_data=f"h_evt_insumos:{evid}")]])
+                    await query.edit_message_text(
+                        f"🗂 <b>Campaña {evid} ({esf})</b> — junté "
+                        f"{len(cur.get('opinion', []))} nota(s) de opinión + "
+                        f"{len(cur.get('noticias', []))} noticia(s) afines al ángulo.\n\n"
+                        f"Para la <b>NOTA PRINCIPAL</b> necesito tus insumos como Editor: tu mirada/opinión, "
+                        f"fuentes (links) y ángulos. Tocá para aportarlos:",
+                        parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                elif r.get("ok"):
                     nl = r.get("newsletter", {})
-                    pend = (" · Pendiente: " + ", ".join(r.get("pendientes"))) if r.get("pendientes") else ""
                     await query.edit_message_text(
                         f"✅ <b>Campaña {evid} ({esf})</b> armada — newsletter DRAFT #{nl.get('campaign_id')}.\n"
-                        f"Revisalo, curá las notas y aprobá el envío.{pend}",
+                        f"Revisala y aprobá el envío. El copy de redes te llegó aparte.",
                         parse_mode="HTML", disable_web_page_preview=True)
                 else:
                     await query.edit_message_text(
@@ -6637,6 +6672,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Error armando la campaña: {str(e)[:150]}", parse_mode="HTML")
             except Exception:
                 pass
+        return
+
+    # ── Eventos: aportar insumos del Editor para la nota principal ──
+    if query.data.startswith("h_evt_insumos:"):
+        evid = query.data.split(":")[1]
+        context.user_data["awaiting_evt_insumos"] = evid
+        await query.edit_message_text(
+            "📝 <b>Insumos para la nota principal</b>\n\n"
+            "Pasame en UN mensaje: tu <b>mirada/opinión</b> sobre el evento, las <b>fuentes</b> "
+            "(pegá los links) y los <b>ángulos</b> que quieras. El agente compone la nota con eso "
+            "— sin inventar nada.", parse_mode="HTML")
         return
 
     # ── Boletín semanal: arrancar la conversación (pregunta → opciones → slugs) ──
