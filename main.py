@@ -5308,8 +5308,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not m:
             await update.message.reply_text("Hora inválida. Escribila como HH:MM (ej: 14:00):")
             return
-        context.user_data.pop("awaiting_bol_hora")
         hh, mm = int(m.group(1)), int(m.group(2))
+        # Guard: hora ya pasada hoy → NO disparar; pedir una futura (o usar "Enviar ahora").
+        from datetime import datetime as _dtb, timezone as _tzb, timedelta as _tdb
+        _now_ar = _dtb.now(_tzb.utc) - _tdb(hours=3)
+        if (hh, mm) <= (_now_ar.hour, _now_ar.minute):
+            await update.message.reply_text(
+                f"⚠️ Las {hh:02d}:{mm:02d} ya pasaron (ahora {_now_ar.hour:02d}:{_now_ar.minute:02d}).\n"
+                "Mandá una hora FUTURA de hoy, o volvé a la tarjeta y tocá «✅ Enviar ahora».")
+            return   # sigue esperando la hora
+        context.user_data.pop("awaiting_bol_hora")
         await update.message.reply_text(f"⏳ Programando #{info['cid']} ({hh:02d}:{mm:02d})…")
         ok, txt = await asyncio.to_thread(_boletin_programar, info["cid"], info["publico"], hh, mm)
         await update.message.reply_text(txt, parse_mode="HTML", disable_web_page_preview=True)
@@ -6419,6 +6427,25 @@ async def _do_schedule(query, context, data, target):
         )
 
 
+def _boletin_enviar_ahora(cid, publico):
+    """Envía el boletín #cid YA (programa a la hora actual → sale de inmediato). (ok, texto)."""
+    import sys as _s
+    _s.path.insert(0, "/opt/me-harness"); _s.path.insert(0, "/opt/me-harness/agents")
+    try:
+        import newsletter as _nl
+        from datetime import datetime, timezone, timedelta
+        now_ar = datetime.now(timezone.utc) - timedelta(hours=3)
+        sched = now_ar.strftime("%Y-%m-%d %H:%M:%S")
+        r = _nl.schedule_send(cid, sched)
+        if r.get("ok"):
+            warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
+            return True, (f"✅ <b>Boletín #{cid} ENVIADO</b> → {publico} ({r.get('recipients')} dest.){warn}\n"
+                          f"A +24h: feedback del funnel + nutrir bases + mejoras.")
+        return False, f"❌ No se pudo enviar #{cid}: {r.get('error')}"
+    except Exception as e:
+        return False, f"❌ Error enviando #{cid}: {str(e)[:160]}"
+
+
 def _boletin_programar(cid, publico, hh, mm):
     """Programa el envío del boletín #cid HOY a las hh:mm (AR) al público dado. (ok, texto)."""
     import sys as _s
@@ -6783,14 +6810,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             cid = res["campaign_id"]
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📅 Programar 10:30", callback_data=f"h_bol_sched:{cid}:{publico}:1030")],
-                [InlineKeyboardButton("🕐 Ajustar hora", callback_data=f"h_bol_horaask:{cid}:{publico}")],
+                [InlineKeyboardButton("✅ Enviar ahora", callback_data=f"h_bol_send:{cid}:{publico}")],
+                [InlineKeyboardButton("📅 Programar (elegí la hora)", callback_data=f"h_bol_horaask:{cid}:{publico}")],
                 [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{cid}")]])
             await query.edit_message_text(
                 f"📋 <b>Boletín listo — DRAFT #{cid}</b> → <b>{publico}</b>\n"
                 f"Asunto: {res.get('subject','')}\n"
                 f"Encuesta: {len(ops or [])} opciones · Notas: {slugs.count(',') + 1} · Intro GPT ✅\n\n"
-                f"Previsualizá: {res.get('preview')}\n\n¿Cuándo lo mando? (default 10:30)",
+                f"Previsualizá: {res.get('preview')}\n\n¿Lo <b>envío ahora</b> o lo <b>programás</b> para una hora?",
                 parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
         except Exception as e:
             await query.edit_message_text(f"❌ Error armando el boletín: {str(e)[:160]}", parse_mode="HTML")
@@ -6805,6 +6832,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Boletín: programar el envío (hora fija 10:30 o ajustada) o cancelar ──────
+    # ── Boletín: ENVIAR ahora ───────────────────────────────────────────────────
+    if query.data.startswith("h_bol_send:"):
+        pv = query.data.split(":"); cid = pv[1]; publico = pv[2] if len(pv) >= 3 else "lectores"
+        await query.edit_message_text(f"⏳ Enviando boletín #{cid} a {publico}…", parse_mode="HTML")
+        ok, txt = await asyncio.to_thread(_boletin_enviar_ahora, cid, publico)
+        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
+        return
+
     if query.data.startswith("h_bol_sched:") or query.data.startswith("h_bol_cancel:"):
         pv = query.data.split(":"); cid = pv[1]
         if pv[0] == "h_bol_cancel":
