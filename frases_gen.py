@@ -7,10 +7,13 @@ BASE_PATH = "/opt/mundoempresarial-bot/assets/frases_base.png"
 
 # Marco navy nuevo (diseño Claude Design): texto BLANCO, sin placeholder que borrar.
 # La comilla naranja está arriba; la frase va en el área libre debajo, alineada a la izq.
+# Ajuste 2026-07-06 (Leo): frases largas ENTRAN — área más arriba y auto-fit de letra:
+# 60 es el tamaño MÁXIMO; si el bloque no entra, la letra baja sola hasta FONT_MIN.
 FRASE_X_PAD = 72       # padding horizontal (igual que el diseño)
-FRASE_Y_TOP = 400      # debajo de la comilla naranja
-FRASE_Y_BOT = 770      # arriba del footer de marca
-FONT_SIZE   = 60
+FRASE_Y_TOP = 330      # debajo de la comilla naranja (antes 400 — subido)
+FRASE_Y_BOT = 780      # arriba del footer de marca
+FONT_SIZE   = 60       # máximo
+FONT_MIN    = 38       # mínimo del auto-fit
 TEXT_COLOR  = "#ffffff"
 
 # Rutas de fuente (bold primero, para acercarse a Poppins del diseño)
@@ -55,20 +58,28 @@ def generate_frase_image(frase: str) -> bytes:
 
     img  = Image.open(BASE_PATH).convert("RGB")
     draw = ImageDraw.Draw(img)
-    font = _load_font(FONT_SIZE)
 
     # Frase entre comillas angulares, como el diseño
     clean = frase.strip().strip('«»"“”')
     texto = "«" + clean + "»"
 
-    # Área libre debajo de la comilla; bloque centrado verticalmente, alineado a la izq.
-    max_w   = img.width - FRASE_X_PAD * 2
-    lines   = _wrap(draw, texto, font, max_w)
-    line_h  = int(FONT_SIZE * 1.32)
-    block_h = len(lines) * line_h
+    # AUTO-FIT: arranca en FONT_SIZE (máximo) y baja hasta que el bloque entre en el
+    # área libre [FRASE_Y_TOP, FRASE_Y_BOT] — las frases largas nunca pisan el footer.
+    max_w  = img.width - FRASE_X_PAD * 2
+    area_h = FRASE_Y_BOT - FRASE_Y_TOP
+    size   = FONT_SIZE
+    while True:
+        font    = _load_font(size)
+        lines   = _wrap(draw, texto, font, max_w)
+        line_h  = int(size * 1.32)
+        block_h = len(lines) * line_h
+        if block_h <= area_h or size <= FONT_MIN:
+            break
+        size -= 2
 
+    # Centrado vertical en el área, pero nunca por encima del tope ni pisando el footer.
     area_cy = (FRASE_Y_TOP + FRASE_Y_BOT) // 2
-    y0 = area_cy - block_h // 2
+    y0 = max(FRASE_Y_TOP, min(area_cy - block_h // 2, FRASE_Y_BOT - block_h))
 
     for i, line in enumerate(lines):
         draw.text((FRASE_X_PAD, y0 + i * line_h), line, fill=TEXT_COLOR, font=font)
