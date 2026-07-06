@@ -56,26 +56,35 @@ _TAG_BOX    = (760, 54, 1016, 94)   # "INSPIRACIÓN" (alineado a la derecha)
 
 
 def _replace_header(img, draw, kicker: str, tag: str):
-    """Cubre los textos del header de la plantilla y dibuja los nuevos (mismo estilo)."""
+    """Cubre los textos del header de la plantilla y dibuja los nuevos (mismo estilo).
+    AUTO-FIT: si kicker + etiqueta no entran sin tocarse, baja la letra del header."""
     bg = img.getpixel((500, 74))    # navy del fondo en la franja del header
-    f  = _load_font(30)
-    if kicker:
-        # color blanco del original
-        draw.rectangle(_KICKER_BOX, fill=bg)
-        draw.text((_KICKER_BOX[0] + 4, _KICKER_BOX[1] + 6), kicker.upper(),
-                  fill="#ffffff", font=f)
-    if tag:
-        # tomar el celeste del texto original ANTES de cubrirlo (pixel más claro de la caja)
-        x0, y0, x1, y1 = _TAG_BOX
-        best = bg
-        for xx in range(x0, x1, 6):
-            for yy in range(y0, y1, 6):
-                p = img.getpixel((xx, yy))
-                if sum(p) > sum(best):
-                    best = p
-        draw.rectangle(_TAG_BOX, fill=bg)
-        w = draw.textlength(tag.upper(), font=f)
-        draw.text((x1 - 2 - w, y0 + 6), tag.upper(), fill=best, font=f)
+    # celeste del texto original de la derecha, ANTES de cubrir (pixel más claro de la caja)
+    x0, y0, x1, y1 = _TAG_BOX
+    celeste = bg
+    for xx in range(x0, x1, 6):
+        for yy in range(y0, y1, 6):
+            p = img.getpixel((xx, yy))
+            if sum(p) > sum(celeste):
+                celeste = p
+
+    kick_txt = (kicker or "FRASE DESTACADA").upper()
+    tag_txt  = (tag or "INSPIRACIÓN").upper()
+    kx, right, gap = _KICKER_BOX[0] + 4, _TAG_BOX[2] - 2, 28
+    size = 30
+    while size > 18:
+        f = _load_font(size)
+        if kx + draw.textlength(kick_txt, font=f) + gap + draw.textlength(tag_txt, font=f) <= right:
+            break
+        size -= 2
+    f = _load_font(size)
+
+    # Cubrir AMBOS textos originales (franja completa del header) y redibujar
+    draw.rectangle((_KICKER_BOX[0], _KICKER_BOX[1], _TAG_BOX[2], _TAG_BOX[3]), fill=bg)
+    y_txt = _KICKER_BOX[1] + 6 + (30 - size) // 2
+    draw.text((kx, y_txt), kick_txt, fill="#ffffff", font=f)
+    w = draw.textlength(tag_txt, font=f)
+    draw.text((right - w, y_txt), tag_txt, fill=celeste, font=f)
 
 
 def generate_frase_image(frase: str, kicker: str = None, tag: str = None) -> bytes:
