@@ -43,10 +43,14 @@ TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER
 
 TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
 
-LINKEDIN_TOKEN     = os.environ.get("LINKEDIN_TOKEN", "")
+LINKEDIN_TOKEN     = os.environ.get("LINKEDIN_TOKEN", "")   # member (perfil personal de Leo)
 LINKEDIN_CLIENT_ID = os.environ.get("LINKEDIN_CLIENT_ID", "77jyyt3btvsjwv")
 LINKEDIN_ORG_ID    = os.environ.get("LINKEDIN_ORG_ID", "67751917")
 LINKEDIN_MEMBER_ID = os.environ.get("LINKEDIN_MEMBER_ID", "")
+# Token org (página Mundo Empresarial AR). El harness lo auto-renueva y lo persiste
+# en LINKEDIN_TOKEN_STATE; el bot lo lee de ahí (fuente de verdad) o del env como fallback.
+LINKEDIN_ORG_TOKEN   = os.environ.get("LINKEDIN_ORG_TOKEN", "")
+LINKEDIN_TOKEN_STATE = os.environ.get("LINKEDIN_TOKEN_STATE", "/opt/me-harness/linkedin_org_token.json")
 _LAST_LINKEDIN_ERROR = ""
 _LAST_LINKEDIN_URN = ""
 _LINKEDIN_MEMBER_URN_CACHE: str | None = None
@@ -2071,6 +2075,57 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
         return None
 
 
+def _get_org_token() -> str:
+    """Token de la PÁGINA (org). Prioriza el estado que mantiene el harness (auto-refresh)."""
+    try:
+        import json as _json
+        with open(LINKEDIN_TOKEN_STATE, encoding="utf-8") as f:
+            tok = (_json.load(f) or {}).get("access_token", "")
+            if tok:
+                return tok
+    except Exception:
+        pass
+    return LINKEDIN_ORG_TOKEN
+
+
+def post_linkedin_org(data: dict, wp_url: str) -> str | None:
+    """Publica en la PÁGINA de LinkedIn (organización). Independiente del posteo personal."""
+    tok = _get_org_token()
+    if not tok or not LINKEDIN_ORG_ID:
+        logger.warning("post_linkedin_org: sin token org u org_id")
+        return None
+    try:
+        tracked_url = utm_url(wp_url, "linkedin")
+        title = (data.get("title") or "").strip()
+        excerpt = (data.get("excerpt") or data.get("rewritten_excerpt") or "").strip()[:300]
+        commentary = f"{title}\n\n{excerpt}\n\n🔗 {tracked_url}" if excerpt else f"{title}\n\n🔗 {tracked_url}"
+        h = {
+            "Authorization": f"Bearer {tok}",
+            "Content-Type": "application/json",
+            "LinkedIn-Version": "202503",
+        }
+        payload = {
+            "author": f"urn:li:organization:{LINKEDIN_ORG_ID}",
+            "commentary": commentary,
+            "visibility": "PUBLIC",
+            "distribution": {"feedDistribution": "MAIN_FEED"},
+            "content": {"article": {"source": tracked_url, "title": title, "description": excerpt}},
+            "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
+        }
+        r = requests.post("https://api.linkedin.com/rest/posts", headers=h, json=payload, timeout=15)
+        if r.status_code in (200, 201):
+            post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
+            post_url_li = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else tracked_url
+            logger.info(f"LinkedIn ORG post OK: {post_url_li}")
+            return post_url_li
+        logger.error(f"post_linkedin_org falló HTTP {r.status_code}: {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"post_linkedin_org exception: {e}")
+        return None
+
+
 def delete_linkedin_post(urn: str) -> bool:
     """Borra un post de LinkedIn por su URN (ej: urn:li:share:xxx)."""
     if not LINKEDIN_TOKEN or not urn:
@@ -3177,6 +3232,13 @@ def es_entrevista_opinion(url: str, title: str, text: str) -> bool:
 
 
 HILO_NAMES = {1: "Informarse es respetarse", 2: "La voz de las pymes", 3: "Opinión / Análisis"}
+
+
+def _looks_like_url(s: str) -> bool:
+    """True si el texto es (o arranca con) una URL — no sirve como TÍTULO de nota.
+    Evita el bug de que una URL de video/fuente quede como título y salga cruda al canal."""
+    s = (s or "").strip()
+    return bool(re.match(r'^(https?://|www\.|youtu\.be/|youtube\.com/)', s, re.IGNORECASE))
 
 
 def _decode_google_news_path(google_url: str) -> str | None:
@@ -5389,9 +5451,14 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Harness: esperando título exacto para nota del BRIEFING (lo bloquea) ─
     if context.user_data.get("awaiting_brief_title_for"):
+        new_title = text_in.strip()
+        if _looks_like_url(new_title):
+            await update.message.reply_text(
+                "⚠️ Eso es un link, no un título. Escribí el <b>título</b> de la nota (texto). "
+                "Si querés agregar un video, avisame aparte.", parse_mode="HTML")
+            return  # sigue esperando el título (no lo pop-eamos)
         job_id = context.user_data.pop("awaiting_brief_title_for")
         import json as _js, sqlite3 as _sq
-        new_title = text_in.strip()
         try:
             with _sq.connect("/opt/me-harness/harness.db") as _c:
                 row = _c.execute("SELECT title, content_json FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -5688,6 +5755,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if _is_title:
                     _new_title = _re_inst.sub(r'^(t[íi]tulo|title)\s*:?\s*', '', _txt,
                                               flags=_re_inst.IGNORECASE).strip()
+                    if _looks_like_url(_new_title):
+                        await update.message.reply_text(
+                            "⚠️ Eso es un link, no un título. Mandá el título como texto.")
+                        return
                     if "original_title" not in state:
                         state["original_title"] = (row[0] or "") if row else ""
                     state["title"] = _new_title
@@ -6201,10 +6272,14 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Cola: nuevo título ingresado por Leo ───────────────────────────────────
     if context.user_data.get("awaiting_cola_title_for"):
+        new_title = text_in.strip()
+        if _looks_like_url(new_title):
+            await update.message.reply_text(
+                "⚠️ Eso es un link, no un título. Escribí el título de la nota (texto).")
+            return  # sigue esperando el título
         job_id    = context.user_data.pop("awaiting_cola_title_for")
         msg_id    = context.user_data.pop("awaiting_cola_title_msg_id", None)
         prompt_id = context.user_data.pop("awaiting_cola_title_prompt_id", None)
-        new_title = text_in.strip()
         import sys as _sys_ct, json as _js_ct
         _sys_ct.path.insert(0, "/opt/me-harness")
         try:
@@ -6594,7 +6669,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import sys as _sysimp
         _sysimp.path.insert(0, "/opt/me-harness"); _sysimp.path.insert(0, "/opt/me-harness/agents")
         try:
-            from telegram import InlineKeyboardMarkup
             pi = query.data.split(":")
             acti = pi[0]; aidi = int(pi[1]); idxi = int(pi[2]) if len(pi) >= 3 else 0
             if acti == "h_imp_save":
@@ -6623,7 +6697,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import sys as _sysed
         _sysed.path.insert(0, "/opt/me-harness"); _sysed.path.insert(0, "/opt/me-harness/agents")
         try:
-            from telegram import InlineKeyboardMarkup
             pe = query.data.split(":")
             acte = pe[0]; eide = int(pe[1]); idxe = int(pe[2]) if len(pe) >= 3 else 0
             if acte == "h_edit_apply":
@@ -6693,7 +6766,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 import eventos as _ev
                 r = await asyncio.to_thread(_ev.build_campaign, evid, esf)
                 if r.get("needs_insumos"):
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                     cur = r.get("curadas", {})
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                         "📝 Aportar insumos", callback_data=f"h_evt_insumos:{evid}")]])
@@ -6790,7 +6862,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Boletín: elegido el público → armar el draft (GPT redacta la intro) ─────
     if query.data.startswith("h_bol_pub:"):
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         publico = query.data.split(":")[1]
         slugs = context.user_data.pop("bol_slugs", "")
         preg  = context.user_data.pop("bol_pregunta", "")
@@ -9746,11 +9817,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res_lines.append(f"❌ Error: {e}")
 
             if li_on and post_url:
+                # Personal (perfil de Leo) — se deja como estaba
                 li_url = await asyncio.to_thread(post_linkedin, {"title": frase, "excerpt": ""}, post_url)
                 if li_url:
-                    res_lines.append(f"✅ LinkedIn: {li_url}")
+                    res_lines.append(f"✅ LinkedIn (personal): {li_url}")
                 else:
-                    res_lines.append(f"❌ LinkedIn: {_LAST_LINKEDIN_ERROR[:80]}")
+                    res_lines.append(f"❌ LinkedIn (personal): {_LAST_LINKEDIN_ERROR[:80]}")
+                # Página Mundo Empresarial AR (org) — NUEVO
+                li_org_url = await asyncio.to_thread(post_linkedin_org, {"title": frase, "excerpt": ""}, post_url)
+                if li_org_url:
+                    res_lines.append(f"✅ LinkedIn (página): {li_org_url}")
+                else:
+                    res_lines.append("❌ LinkedIn (página): ver logs")
 
             res_text = "\n".join(res_lines)
             await query.edit_message_caption(caption=res_text)
