@@ -6891,6 +6891,37 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── Eventos: postear el copy de la campaña en las redes disponibles ──
+    if query.data.startswith("h_evt_redes:"):
+        import sys as _sysrd
+        _sysrd.path.insert(0, "/opt/me-harness"); _sysrd.path.insert(0, "/opt/me-harness/agents")
+        try:
+            evid = query.data.split(":")[1]
+            await query.answer("Posteando…")
+            import eventos as _evr
+            res = await asyncio.to_thread(_evr.postear_campania_redes, evid)
+            if res.get("ok"):
+                lineas = []
+                for canal, r in (res.get("resultados") or {}).items():
+                    if r.get("ok"):
+                        lineas.append(f"✅ {canal}" + (f" — {r.get('url')}" if r.get("url") else ""))
+                    elif r.get("pendiente_manual"):
+                        lineas.append(f"✋ {canal}: manual (faltan claves)")
+                    else:
+                        lineas.append(f"❌ {canal}: {str(r.get('error'))[:80]}")
+                base = query.message.text_html if query.message.text else ""
+                await query.edit_message_text(
+                    base + "\n\n📤 <b>Resultado:</b>\n" + "\n".join(lineas),
+                    parse_mode="HTML", disable_web_page_preview=True)
+            else:
+                await query.answer(f"Error: {res.get('error')}", show_alert=True)
+        except Exception as e:
+            try:
+                await query.answer(f"Error: {str(e)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── Eventos: aportar insumos del Editor para la nota principal ──
     if query.data.startswith("h_evt_insumos:"):
         evid = query.data.split(":")[1]
