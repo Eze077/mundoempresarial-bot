@@ -178,7 +178,7 @@ def _draw_title(dr, text, x, y, max_w, base_size, max_lines=4, color=BLANCO):
 HANDLES = {
     "x":  "@EmpresarialAR",
     "fb": "fb.com/MundoEmpresarial.AR",
-    "li": "linkedin.com/company/mundoempresarial-ar",
+    "li": "linkedin.com/company/mundo-empresarial-ar",
     "ig": "@empresarialar",
     "tg": "t.me/MundoEmpresarial_AR",
     "wa": "www.mundoempresarial.ar",
