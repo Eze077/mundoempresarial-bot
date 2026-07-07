@@ -6476,18 +6476,17 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["awaiting_manual_harness_title"] = True
                 return
 
-            # TODO el trabajo pesado en un thread: score_article carga el cache de entidades
-            # (WP/DB) y enqueue toca sqlite — sync en el loop CONGELABAN el bot entero si
-            # Ferozo/WARP se colgaba (freeze del 7/7 08:22, notas sin procesar).
+            # Link MANUAL de Leo: NO calcular score_article (cargaba el cache de entidades
+            # vía WP/Ferozo y se colgaba — freezes del 7/7). Leo ya curó la nota con mandarla:
+            # score fijo alto. Todo en thread + timeout para que un cuelgue nunca trabe la fila.
             def _mk_job_hl():
-                score = max(7.0, _score_hl(title_hl, text_hl[:500]))
                 hilo = hilo_hint or (3 if es_entrevista_opinion(url, title_hl, text_hl) else 2)
                 content = {"title": title_hl, "excerpt": excerpt_hl,
                            "source_name": url.split("/")[2] if "/" in url else url,
                            "text": text_hl[:3000]}
                 return _br_hl.enqueue("curado", source_url=url, title=title_hl,
-                                      content=content, score=score, hilo=hilo, force=True)
-            job_id_hl = await asyncio.to_thread(_mk_job_hl)
+                                      content=content, score=7.5, hilo=hilo, force=True)
+            job_id_hl = await asyncio.wait_for(asyncio.to_thread(_mk_job_hl), timeout=60)
             await msg_hl.delete()
             from agents import curador as _cur_hl
             await asyncio.to_thread(_cur_hl.run_briefing_single, job_id_hl)
