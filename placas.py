@@ -174,6 +174,18 @@ def _draw_title(dr, text, x, y, max_w, base_size, max_lines=4, color=BLANCO):
     return y + min(len(lines), max_lines) * lh
 
 
+# Dirección de cada red (pie de placa) — pedido de Leo 6/7
+HANDLES = {
+    "x":  "@EmpresarialAR",
+    "fb": "fb.com/MundoEmpresarial.AR",
+    "li": "linkedin.com/company/mundoempresarial-ar",
+    "ig": "@empresarialar",
+    "tg": "t.me/MundoEmpresarial_AR",
+    "wa": "www.mundoempresarial.ar",
+    "story": "www.mundoempresarial.ar",
+}
+
+
 # ── Layouts por formato ────────────────────────────────────────────────────────
 
 def _placa_cuadrada(w, h, titulo, categoria, foto):
@@ -192,7 +204,7 @@ def _placa_cuadrada(w, h, titulo, categoria, foto):
     return img
 
 
-def _placa_apaisada(w, h, titulo, categoria, foto):
+def _placa_apaisada(w, h, titulo, categoria, foto, handle=""):
     """FB 1200×630 / LinkedIn 1200×627 / X 1600×900: columna navy izq + foto der."""
     img = Image.new("RGB", (w, h), NAVY)
     dr = ImageDraw.Draw(img, "RGBA")
@@ -202,11 +214,38 @@ def _placa_apaisada(w, h, titulo, categoria, foto):
     _header(img, dr, pad, int(h * 0.07), logo_d=int(h * 0.10), wm_size=int(h * 0.048))
     _chip(dr, pad, int(h * 0.24), categoria, size=int(h * 0.038))
     _draw_title(dr, titulo, pad, int(h * 0.36), col - pad * 2, int(h * 0.088), max_lines=5)
-    f = _f("500", int(h * 0.038))
-    dr.text((pad, h - int(h * 0.10)), "La Voz de las Pymes", font=f, fill=SALMON)
+    f = _f("500", int(h * 0.036))
+    y_foot = h - int(h * 0.10)
+    dr.text((pad, y_foot), "La Voz de las Pymes", font=f, fill=SALMON)
+    if handle:
+        dr.text((pad, y_foot + int(h * 0.048)), handle, font=f, fill=PERI)
     # divisor naranja + foto full-bleed derecha
     dr.rectangle([col, 0, col + max(5, int(w * 0.005)), h], fill=NARANJA)
     _photo(img, foto, (col + max(5, int(w * 0.005)), 0, w, h), radius=0)
+    return img
+
+
+def _placa_ig34(w, h, titulo, categoria, foto, handle="@empresarialar"):
+    """Instagram NATIVA 3:4 (1080×1440): header y pie compactos → foto y título más grandes
+    (feedback de Leo 6/7). Sin padding: el formato es 3:4 de origen (la grilla no recorta)."""
+    img = Image.new("RGB", (w, h), NAVY)
+    dr = ImageDraw.Draw(img, "RGBA")
+    _rings(dr, w, h)
+    # header compacto en UNA línea: logo chico + wordmark + chip a la derecha
+    _header(img, dr, 50, 36, logo_d=56, wm_size=30)
+    f_ch = _f("600", 24)
+    ch_t = categoria.upper()
+    ch_w = dr.textlength(ch_t, font=f_ch) + 40
+    dr.rounded_rectangle([w - 50 - ch_w, 42, w - 50, 42 + 46], radius=8, fill=NARANJA)
+    dr.text((w - 50 - ch_w + 20, 52), ch_t, font=f_ch, fill=BLANCO)
+    # foto GRANDE
+    _photo(img, foto, (50, 128, w - 50, 900))
+    # título GRANDE
+    _draw_title(dr, titulo, 50, 940, w - 100, 78, max_lines=5)
+    # pie compacto en una línea
+    f = _f("500", 26)
+    dr.text((50, h - 62), "La Voz de las Pymes", font=f, fill=SALMON)
+    dr.text((w - 50 - dr.textlength(handle, font=f), h - 62), handle, font=f, fill=PERI)
     return img
 
 
@@ -230,12 +269,13 @@ def _placa_story(w, h, titulo, categoria, foto):
 
 
 FORMATOS = {
-    "ig":    (1080, 1080, _placa_cuadrada),
+    "ig":    (1080, 1440, _placa_ig34),      # nativa 3:4 (grilla IG sin recorte)
     "tg":    (1080, 1080, _placa_cuadrada),
     "fb":    (1200, 630, _placa_apaisada),
     "li":    (1200, 627, _placa_apaisada),
     "x":     (1600, 900, _placa_apaisada),
     "story": (1080, 1920, _placa_story),
+    "wa":    (1080, 1920, _placa_story),     # estado de WhatsApp (misma pieza que story)
 }
 
 
@@ -244,7 +284,12 @@ def generar_placa(formato: str, titulo: str, categoria: str = "Noticias",
     """Genera la placa PNG del formato pedido con la identidad ME."""
     ensure_fonts()
     w, h, fn = FORMATOS[formato]
-    img = fn(w, h, (titulo or "").strip(), (categoria or "Noticias").strip(), foto_bytes)
+    titulo, categoria = (titulo or "").strip(), (categoria or "Noticias").strip()
+    handle = HANDLES.get(formato, "")
+    try:
+        img = fn(w, h, titulo, categoria, foto_bytes, handle)
+    except TypeError:
+        img = fn(w, h, titulo, categoria, foto_bytes)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
