@@ -6483,7 +6483,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 hilo = hilo_hint or (3 if es_entrevista_opinion(url, title_hl, text_hl) else 2)
                 content = {"title": title_hl, "excerpt": excerpt_hl,
                            "source_name": url.split("/")[2] if "/" in url else url,
-                           "text": text_hl[:3000]}
+                           # 8000 (antes 3000): con poco contexto GPT alucina más — caso
+                           # Ayerra 7/7 ("secretario de Macri" + "20 mil pymes" inventados)
+                           "text": text_hl[:8000]}
                 return _br_hl.enqueue("curado", source_url=url, title=title_hl,
                                       content=content, score=7.5, hilo=hilo, force=True)
             job_id_hl = await asyncio.wait_for(asyncio.to_thread(_mk_job_hl), timeout=60)
