@@ -282,7 +282,10 @@ FORMATOS = {
 def generar_placa(formato: str, titulo: str, categoria: str = "Noticias",
                   foto_bytes: bytes = None) -> bytes:
     """Genera la placa PNG del formato pedido con la identidad ME."""
-    ensure_fonts()
+    try:
+        ensure_fonts()   # no-op si ya están; si github no responde y FALTAN, _f fallará abajo
+    except Exception as e:
+        log.warning(f"ensure_fonts: {e}")
     w, h, fn = FORMATOS[formato]
     titulo, categoria = (titulo or "").strip(), (categoria or "Noticias").strip()
     handle = HANDLES.get(formato, "")

@@ -5316,9 +5316,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = [s for s in slots if _rec.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", s)]
         ok = [f"{int(s.split(':')[0]):02d}:{s.split(':')[1]}" for s in ok]
         if not ok or len(ok) != len(slots):
-            context.user_data["awaiting_ciclaje_horarios"] = True
+            # NO re-armar el flag: si el texto no es una lista de horarios, se cancela
+            # (si se re-armara, este bloque se tragaría URLs/títulos que Leo mande después).
             await update.message.reply_text(
-                "Formato inválido. Pasame horarios HH:MM separados por coma, ej: 08:00, 13:00, 19:00")
+                "Eso no parece una lista de horarios — ciclaje SIN cambios. "
+                "Para reintentar, tocá 🕘 Cambiar horarios de nuevo (ej: 08:00, 13:00, 19:00).")
             return
         import sys as _sysc
         _sysc.path.insert(0, "/opt/me-harness")
@@ -8893,6 +8895,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ── Aprobar ──────────────────────────────────────────────────────
             if action == "h_cur_approve" and arg:
                 job_id = int(arg)
+                _jb = _br.get_job(job_id)
+                if not _jb or _jb.get("stage") != "curado":
+                    await query.answer(f"La nota #{job_id} ya no está en curado "
+                                       f"({(_jb or {}).get('stage', 'inexistente')}).", show_alert=True)
+                    return
                 state  = _load_state(job_id)
                 inst   = state.get("instructions", "")
                 ok     = _cur.approve(job_id, instructions=inst)
@@ -8951,10 +8958,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                 try:
-                    await query.edit_message_text(
-                        (f"✅ <b>{done} nota(s) aprobadas</b> → cola de redacción."
-                         if done else "No marcaste ninguna nota. Tocá ☐ para marcar y reintentá."),
-                        parse_mode="HTML")
+                    if done:
+                        await query.edit_message_text(
+                            f"✅ <b>{done} nota(s) aprobadas</b> → cola de redacción.",
+                            parse_mode="HTML")
+                    else:
+                        # 0 marcadas: avisar SIN borrar el teclado (si no, Leo no puede marcar)
+                        await query.answer("No marcaste ninguna. Tocá ☐ para marcar y reintentá.",
+                                           show_alert=True)
                 except Exception:
                     pass
 
@@ -8972,8 +8983,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 needed = max(0, _n_cfg - len(keep))
                 if needed == 0:
                     try:
-                        await query.edit_message_text(
-                            f"Ya marcaste las {_n_cfg} — tocá «Aprobar marcadas».")
+                        # aviso SIN borrar el teclado (el botón que necesita sigue ahí)
+                        await query.answer(f"Ya marcaste las {_n_cfg} — tocá «Aprobar marcadas».",
+                                           show_alert=True)
                     except Exception:
                         pass
                 else:
