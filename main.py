@@ -5386,8 +5386,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo=bio,
             caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
             parse_mode="Markdown",
-            reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True),
-                                         fp.get("wp_on", True), fp.get("li_on", False)),
+            reply_markup=_build_frase_kb(fp),
         )
         return
 
@@ -9919,59 +9918,26 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ─── Frases flow ─────────────────────────────────────────────────────────────
     if query.data in (
-        "frase_toggle_tw", "frase_toggle_tg", "frase_toggle_wp", "frase_toggle_li", "frase_cancel",
+        "frase_cancel",
         "frase_pub", "frase_schedule", "fs_back_to_preview",
         "fs_to_ht", "fs_confirm_ht", "fs_change_ht_pre",
         "fs_morning", "fs_noon", "fs_evening",
         "fs_custom", "fs_hour_write", "fs_confirm_custom",
         "frase_tweet", "frase_no_tweet", "frase_change_ht",
         "frase_set_kicker", "frase_set_tag", "frase_set_texto",
-    ) or query.data.startswith("fs_day_") or query.data.startswith("fs_h_"):
+    ) or query.data.startswith(("frase_toggle_", "fs_day_", "fs_h_")):
 
         fp = context.user_data.get("frase_pending")
 
-        if query.data == "frase_toggle_tw":
+        if query.data.startswith("frase_toggle_"):
             if not fp:
                 await query.edit_message_caption(caption="Error: no hay frase pendiente.")
                 return
-            fp["tw_on"] = not fp.get("tw_on", True)
+            # tw/tg/wp/li/igf/igs/wa → tw_on/tg_on/wp_on/li_on/igf_on/igs_on/wa_on
+            key = query.data.replace("frase_toggle_", "") + "_on"
+            fp[key] = not _frase_flag(fp, key)
             context.user_data["frase_pending"] = fp
-            await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp["tw_on"], fp.get("tg_on", True), fp.get("wp_on", True), fp.get("li_on", False))
-            )
-            return
-
-        if query.data == "frase_toggle_tg":
-            if not fp:
-                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
-                return
-            fp["tg_on"] = not fp.get("tg_on", True)
-            context.user_data["frase_pending"] = fp
-            await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp["tg_on"], fp.get("wp_on", True), fp.get("li_on", False))
-            )
-            return
-
-        if query.data == "frase_toggle_wp":
-            if not fp:
-                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
-                return
-            fp["wp_on"] = not fp.get("wp_on", True)
-            context.user_data["frase_pending"] = fp
-            await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp["wp_on"], fp.get("li_on", False))
-            )
-            return
-
-        if query.data == "frase_toggle_li":
-            if not fp:
-                await query.edit_message_caption(caption="Error: no hay frase pendiente.")
-                return
-            fp["li_on"] = not fp.get("li_on", False)
-            context.user_data["frase_pending"] = fp
-            await query.edit_message_reply_markup(
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp.get("wp_on", True), fp["li_on"])
-            )
+            await query.edit_message_reply_markup(reply_markup=_build_frase_kb(fp))
             return
 
         if query.data in ("frase_set_kicker", "frase_set_tag", "frase_set_texto"):
@@ -10008,7 +9974,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(
                 caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
                 parse_mode="Markdown",
-                reply_markup=_build_frase_kb(fp.get("tw_on", True), fp.get("tg_on", True), fp.get("wp_on", True), fp.get("li_on", False)),
+                reply_markup=_build_frase_kb(fp),
             )
             return
 
@@ -10063,6 +10029,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res_lines.append(f"✅ LinkedIn (página): {li_org_url}")
                 else:
                     res_lines.append("❌ LinkedIn (página): ver logs")
+
+            res_lines.extend(await _frase_ig_wa(
+                context, query.message.chat_id,
+                _frase_flag(fp, "igf_on"), _frase_flag(fp, "igs_on"), _frase_flag(fp, "wa_on"),
+                frase, img_bytes, post_url, custom_ht))
 
             res_text = "\n".join(res_lines)
             await query.edit_message_caption(caption=res_text)
@@ -13136,19 +13107,27 @@ def _wait_for_lock_release(max_wait: int = 20):
 
 # ─── Frases: keyboards ────────────────────────────────────────────────────────
 
-def _build_frase_kb(tw_on: bool, tg_on: bool, wp_on: bool = True, li_on: bool = False) -> InlineKeyboardMarkup:
-    tw_label = "✅ Twitter" if tw_on else "☐ Twitter"
-    tg_label = "✅ Canal TG" if tg_on else "☐ Canal TG"
-    wp_label = "✅ WordPress" if wp_on else "☐ WordPress"
-    li_label = "✅ LinkedIn" if li_on else "☐ LinkedIn"
+def _frase_flag(fp: dict, key: str) -> bool:
+    """Flag de red del flujo /frases. Todos ON por defecto salvo LinkedIn."""
+    return bool(fp.get(key, key != "li_on"))
+
+
+def _build_frase_kb(fp: dict) -> InlineKeyboardMarkup:
+    def _lbl(txt, key):
+        return ("✅ " if _frase_flag(fp, key) else "☐ ") + txt
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(tw_label, callback_data="frase_toggle_tw"),
-            InlineKeyboardButton(tg_label, callback_data="frase_toggle_tg"),
+            InlineKeyboardButton(_lbl("Twitter", "tw_on"), callback_data="frase_toggle_tw"),
+            InlineKeyboardButton(_lbl("Canal TG", "tg_on"), callback_data="frase_toggle_tg"),
         ],
         [
-            InlineKeyboardButton(wp_label, callback_data="frase_toggle_wp"),
-            InlineKeyboardButton(li_label, callback_data="frase_toggle_li"),
+            InlineKeyboardButton(_lbl("WordPress", "wp_on"), callback_data="frase_toggle_wp"),
+            InlineKeyboardButton(_lbl("LinkedIn", "li_on"), callback_data="frase_toggle_li"),
+        ],
+        [
+            InlineKeyboardButton(_lbl("IG feed", "igf_on"), callback_data="frase_toggle_igf"),
+            InlineKeyboardButton(_lbl("IG story", "igs_on"), callback_data="frase_toggle_igs"),
+            InlineKeyboardButton(_lbl("WhatsApp", "wa_on"), callback_data="frase_toggle_wa"),
         ],
         [
             InlineKeyboardButton("✏️ Texto", callback_data="frase_set_texto"),
@@ -13377,13 +13356,17 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error generando imagen: {e}")
         return
 
-    context.user_data["frase_pending"] = {
+    fp = {
         "texto":    frase,
         "img_bytes": img_bytes,
         "tw_on":    True,
         "tg_on":    True,
         "wp_on":    True,
+        "igf_on":   True,
+        "igs_on":   True,
+        "wa_on":    True,
     }
+    context.user_data["frase_pending"] = fp
     context.user_data.pop("frase_custom_ht", None)
     context.user_data.pop("frase_sched_ht", None)
 
@@ -13394,7 +13377,7 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=bio,
         caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
         parse_mode="Markdown",
-        reply_markup=_build_frase_kb(tw_on=True, tg_on=True, wp_on=True, li_on=False),
+        reply_markup=_build_frase_kb(fp),
     )
 
 
@@ -13407,6 +13390,63 @@ async def _frase_edit(query, caption: str, parse_mode: str = None, reply_markup=
         await query.edit_message_caption(caption=caption, **kwargs)
     else:
         await query.edit_message_text(caption, **kwargs)
+
+
+async def _frase_ig_wa(context, chat_id, igf_on, igs_on, wa_on,
+                       frase, img_bytes, post_url, custom_ht):
+    """IG feed/story (Graph API vía redes del harness) + entrega WhatsApp manual.
+    La placa master (cuadrada) se adapta con pad_placa: feed 3:4, story/estado 9:16.
+    Devuelve las líneas de resultado (✅/❌ por destino). Todo en to_thread+timeout
+    — nada sync bloqueante en el loop del bot."""
+    lines = []
+    if not img_bytes:
+        return lines
+    from frases_gen import pad_placa
+    if igf_on or igs_on:
+        try:
+            import sys as _sys_ig
+            if "/opt/me-harness" not in _sys_ig.path:
+                _sys_ig.path.insert(0, "/opt/me-harness")
+            from agents import redes as _redes
+            cap = f"{frase}\n\n{custom_ht}"
+            if igf_on:
+                png = await asyncio.to_thread(pad_placa, img_bytes, 1080, 1440)
+                r = await asyncio.wait_for(
+                    asyncio.to_thread(_redes.ig_publicar_bytes, png, cap, False,
+                                      f"placa frase {frase[:50]}"),
+                    timeout=120)
+                lines.append("✅ IG feed" if r.get("ok")
+                             else f"❌ IG feed: {str(r.get('error'))[:60]}")
+            if igs_on:
+                png = await asyncio.to_thread(pad_placa, img_bytes, 1080, 1920)
+                r = await asyncio.wait_for(
+                    asyncio.to_thread(_redes.ig_publicar_bytes, png, cap, True,
+                                      f"placa frase story {frase[:50]}"),
+                    timeout=120)
+                lines.append("✅ IG story" if r.get("ok")
+                             else f"❌ IG story: {str(r.get('error'))[:60]}")
+        except asyncio.TimeoutError:
+            lines.append("❌ Instagram: timeout")
+        except Exception as e:
+            lines.append(f"❌ Instagram: {str(e)[:60]}")
+    if wa_on and chat_id:
+        # WhatsApp no tiene API de publicación → se entrega la placa formato estado
+        # (9:16) + el texto aparte, listos para subir a mano.
+        try:
+            png = await asyncio.to_thread(pad_placa, img_bytes, 1080, 1920)
+            bio = io.BytesIO(png)
+            bio.name = "frase_whatsapp.png"
+            await context.bot.send_photo(
+                chat_id=int(chat_id), photo=bio,
+                caption="🟢 Para WhatsApp (estado/canal): descargá la placa y subila. Texto 👇")
+            wa_copy = frase
+            if post_url:
+                wa_copy += f"\n\n{utm_url(post_url, 'whatsapp')}"
+            await context.bot.send_message(chat_id=int(chat_id), text=wa_copy)
+            lines.append("🟢 WhatsApp: placa + texto (subida manual)")
+        except Exception as e:
+            lines.append(f"❌ WhatsApp: {str(e)[:60]}")
+    return lines
 
 
 async def _do_frase_schedule(query, context, target):
@@ -13461,6 +13501,9 @@ async def _do_frase_schedule(query, context, target):
         "tw_on":     tw_on,
         "tg_on":     tg_on,
         "li_on":     li_on,
+        "igf_on":    _frase_flag(fp, "igf_on"),
+        "igs_on":    _frase_flag(fp, "igs_on"),
+        "wa_on":     _frase_flag(fp, "wa_on"),
         "chat_id":   query.message.chat_id,
         "custom_ht": custom_ht,
         "kicker":    fp.get("kicker"),
@@ -13527,6 +13570,11 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
             results.append("✅ Canal TG")
         except Exception as e:
             results.append(f"❌ Canal TG: {e}")
+
+    results.extend(await _frase_ig_wa(
+        context, chat_id,
+        job_data.get("igf_on", False), job_data.get("igs_on", False), job_data.get("wa_on", False),
+        frase, img_bytes, post_url, custom_ht))
 
     if tw_on and chat_id and img_bytes:
         tweet_text = frase

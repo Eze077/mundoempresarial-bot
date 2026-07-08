@@ -87,6 +87,24 @@ def _replace_header(img, draw, kicker: str, tag: str):
     draw.text((right - w, y_txt), tag_txt, fill=celeste, font=f)
 
 
+def pad_placa(png_bytes: bytes, target_w: int, target_h: int) -> bytes:
+    """Adapta la placa a otro formato SIN tocar el diseño: extiende el fondo con el
+    color del borde (navy) y centra la placa en el canvas destino. Usos:
+    IG feed 3:4 (1080, 1440) · IG story / estado de WhatsApp 9:16 (1080, 1920)."""
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    w, h = img.size
+    scale = min(target_w / w, target_h / h)
+    if scale < 1:
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        w, h = img.size
+    bg = img.getpixel((3, h // 2))
+    canvas = Image.new("RGB", (target_w, target_h), bg)
+    canvas.paste(img, ((target_w - w) // 2, (target_h - h) // 2))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def generate_frase_image(frase: str, kicker: str = None, tag: str = None) -> bytes:
     """kicker/tag: reemplazan los textos del header de la plantilla ("FRASE DESTACADA" /
     "INSPIRACIÓN") — p.ej. para eventos: kicker="Día de la Independencia", tag="9 de julio"."""
