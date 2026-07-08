@@ -5285,6 +5285,41 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+def _dup_manual_hl(titulo: str):
+    """Posible duplicado de un link manual: compara el título contra los jobs recientes
+    del harness (7 días, cualquier stage vivo) por Jaccard de palabras. El dedup
+    semántico corre en curador/briefing pero los links manuales lo bypassean — este
+    es el aviso mínimo (caso Tenreyro 8/7: la misma noticia subida dos veces).
+    Devuelve (jaccard, {id, stage, title}) o None."""
+    import sqlite3 as _sq3
+    stop = {"de", "la", "el", "los", "las", "del", "en", "y", "a", "un", "una", "que",
+            "por", "con", "para", "al", "se", "su", "es", "como", "más", "mas", "le"}
+
+    def _words(t):
+        return {w for w in re.findall(r"[a-záéíóúüñ0-9]+", (t or "").lower())
+                if w not in stop and len(w) > 2}
+
+    w1 = _words(titulo)
+    if not w1:
+        return None
+    db = _sq3.connect("/opt/me-harness/harness.db", timeout=10)
+    db.row_factory = _sq3.Row
+    rows = db.execute(
+        "SELECT id, stage, title FROM jobs "
+        "WHERE stage IN ('curado','cola','redaccion','publicacion','done') "
+        "AND created_at >= datetime('now','-7 days') ORDER BY id DESC LIMIT 300").fetchall()
+    db.close()
+    best = None
+    for r in rows:
+        w2 = _words(r["title"])
+        if not w2:
+            continue
+        j = len(w1 & w2) / len(w1 | w2)
+        if j >= 0.5 and (best is None or j > best[0]):
+            best = (j, dict(r))
+    return best
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ADMIN_CHAT_ID
     # Ignorar mensajes de canales (el bot es admin del canal; no debe procesar sus posts)
@@ -6505,6 +6540,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 context.user_data["awaiting_manual_harness_title"] = True
                 return
+
+            # Aviso de posible duplicado (no bloquea: Leo decide)
+            try:
+                dup_hl = await asyncio.wait_for(asyncio.to_thread(_dup_manual_hl, title_hl), timeout=10)
+                if dup_hl:
+                    _, dj = dup_hl
+                    await update.message.reply_text(
+                        f"⚠️ Posible duplicado: ya hay un job parecido en el pipeline:\n"
+                        f"«{dj['title'][:90]}» (#{dj['id']}, {dj['stage']})\n"
+                        f"La sigo procesando igual — si es la misma noticia, rechazá una de las dos.")
+            except Exception:
+                pass
 
             # Link MANUAL de Leo: NO calcular score_article (cargaba el cache de entidades
             # vía WP/Ferozo y se colgaba — freezes del 7/7). Leo ya curó la nota con mandarla:
