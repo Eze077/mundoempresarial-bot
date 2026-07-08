@@ -20,6 +20,8 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler,
     ContextTypes,
+    TypeHandler,
+    ApplicationHandlerStop,
 )
 
 logging.basicConfig(
@@ -59,6 +61,35 @@ _LAST_WP_ERROR = ""
 BOT_PAUSED = False
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
+
+# ── Control de acceso (2026-07-07) ────────────────────────────────────────────
+# El bot NO tenía filtro de identidad: cualquiera que lo encontrara podía mandar
+# /borrar, /publicador, tocar botones destructivos. Este guard global (registrado
+# con TypeHandler en group=-1) corre ANTES que todo y frena a cualquiera que no sea
+# el operador. Un solo lugar cubre comandos + botones + texto + fotos.
+def _admin_ids() -> set:
+    """Ids autorizados. Set (fácil de extender a lista); hoy solo ADMIN_CHAT_ID."""
+    ids = set()
+    for raw in (ADMIN_CHAT_ID or "").replace(";", ",").split(","):
+        raw = raw.strip()
+        if raw.isdigit():
+            ids.add(int(raw))
+    return ids
+
+
+async def _solo_admin(update, context):
+    """Guard global: solo el operador opera el bot. Fail-closed (sin admin configurado,
+    nadie pasa). Silencio + log ante un extraño (no confirmarle que el bot existe)."""
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return  # channel post / my_chat_member: no es un comando de usuario, seguir
+    if user.id in _admin_ids():
+        return  # operador → flujo normal
+    logger.warning("ACCESO DENEGADO: user=%s (@%s) tipo=%s",
+                   user.id, getattr(user, "username", "?"),
+                   "callback" if update.callback_query else "mensaje")
+    raise ApplicationHandlerStop  # frena TODA la cadena de handlers para este update
+
 
 _ENV_FILE = "/etc/mundoempresarial-bot.env"
 
@@ -15376,6 +15407,11 @@ def main():
     _wait_for_lock_release()
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
+    # Control de acceso GLOBAL: corre antes que todo (group=-1). Solo el operador pasa;
+    # a cualquier otro le frena la cadena entera de handlers. Ver _solo_admin.
+    if not _admin_ids():
+        logger.warning("⚠️ ADMIN_CHAT_ID vacío — el guard bloqueará a TODOS (fail-closed).")
+    app.add_handler(TypeHandler(Update, _solo_admin), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("STOP", cmd_stop))
     app.add_handler(CommandHandler("RESUME", cmd_resume))
