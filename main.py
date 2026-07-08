@@ -5293,13 +5293,19 @@ def _dup_manual_hl(titulo: str):
     Devuelve (jaccard, {id, stage, title}) o None."""
     import sqlite3 as _sq3
     stop = {"de", "la", "el", "los", "las", "del", "en", "y", "a", "un", "una", "que",
-            "por", "con", "para", "al", "se", "su", "es", "como", "más", "mas", "le"}
+            "por", "con", "para", "al", "se", "su", "es", "como", "más", "mas", "le",
+            "sera", "será", "nueva", "nuevo"}
 
-    def _words(t):
-        return {w for w in re.findall(r"[a-záéíóúüñ0-9]+", (t or "").lower())
+    def _stems(t):
+        # stems de 5 chars: "economistas"/"economista" y "jefa"/"jefe" cuentan igual
+        return {w[:5] for w in re.findall(r"[a-záéíóúüñ0-9]+", (t or "").lower())
                 if w not in stop and len(w) > 2}
 
-    w1 = _words(titulo)
+    def _nombres(t):
+        # nombres propios (dos palabras capitalizadas seguidas): señal fuerte de misma noticia
+        return set(re.findall(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúüñ]+ [A-ZÁÉÍÓÚÑ][a-záéíóúüñ]+\b", t or ""))
+
+    w1, n1 = _stems(titulo), _nombres(titulo)
     if not w1:
         return None
     db = _sq3.connect("/opt/me-harness/harness.db", timeout=10)
@@ -5311,12 +5317,14 @@ def _dup_manual_hl(titulo: str):
     db.close()
     best = None
     for r in rows:
-        w2 = _words(r["title"])
+        w2 = _stems(r["title"])
         if not w2:
             continue
-        j = len(w1 & w2) / len(w1 | w2)
-        if j >= 0.5 and (best is None or j > best[0]):
-            best = (j, dict(r))
+        ov = len(w1 & w2) / min(len(w1), len(w2))          # overlap coefficient
+        nombre_comun = bool(n1 & _nombres(r["title"]))
+        score = max(ov, 0.99 if (nombre_comun and ov >= 0.3) else 0)
+        if score >= 0.55 and (best is None or score > best[0]):
+            best = (score, dict(r))
     return best
 
 
