@@ -5513,7 +5513,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── /encuesta: pregunta → opciones (2-6) → notas (1-4) → redes/acción ───────
     if context.user_data.get("awaiting_enc_pregunta"):
         context.user_data.pop("awaiting_enc_pregunta")
-        context.user_data.setdefault("enc", {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True}})
+        context.user_data.setdefault("enc", {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True, "wa": True}})
         context.user_data["enc"]["pregunta"] = text_in.strip()
         context.user_data["awaiting_enc_opciones"] = True
         await update.message.reply_text(
@@ -5574,7 +5574,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await update.message.reply_text("⚠️ Se perdió la encuesta. Reiniciá con /encuesta."); return
         await update.message.reply_text(f"⏳ Programando para {target.strftime('%d/%m %H:%M')}…")
-        txt = await _do_encuesta_publish(context, fp, target)
+        txt = await _do_encuesta_publish(context, fp, target, chat_id=update.message.chat_id)
         context.user_data.pop("enc", None)
         await update.message.reply_text(txt, disable_web_page_preview=True)
         return
@@ -7149,7 +7149,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── /encuesta: toggles de redes + publicar / programar / cancelar ───────────
-    if query.data in ("enc_tg", "enc_x", "enc_li", "enc_fb", "enc_ig"):
+    if query.data in ("enc_tg", "enc_x", "enc_li", "enc_fb", "enc_ig", "enc_wa"):
         fp = context.user_data.get("enc")
         if not fp:
             await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
@@ -7189,7 +7189,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
         await query.edit_message_text("📤 Publicando la encuesta y difundiendo…")
-        txt = await _do_encuesta_publish(context, fp, None)
+        txt = await _do_encuesta_publish(context, fp, None, chat_id=query.message.chat_id)
         context.user_data.pop("enc", None)
         await query.edit_message_text(txt, disable_web_page_preview=True)
         return
@@ -13541,18 +13541,48 @@ def _build_enc_kb(fp: dict) -> InlineKeyboardMarkup:
          InlineKeyboardButton(_l("X", "x"), callback_data="enc_x"),
          InlineKeyboardButton(_l("LinkedIn", "li"), callback_data="enc_li")],
         [InlineKeyboardButton(_l("Facebook", "fb"), callback_data="enc_fb"),
-         InlineKeyboardButton(_l("Instagram", "ig"), callback_data="enc_ig")],
+         InlineKeyboardButton(_l("Instagram", "ig"), callback_data="enc_ig"),
+         InlineKeyboardButton(_l("WhatsApp", "wa"), callback_data="enc_wa")],
         [InlineKeyboardButton("🚀 Publicar ahora", callback_data="enc_pub"),
          InlineKeyboardButton("⏰ Programar", callback_data="enc_sched")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="enc_cancel")]])
 
 
-async def _do_encuesta_publish(context, fp: dict, scheduled_for) -> str:
+async def _enc_wa_delivery(context, chat_id, wp_id, pregunta, wp_url):
+    """WhatsApp no tiene API → el bot le manda a Leo la foto de la nota + el copy para
+    subir a mano (mismo criterio que /frases)."""
+    def _foto():
+        import requests as _rq
+        try:
+            p = _rq.get(f"{WP_URL}/wp-json/wp/v2/posts/{wp_id}?_fields=featured_media", timeout=15).json()
+            mid = p.get("featured_media")
+            if not mid:
+                return None
+            m = _rq.get(f"{WP_URL}/wp-json/wp/v2/media/{mid}?_fields=source_url", timeout=15).json()
+            src = m.get("source_url")
+            return _rq.get(src, timeout=20).content if src else None
+        except Exception:
+            return None
+    copy = f"🗳️ {pregunta}\n\nVotá acá 👉 {utm_url(wp_url, 'whatsapp')}"
+    try:
+        foto = await asyncio.to_thread(_foto)
+        if foto:
+            bio = io.BytesIO(foto); bio.name = "encuesta.jpg"
+            await context.bot.send_photo(chat_id=int(chat_id), photo=bio,
+                caption="🟢 Para WhatsApp (estado/grupo): descargá la foto y subila. Texto 👇")
+        await context.bot.send_message(chat_id=int(chat_id), text=copy)
+    except Exception as e:
+        logger.warning(f"wa delivery encuesta: {e}")
+
+
+async def _do_encuesta_publish(context, fp: dict, scheduled_for, chat_id=None) -> str:
     """Llama al agente encuesta.publish en thread (nada bloqueante en el loop)."""
     import sys as _se
     if "/opt/me-harness" not in _se.path:
         _se.path.insert(0, "/opt/me-harness")
-    canales = tuple(k for k, v in fp.get("canales", {}).items() if v)
+    cdict = fp.get("canales", {})
+    wa_on = bool(cdict.get("wa"))
+    canales = tuple(k for k, v in cdict.items() if v and k != "wa")   # wa se entrega manual
 
     def _run():
         from agents import encuesta as _E
@@ -13567,13 +13597,19 @@ async def _do_encuesta_publish(context, fp: dict, scheduled_for) -> str:
     dif = r.get("difusion") or {}
     okred = [n for n, k in (("TG", "tg_msg_id"), ("X", "tweet_id"), ("FB", "fb_id"),
                             ("IG", "ig_id"), ("LI", "li_urn")) if dif.get(k)]
+    if dif.get("tg_poll_msg_id"):
+        okred.append("poll TG")
+    # WhatsApp: entrega manual a Leo (solo publicación inmediata)
+    if wa_on and scheduled_for is None and chat_id:
+        await _enc_wa_delivery(context, chat_id, r.get("wp_id"), fp["pregunta"], r.get("wp_url"))
+        okred.append("WhatsApp (manual)")
     when = f"programada {scheduled_for.strftime('%d/%m %H:%M')}" if scheduled_for else "publicada"
     red = (", ".join(okred) if okred else ("se difunde a la hora" if scheduled_for else "—"))
     return f"✅ Encuesta {when}\n{r.get('wp_url')}\nRedes: {red}"
 
 
 async def cmd_encuesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["enc"] = {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True}}
+    context.user_data["enc"] = {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True, "wa": True}}
     context.user_data["awaiting_enc_pregunta"] = True
     await update.message.reply_text(
         "🗳️ <b>Nueva encuesta</b>\n\nPasame la <b>PREGUNTA</b>.\n"
