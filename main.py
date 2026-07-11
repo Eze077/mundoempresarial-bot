@@ -5510,6 +5510,72 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(txt, parse_mode="HTML", disable_web_page_preview=True)
         return
 
+    # ── /encuesta: pregunta → opciones (2-6) → notas (1-4) → redes/acción ───────
+    if context.user_data.get("awaiting_enc_pregunta"):
+        context.user_data.pop("awaiting_enc_pregunta")
+        context.user_data.setdefault("enc", {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True}})
+        context.user_data["enc"]["pregunta"] = text_in.strip()
+        context.user_data["awaiting_enc_opciones"] = True
+        await update.message.reply_text(
+            "📊 Ahora las <b>OPCIONES</b>, una por línea (2 a 6).\n\n"
+            "Ej:\nSí, ya frené\nAjusto precios\nTodavía aguanto", parse_mode="HTML")
+        return
+    if context.user_data.get("awaiting_enc_opciones"):
+        ops = [l.strip(" -•\t") for l in text_in.split("\n") if l.strip(" -•\t")]
+        if not (2 <= len(ops) <= 6):
+            await update.message.reply_text("Necesito entre 2 y 6 opciones (una por línea). Reenviá:")
+            return
+        context.user_data.pop("awaiting_enc_opciones")
+        context.user_data["enc"]["opciones"] = ops
+        context.user_data["awaiting_enc_notas"] = True
+        await update.message.reply_text(
+            f"✅ {len(ops)} opciones.\n📰 Ahora 1 a 4 <b>NOTAS</b> relacionadas (links o slugs, "
+            "separados por coma).\nMandá «-» si no querés notas.", parse_mode="HTML")
+        return
+    if context.user_data.get("awaiting_enc_notas"):
+        context.user_data.pop("awaiting_enc_notas")
+        raw = text_in.strip()
+        notas = [] if raw.lower() in ("-", "no", "none", "") else [x.strip() for x in raw.split(",") if x.strip()][:4]
+        fp = context.user_data.get("enc", {})
+        fp["notas"] = notas
+        await update.message.reply_text(
+            f"🗳️ Encuesta lista: «{fp.get('pregunta','')[:60]}» · {len(fp.get('opciones',[]))} opciones · "
+            f"{len(notas)} nota(s).\nElegí redes y acción:", reply_markup=_build_enc_kb(fp))
+        return
+    if context.user_data.get("awaiting_enc_hora"):
+        import re as _reh
+        from datetime import datetime as _dte, timezone as _tze, timedelta as _tde
+        _AR = _tze(_tde(hours=-3))
+        s = text_in.strip()
+        now = _dte.now(_AR)
+        m2 = _reh.match(r'^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\s+(\d{1,2}):(\d{2})$', s)
+        m1 = _reh.match(r'^(\d{1,2}):(\d{2})$', s)
+        if m2:
+            d, mo = int(m2.group(1)), int(m2.group(2))
+            y = int(m2.group(3) or now.year); y = y + 2000 if y < 100 else y
+            hh, mm = int(m2.group(4)), int(m2.group(5))
+            try:
+                target = _dte(y, mo, d, hh, mm, tzinfo=_AR)
+            except ValueError:
+                await update.message.reply_text("Fecha inválida. Reenviá DD/MM HH:MM:"); return
+        elif m1:
+            hh, mm = int(m1.group(1)), int(m1.group(2))
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        else:
+            await update.message.reply_text("Formato inválido. DD/MM HH:MM (o HH:MM para hoy):"); return
+        if target <= now + _tde(minutes=2):
+            await update.message.reply_text("⚠️ Esa hora ya pasó. Mandá una futura, o volvé y tocá «🚀 Publicar ahora».")
+            return
+        context.user_data.pop("awaiting_enc_hora")
+        fp = context.user_data.get("enc")
+        if not fp:
+            await update.message.reply_text("⚠️ Se perdió la encuesta. Reiniciá con /encuesta."); return
+        await update.message.reply_text(f"⏳ Programando para {target.strftime('%d/%m %H:%M')}…")
+        txt = await _do_encuesta_publish(context, fp, target)
+        context.user_data.pop("enc", None)
+        await update.message.reply_text(txt, disable_web_page_preview=True)
+        return
+
     # ── /notamanual: columna de autor pegada como texto ────────────────────────
     if context.user_data.get("awaiting_nota_manual"):
         context.user_data.pop("awaiting_nota_manual")
@@ -7077,6 +7143,37 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🗳️ <b>Boletín semanal — Lectores</b>\n\nPasame la <b>PREGUNTA</b> de la encuesta.\n"
             "Ej: ¿Qué va a influir más esta semana en tu empresa o negocio?", parse_mode="HTML")
+        return
+
+    # ── /encuesta: toggles de redes + publicar / programar / cancelar ───────────
+    if query.data in ("enc_tg", "enc_x", "enc_li", "enc_fb", "enc_ig"):
+        fp = context.user_data.get("enc")
+        if not fp:
+            await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
+        k = query.data[4:]
+        fp.setdefault("canales", {})[k] = not fp.get("canales", {}).get(k)
+        await query.edit_message_reply_markup(reply_markup=_build_enc_kb(fp))
+        return
+    if query.data == "enc_cancel":
+        context.user_data.pop("enc", None)
+        await query.edit_message_text("Encuesta cancelada.")
+        return
+    if query.data == "enc_sched":
+        if not context.user_data.get("enc"):
+            await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
+        context.user_data["awaiting_enc_hora"] = True
+        await query.edit_message_text(
+            "📅 Escribí cuándo publicarla:\n<b>DD/MM HH:MM</b> (o solo <b>HH:MM</b> para hoy).",
+            parse_mode="HTML")
+        return
+    if query.data == "enc_pub":
+        fp = context.user_data.get("enc")
+        if not fp:
+            await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
+        await query.edit_message_text("📤 Publicando la encuesta y difundiendo…")
+        txt = await _do_encuesta_publish(context, fp, None)
+        context.user_data.pop("enc", None)
+        await query.edit_message_text(txt, disable_web_page_preview=True)
         return
 
     # ── Boletín: elegido el público → armar el draft (GPT redacta la intro) ─────
@@ -13393,6 +13490,55 @@ def _wp_publish_frase(frase: str, img_bytes: bytes, scheduled_for=None) -> dict:
     raise RuntimeError(f"WP {r.status_code}: {r.text[:200]}")
 
 
+# ─── /encuesta: nota-encuesta interactiva + notas embebidas + difusión ─────────
+
+def _build_enc_kb(fp: dict) -> InlineKeyboardMarkup:
+    c = fp.get("canales", {})
+    def _l(txt, k):
+        return ("✅ " if c.get(k) else "☐ ") + txt
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_l("Telegram", "tg"), callback_data="enc_tg"),
+         InlineKeyboardButton(_l("X", "x"), callback_data="enc_x"),
+         InlineKeyboardButton(_l("LinkedIn", "li"), callback_data="enc_li")],
+        [InlineKeyboardButton(_l("Facebook", "fb"), callback_data="enc_fb"),
+         InlineKeyboardButton(_l("Instagram", "ig"), callback_data="enc_ig")],
+        [InlineKeyboardButton("🚀 Publicar ahora", callback_data="enc_pub"),
+         InlineKeyboardButton("⏰ Programar", callback_data="enc_sched")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="enc_cancel")]])
+
+
+async def _do_encuesta_publish(context, fp: dict, scheduled_for) -> str:
+    """Llama al agente encuesta.publish en thread (nada bloqueante en el loop)."""
+    import sys as _se
+    if "/opt/me-harness" not in _se.path:
+        _se.path.insert(0, "/opt/me-harness")
+    canales = tuple(k for k, v in fp.get("canales", {}).items() if v)
+
+    def _run():
+        from agents import encuesta as _E
+        return _E.publish(fp["pregunta"], fp["opciones"], fp.get("notas"), canales, scheduled_for)
+    try:
+        r = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
+    except Exception as e:
+        return f"❌ Error: {str(e)[:150]}"
+    if not r.get("ok"):
+        return f"❌ {r.get('error')}"
+    dif = r.get("difusion") or {}
+    okred = [n for n, k in (("TG", "tg_msg_id"), ("X", "tweet_id"), ("FB", "fb_id"),
+                            ("IG", "ig_id"), ("LI", "li_urn")) if dif.get(k)]
+    when = f"programada {scheduled_for.strftime('%d/%m %H:%M')}" if scheduled_for else "publicada"
+    red = (", ".join(okred) if okred else ("se difunde a la hora" if scheduled_for else "—"))
+    return f"✅ Encuesta {when}\n{r.get('wp_url')}\nRedes: {red}"
+
+
+async def cmd_encuesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["enc"] = {"canales": {"tg": True, "x": True, "li": True, "fb": True, "ig": True}}
+    context.user_data["awaiting_enc_pregunta"] = True
+    await update.message.reply_text(
+        "🗳️ <b>Nueva encuesta</b>\n\nPasame la <b>PREGUNTA</b>.\n"
+        "Ej: Como pyme, ¿la suba de tarifas frena tu producción?", parse_mode="HTML")
+
+
 async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Genera imagen con frase y muestra preview con opciones de publicación."""
     frase = " ".join(context.args).strip() if context.args else ""
@@ -15536,6 +15682,7 @@ def main():
     app.add_handler(CommandHandler("testtwitter", cmd_testtwitter))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("frases", cmd_frases))
+    app.add_handler(CommandHandler("encuesta", cmd_encuesta))
     app.add_handler(CommandHandler("set_frases_base", cmd_set_frases_base))
     app.add_handler(CommandHandler("publicador", cmd_publicador))
     app.add_handler(CommandHandler("lector", cmd_lector))
