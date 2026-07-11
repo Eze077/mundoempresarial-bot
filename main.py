@@ -5574,8 +5574,58 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await update.message.reply_text("⚠️ Se perdió la encuesta. Reiniciá con /encuesta."); return
         await update.message.reply_text(f"⏳ Programando para {target.strftime('%d/%m %H:%M')}…")
-        txt = await _do_encuesta_publish(context, fp, target, chat_id=update.message.chat_id)
+        txt, r = await _do_encuesta_publish(context, fp, target, chat_id=update.message.chat_id)
+        nl_on = fp.get("canales", {}).get("nl")
+        if nl_on and r and r.get("ok"):
+            context.user_data["enc_nl"] = {"enc": r["enc"], "pregunta": fp["pregunta"],
+                                           "opciones": fp["opciones"], "notas": fp.get("notas")}
+            context.user_data.pop("enc", None)
+            await update.message.reply_text(txt + "\n\n📧 Newsletter — ¿a qué base?",
+                                            reply_markup=_enc_nl_base_kb())
+            return
         context.user_data.pop("enc", None)
+        await update.message.reply_text(txt, disable_web_page_preview=True)
+        return
+
+    # ── /encuesta → Newsletter: asunto custom + hora ────────────────────────────
+    if context.user_data.get("awaiting_enc_nl_asunto"):
+        context.user_data.pop("awaiting_enc_nl_asunto")
+        nl = context.user_data.get("enc_nl")
+        if not nl:
+            await update.message.reply_text("⚠️ Se perdió el newsletter."); return
+        nl["subject"] = text_in.strip()[:120]
+        await update.message.reply_text(
+            f"✅ Asunto: «{nl['subject']}». ¿Cuándo lo mando?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Enviar ahora", callback_data="enc_nl_send")],
+                [InlineKeyboardButton("📅 Programar hora", callback_data="enc_nl_sched")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="enc_nl_cancel")]]))
+        return
+    if context.user_data.get("awaiting_enc_nl_hora"):
+        import re as _rehn
+        from datetime import datetime as _dtn, timezone as _tzn, timedelta as _tdn
+        _ARn = _tzn(_tdn(hours=-3)); s = text_in.strip(); now = _dtn.now(_ARn)
+        m2 = _rehn.match(r'^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\s+(\d{1,2}):(\d{2})$', s)
+        m1 = _rehn.match(r'^(\d{1,2}):(\d{2})$', s)
+        if m2:
+            d, mo = int(m2.group(1)), int(m2.group(2)); y = int(m2.group(3) or now.year); y = y + 2000 if y < 100 else y
+            try:
+                target = _dtn(y, mo, d, int(m2.group(4)), int(m2.group(5)), tzinfo=_ARn)
+            except ValueError:
+                await update.message.reply_text("Fecha inválida. DD/MM HH:MM:"); return
+        elif m1:
+            target = now.replace(hour=int(m1.group(1)), minute=int(m1.group(2)), second=0, microsecond=0)
+        else:
+            await update.message.reply_text("Formato inválido. DD/MM HH:MM (o HH:MM):"); return
+        if target <= now + _tdn(minutes=2):
+            await update.message.reply_text("⚠️ Esa hora ya pasó. Mandá una futura."); return
+        context.user_data.pop("awaiting_enc_nl_hora")
+        nl = context.user_data.get("enc_nl")
+        if not nl:
+            await update.message.reply_text("⚠️ Se perdió el newsletter."); return
+        await update.message.reply_text(f"⏳ Programando el newsletter para {target.strftime('%d/%m %H:%M')}…")
+        txt = await _do_enc_newsletter(context, nl, target.strftime("%Y-%m-%d %H:%M:%S"))
+        context.user_data.pop("enc_nl", None)
         await update.message.reply_text(txt, disable_web_page_preview=True)
         return
 
@@ -7149,13 +7199,53 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── /encuesta: toggles de redes + publicar / programar / cancelar ───────────
-    if query.data in ("enc_tg", "enc_x", "enc_li", "enc_fb", "enc_ig", "enc_wa"):
+    if query.data in ("enc_tg", "enc_x", "enc_li", "enc_fb", "enc_ig", "enc_wa", "enc_tognl"):
         fp = context.user_data.get("enc")
         if not fp:
             await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
-        k = query.data[4:]
+        k = "nl" if query.data == "enc_tognl" else query.data[4:]
         fp.setdefault("canales", {})[k] = not fp.get("canales", {}).get(k)
         await query.edit_message_reply_markup(reply_markup=_build_enc_kb(fp))
+        return
+    # ── /encuesta → Newsletter: base → asunto/hora → armar draft + programar ────
+    if query.data.startswith("enc_nl_base:"):
+        nl = context.user_data.get("enc_nl")
+        if not nl:
+            await query.answer("Sesión perdida", show_alert=True); return
+        nl["base"] = query.data.split(":")[1]
+        await query.edit_message_text(
+            f"📧 Newsletter → base <b>{nl['base']}</b>. Asunto: <i>{nl.get('subject') or 'automático'}</i>.\n"
+            "El encabezado lo redacta la IA. ¿Cuándo lo mando?", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Enviar ahora", callback_data="enc_nl_send")],
+                [InlineKeyboardButton("📅 Programar hora", callback_data="enc_nl_sched")],
+                [InlineKeyboardButton("✏️ Escribir asunto", callback_data="enc_nl_asunto")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="enc_nl_cancel")]]))
+        return
+    if query.data == "enc_nl_asunto":
+        if not context.user_data.get("enc_nl"):
+            await query.answer("Sesión perdida", show_alert=True); return
+        context.user_data["awaiting_enc_nl_asunto"] = True
+        await query.edit_message_text("✏️ Escribí el asunto del mail:")
+        return
+    if query.data == "enc_nl_cancel":
+        context.user_data.pop("enc_nl", None)
+        await query.edit_message_text("Newsletter cancelado (la nota-encuesta sigue publicada).")
+        return
+    if query.data == "enc_nl_send":
+        nl = context.user_data.get("enc_nl")
+        if not nl:
+            await query.answer("Sesión perdida", show_alert=True); return
+        await query.edit_message_text("📤 Armando y enviando el newsletter…")
+        txt = await _do_enc_newsletter(context, nl, None)
+        context.user_data.pop("enc_nl", None)
+        await query.edit_message_text(txt, disable_web_page_preview=True)
+        return
+    if query.data == "enc_nl_sched":
+        if not context.user_data.get("enc_nl"):
+            await query.answer("Sesión perdida", show_alert=True); return
+        context.user_data["awaiting_enc_nl_hora"] = True
+        await query.edit_message_text("📅 ¿Cuándo? <b>DD/MM HH:MM</b> (o <b>HH:MM</b> hoy).", parse_mode="HTML")
         return
     if query.data == "enc_cancel":
         context.user_data.pop("enc", None)
@@ -7189,7 +7279,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
         await query.edit_message_text("📤 Publicando la encuesta y difundiendo…")
-        txt = await _do_encuesta_publish(context, fp, None, chat_id=query.message.chat_id)
+        txt, r = await _do_encuesta_publish(context, fp, None, chat_id=query.message.chat_id)
+        nl_on = fp.get("canales", {}).get("nl")
+        if nl_on and r and r.get("ok"):
+            context.user_data["enc_nl"] = {"enc": r["enc"], "pregunta": fp["pregunta"],
+                                           "opciones": fp["opciones"], "notas": fp.get("notas")}
+            context.user_data.pop("enc", None)
+            await query.edit_message_text(txt + "\n\n📧 Newsletter — ¿a qué base?",
+                                          reply_markup=_enc_nl_base_kb(), disable_web_page_preview=True)
+            return
         context.user_data.pop("enc", None)
         await query.edit_message_text(txt, disable_web_page_preview=True)
         return
@@ -13543,6 +13641,7 @@ def _build_enc_kb(fp: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(_l("Facebook", "fb"), callback_data="enc_fb"),
          InlineKeyboardButton(_l("Instagram", "ig"), callback_data="enc_ig"),
          InlineKeyboardButton(_l("WhatsApp", "wa"), callback_data="enc_wa")],
+        [InlineKeyboardButton(_l("📧 Newsletter", "nl"), callback_data="enc_tognl")],
         [InlineKeyboardButton("🚀 Publicar ahora", callback_data="enc_pub"),
          InlineKeyboardButton("⏰ Programar", callback_data="enc_sched")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="enc_cancel")]])
@@ -13608,7 +13707,40 @@ async def _do_encuesta_publish(context, fp: dict, scheduled_for, chat_id=None) -
         okred.append("WhatsApp (manual)")
     when = f"programada {scheduled_for.strftime('%d/%m %H:%M')}" if scheduled_for else "publicada"
     red = (", ".join(okred) if okred else ("se difunde a la hora" if scheduled_for else "—"))
-    return f"✅ Encuesta {when}\n{r.get('wp_url')}\nRedes: {red}"
+    return f"✅ Encuesta {when}\n{r.get('wp_url')}\nRedes: {red}", r
+
+
+def _enc_nl_base_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Base completa", callback_data="enc_nl_base:base")],
+        [InlineKeyboardButton("👀 Lectores", callback_data="enc_nl_base:lectores")],
+        [InlineKeyboardButton("⚡ Activos", callback_data="enc_nl_base:activos")],
+        [InlineKeyboardButton("❌ Sin newsletter", callback_data="enc_nl_cancel")]])
+
+
+async def _do_enc_newsletter(context, nl: dict, scheduled_at) -> str:
+    """Arma y programa el newsletter de la encuesta (comparte el enc con la web)."""
+    import sys as _se
+    if "/opt/me-harness" not in _se.path:
+        _se.path.insert(0, "/opt/me-harness")
+
+    def _run():
+        from agents import encuesta as _E
+        return _E.enviar_newsletter(nl["enc"], nl["pregunta"], nl["opciones"], nl.get("notas"),
+                                    base=nl.get("base", "base"), subject=nl.get("subject"),
+                                    scheduled_at=scheduled_at)
+    try:
+        r = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
+    except Exception as e:
+        return f"❌ Error newsletter: {str(e)[:150]}"
+    if not r.get("ok"):
+        return f"❌ Newsletter: {r.get('error')}"
+    sch = r.get("sched") or {}
+    when = "ahora" if not scheduled_at else scheduled_at[11:16]
+    warn = " ⚠️ >1000 dest (escalonado)" if sch.get("warn") else ""
+    return (f"✅ Newsletter #{r.get('campaign_id')} a <b>{nl.get('base')}</b> — {when}{warn}\n"
+            f"Asunto: {r.get('subject','')}\nDest.: {sch.get('recipients','?')}\n"
+            f"Preview: {r.get('preview','')}").replace("<b>", "").replace("</b>", "")
 
 
 async def cmd_encuesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
