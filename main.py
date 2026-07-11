@@ -13583,6 +13583,8 @@ async def _do_encuesta_publish(context, fp: dict, scheduled_for, chat_id=None) -
     cdict = fp.get("canales", {})
     wa_on = bool(cdict.get("wa"))
     canales = tuple(k for k, v in cdict.items() if v and k != "wa")   # wa se entrega manual
+    if "ig" in canales:
+        canales = canales + ("ig_story",)   # la encuesta también va a IG story
 
     def _run():
         from agents import encuesta as _E
@@ -13595,10 +13597,11 @@ async def _do_encuesta_publish(context, fp: dict, scheduled_for, chat_id=None) -
     if not r.get("ok"):
         return f"❌ {r.get('error')}"
     dif = r.get("difusion") or {}
-    okred = [n for n, k in (("TG", "tg_msg_id"), ("X", "tweet_id"), ("FB", "fb_id"),
-                            ("IG", "ig_id"), ("LI", "li_urn")) if dif.get(k)]
+    okred = [n for n, k in (("TG", "tg_msg_id"), ("X", "tweet_id"), ("LI", "li_urn")) if dif.get(k)]
     if dif.get("tg_poll_msg_id"):
         okred.append("poll TG")
+    if dif.get("meta_encolados"):
+        okred.append("FB+IG+story en cola (pacing 5min)")
     # WhatsApp: entrega manual a Leo (solo publicación inmediata)
     if wa_on and scheduled_for is None and chat_id:
         await _enc_wa_delivery(context, chat_id, r.get("wp_id"), fp["pregunta"], r.get("wp_url"))
