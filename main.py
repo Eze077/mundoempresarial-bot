@@ -5538,9 +5538,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         notas = [] if raw.lower() in ("-", "no", "none", "") else [x.strip() for x in raw.split(",") if x.strip()][:4]
         fp = context.user_data.get("enc", {})
         fp["notas"] = notas
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🖼️ Mando una foto", callback_data="enc_foto_manual")],
+            [InlineKeyboardButton("🤖 Que la elija el agente", callback_data="enc_foto_auto")]])
         await update.message.reply_text(
-            f"🗳️ Encuesta lista: «{fp.get('pregunta','')[:60]}» · {len(fp.get('opciones',[]))} opciones · "
-            f"{len(notas)} nota(s).\nElegí redes y acción:", reply_markup=_build_enc_kb(fp))
+            f"🗳️ {len(fp.get('opciones',[]))} opciones · {len(notas)} nota(s).\n📷 ¿Foto de la nota?",
+            reply_markup=kb)
         return
     if context.user_data.get("awaiting_enc_hora"):
         import re as _reh
@@ -7157,6 +7160,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "enc_cancel":
         context.user_data.pop("enc", None)
         await query.edit_message_text("Encuesta cancelada.")
+        return
+    if query.data == "enc_foto_auto":
+        fp = context.user_data.get("enc")
+        if not fp:
+            await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
+        fp["image_id"] = None
+        await query.edit_message_text(
+            "🤖 La foto la elige el agente (biblioteca → IA → logo).\nElegí redes y acción:",
+            reply_markup=_build_enc_kb(fp))
+        return
+    if query.data == "enc_foto_manual":
+        if not context.user_data.get("enc"):
+            await query.answer("Sesión perdida — reiniciá /encuesta", show_alert=True); return
+        context.user_data["awaiting_enc_foto"] = True
+        await query.edit_message_text("🖼️ Mandame la foto para la portada de la nota.")
         return
     if query.data == "enc_sched":
         if not context.user_data.get("enc"):
@@ -12052,6 +12070,28 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja foto enviada por Telegram durante edición o flujo sin_imagen."""
 
+    # ── /encuesta: foto manual de la portada ─────────────────────────────────
+    if context.user_data.get("awaiting_enc_foto"):
+        context.user_data.pop("awaiting_enc_foto")
+        fp = context.user_data.get("enc")
+        if not fp:
+            await update.message.reply_text("⚠️ Se perdió la encuesta. Reiniciá con /encuesta."); return
+        msg = await update.message.reply_text("⏳ Subiendo la foto…")
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file(read_timeout=30, connect_timeout=15)
+            import requests as _rq_enc
+            dl = await asyncio.to_thread(lambda: _rq_enc.get(file.file_path, timeout=30))
+            mid = await asyncio.to_thread(upload_image_bytes, dl.content, "jpg")
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude subir la foto: {e}"); return
+        if not mid:
+            await msg.edit_text("❌ No pude subir la foto. Reintentá o elegí automática."); return
+        fp["image_id"] = mid
+        await msg.edit_text(f"✅ Foto cargada (#{mid}).")
+        await update.message.reply_text("Elegí redes y acción:", reply_markup=_build_enc_kb(fp))
+        return
+
     # ── /evento: foto del evento (va a la portada) ───────────────────────────
     _ev = context.user_data.get("evento")
     if _ev is not None:
@@ -13516,7 +13556,8 @@ async def _do_encuesta_publish(context, fp: dict, scheduled_for) -> str:
 
     def _run():
         from agents import encuesta as _E
-        return _E.publish(fp["pregunta"], fp["opciones"], fp.get("notas"), canales, scheduled_for)
+        return _E.publish(fp["pregunta"], fp["opciones"], fp.get("notas"), canales,
+                          scheduled_for, image_id=fp.get("image_id"))
     try:
         r = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
     except Exception as e:
