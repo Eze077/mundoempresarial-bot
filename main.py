@@ -5352,6 +5352,36 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── ✏️ Ajustar (opinar/complementar) una propuesta: editor/supervisor/reco/impacto ──
+    # Leo tocó "✏️ Ajustar" en una propuesta y ahora escribe su criterio. El agente reformula
+    # la propuesta incorporándolo, la persiste revisada y la RE-MANDA con los botones (por
+    # tg_notify, desde el harness). Acá solo disparamos + avisamos (freeze-safe: to_thread).
+    if context.user_data.get("awaiting_ajuste"):
+        _aj   = context.user_data.pop("awaiting_ajuste")
+        _flow = _aj.get("flow"); _aid = _aj.get("id"); _aidx = _aj.get("idx", 0)
+        import sys as _sysaj
+        _sysaj.path.insert(0, "/opt/me-harness"); _sysaj.path.insert(0, "/opt/me-harness/agents")
+        await update.message.reply_text("🔄 Reformulando la propuesta con tu ajuste…")
+
+        def _do_reformular():
+            if _flow == "edit":
+                import editor as _m; return _m.reformular(_aid, _aidx, text_in)
+            if _flow == "sup":
+                import supervisor as _m; return _m.reformular(_aid, _aidx, text_in)
+            if _flow == "reco":
+                import direccion as _m; return _m.reformular_reco(_aid, text_in)
+            if _flow == "imp":
+                import impacto as _m; return _m.reformular(_aid, _aidx, text_in)
+            return None
+
+        try:
+            res = await asyncio.wait_for(asyncio.to_thread(_do_reformular), timeout=90)
+            if not res:
+                await update.message.reply_text("⚠️ No pude reformular (GPT o dato faltante). Probá de nuevo.")
+        except Exception as _e:
+            await update.message.reply_text(f"⚠️ Error reformulando: {str(_e)[:150]}")
+        return
+
     # Guardar chat_id del operador para reportes
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
@@ -7006,6 +7036,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_reply_markup(None)
             except Exception:
                 pass
+        return
+
+    # ── ✏️ Ajustar (opinar/complementar): editor/supervisor/reco/impacto → pide el texto ──
+    if (query.data.startswith("h_edit_ajustar:") or query.data.startswith("h_sup_ajustar:")
+            or query.data.startswith("h_reco_ajustar:") or query.data.startswith("h_imp_ajustar:")):
+        try:
+            _pa = query.data.split(":")
+            _flow = _pa[0].split("_")[1]   # edit | sup | reco | imp
+            _id = int(_pa[1]); _idx = int(_pa[2]) if len(_pa) >= 3 else 0
+            context.user_data["awaiting_ajuste"] = {"flow": _flow, "id": _id, "idx": _idx}
+            await query.message.reply_text(
+                "✏️ Escribí tu ajuste u opinión. El agente reformula la propuesta con tu criterio "
+                "y te la re-muestra para Aplicar/Descartar (podés seguir ajustando).")
+        except Exception:
+            pass
         return
 
     # ── Reco capa×vertical (Fase C): aplicar a directiva / rehacer nota ejemplo / descartar ──
