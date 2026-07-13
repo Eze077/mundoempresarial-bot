@@ -12851,6 +12851,38 @@ async def cmd_ingesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Error en ingesta: {e}")
 
 
+async def cmd_eventos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agenda del agente EVENTOS hacia adelante: boletín semanal (lunes) + efemérides del
+    calendario. Antes el agente solo avisaba cuando algo entraba en ventana; ahora se le pregunta."""
+    import sys as _syse
+    _syse.path.insert(0, "/opt/me-harness"); _syse.path.insert(0, "/opt/me-harness/agents")
+
+    def _get():
+        import eventos as _ev
+        return _ev.proximos(8)
+
+    try:
+        evs = await asyncio.wait_for(asyncio.to_thread(_get), timeout=30)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ No pude leer la agenda: {str(e)[:150]}")
+        return
+    if not evs:
+        await update.message.reply_text("🗓 No hay nada en la agenda.")
+        return
+    _EMO = {"boletin": "📬", "efemeride": "📅"}
+    lines = ["🗓 <b>Agenda del agente EVENTOS</b>\n"]
+    for e in evs:
+        d = e.get("dias", 0)
+        cuando = "HOY" if d == 0 else ("mañana" if d == 1 else f"en {d} días")
+        fecha = e.get("fecha", "")
+        f = f"{fecha[8:10]}/{fecha[5:7]}" if len(fecha) >= 10 else fecha
+        lines.append(f"{_EMO.get(e.get('tipo'), '•')} <b>{e.get('nombre')}</b> — {f} ({cuando})\n"
+                     f"    <i>{e.get('segmento')}</i> · {e.get('estado')}")
+    lines.append("\n<i>Notas con slot futuro → /programadas</i>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
+                                    disable_web_page_preview=True)
+
+
 async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lista las notas programadas en WP con opción de reprogramar."""
     import requests as _req_pr, base64 as _b64_pr, sqlite3 as _sq_pr
@@ -15232,6 +15264,7 @@ async def _post_init(application: Application) -> None:
         # ── Pipeline editorial ────────────────────────────────────────────────
         BotCommand("pipeline",          "Estado del pipeline editorial — todas las etapas"),
         BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
+        BotCommand("eventos",           "Agenda — boletín semanal + efemérides que vienen"),
         BotCommand("briefing",          "Briefing editorial — revisar notas pendientes"),
         BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
         BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
@@ -15984,6 +16017,7 @@ def main():
     app.add_handler(CommandHandler("ingesta", cmd_ingesta))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("programadas", cmd_programadas))
+    app.add_handler(CommandHandler("eventos", cmd_eventos))
     app.add_handler(CommandHandler("coladepublicacion", cmd_coladepublicacion))
     app.add_handler(CommandHandler("inst", cmd_inst))
     app.add_handler(CommandHandler("reglas", cmd_reglas))
