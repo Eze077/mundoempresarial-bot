@@ -7616,6 +7616,29 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"<b>Estado warp-connect:</b>\n<pre>{out.strip()[:600]}</pre>",
                 parse_mode="HTML"
             )
+        elif action == "h_sa_upd_plugins":
+            await query.edit_message_reply_markup(None)
+            await context.bot.send_message(chat_id=query.message.chat_id,
+                text="🔄 Actualizando los plugins de WordPress… verifico el sitio al final.")
+            import sys as _sysu, asyncio as _aiou
+            _sysu.path.insert(0, "/opt/me-harness")
+            def _do_upd():
+                import sysadmin as _sa
+                return _sa.apply_wp_updates("all_plugins")
+            try:
+                res = await _aiou.wait_for(_aiou.to_thread(_do_upd), timeout=300)
+            except Exception as _e:
+                await context.bot.send_message(chat_id=query.message.chat_id,
+                    text=f"⚠️ Error actualizando: {str(_e)[:150]}")
+                return
+            if res.get("site_ok"):
+                await context.bot.send_message(chat_id=query.message.chat_id,
+                    text=f"✅ <b>Plugins actualizados</b>: {res.get('updated','?')}/{res.get('requested','?')}. "
+                         f"Sitio OK (200).", parse_mode="HTML")
+            else:
+                await context.bot.send_message(chat_id=query.message.chat_id,
+                    text=f"🚨 <b>Actualicé plugins pero el sitio devuelve {res.get('site_code')}</b> — "
+                         f"REVISAR YA.\n<code>{str(res)[:250]}</code>", parse_mode="HTML")
         elif action == "h_sa_skip":
             await query.edit_message_reply_markup(None)
         return
