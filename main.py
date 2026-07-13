@@ -6980,6 +6980,34 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── SUPERVISOR (mejora diaria del harness): aplicar/descartar propuesta ──
+    if query.data.startswith("h_sup_apply:") or query.data.startswith("h_sup_skip:"):
+        import sys as _syssup
+        _syssup.path.insert(0, "/opt/me-harness"); _syssup.path.insert(0, "/opt/me-harness/agents")
+        try:
+            ps = query.data.split(":")
+            acts = ps[0]; pids = int(ps[1]); idxs = int(ps[2]) if len(ps) >= 3 else 0
+            if acts == "h_sup_apply":
+                import supervisor as _sup
+                res = _sup.aplicar_accion(pids, idxs)
+                footer = (f"\n\n✅ <b>Aplicada #{idxs+1}</b> — {res}" if res
+                          else f"\n\n⚠️ No se pudo aplicar #{idxs+1}.")
+            else:
+                footer = f"\n\n❌ Descartada #{idxs+1}."
+            kb = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+            nueva = [r for r in kb if not (r and (r[0].callback_data or "").endswith(f":{pids}:{idxs}"))]
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(
+                base + footer, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(nueva) if nueva else None,
+                disable_web_page_preview=True)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(None)
+            except Exception:
+                pass
+        return
+
     # ── Reco capa×vertical (Fase C): aplicar a directiva / rehacer nota ejemplo / descartar ──
     if (query.data.startswith("h_reco_ok:") or query.data.startswith("h_reco_no:")
             or query.data.startswith("h_reco_fix:")):
