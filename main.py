@@ -5370,6 +5370,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 import supervisor as _m; return _m.reformular(_aid, _aidx, text_in)
             if _flow == "reco":
                 import direccion as _m; return _m.reformular_reco(_aid, text_in)
+            if _flow == "esq":
+                import direccion as _m; return _m.reformular_esquema(_aid, text_in)
             if _flow == "imp":
                 import impacto as _m; return _m.reformular(_aid, _aidx, text_in)
             return None
@@ -7040,7 +7042,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── ✏️ Ajustar (opinar/complementar): editor/supervisor/reco/impacto → pide el texto ──
     if (query.data.startswith("h_edit_ajustar:") or query.data.startswith("h_sup_ajustar:")
-            or query.data.startswith("h_reco_ajustar:") or query.data.startswith("h_imp_ajustar:")):
+            or query.data.startswith("h_reco_ajustar:") or query.data.startswith("h_imp_ajustar:")
+            or query.data.startswith("h_esq_ajustar:")):
         try:
             _pa = query.data.split(":")
             _flow = _pa[0].split("_")[1]   # edit | sup | reco | imp
