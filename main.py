@@ -7621,7 +7621,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id,
                 text="🔄 Actualizando los plugins de WordPress… verifico el sitio al final.")
             import sys as _sysu, asyncio as _aiou
-            _sysu.path.insert(0, "/opt/me-harness")
+            _sysu.path.insert(0, "/opt/me-harness"); _sysu.path.insert(0, "/opt/me-harness/agents")
             def _do_upd():
                 import sysadmin as _sa
                 return _sa.apply_wp_updates("all_plugins")
