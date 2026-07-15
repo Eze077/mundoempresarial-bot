@@ -15485,15 +15485,14 @@ def _cat_names(ids: list) -> str:
     return ", ".join(_CAT_NAME_CACHE.get(i, str(i)) for i in ids)
 
 
-def _format_columna_html(cuerpo: str) -> dict:
-    """Formatea una columna de autor SIN reescribirla: preserva las palabras del autor, arma
-    párrafos y promueve a <h2> las líneas que él usó como subtítulo. NO agrega bullets/resumen/
-    H2 inventados — eso reinterpreta (lo que hacía _gpt_format_article). Fix 2026-07-15."""
+def _cols_det_html(blocks: list) -> dict:
+    """Formateo determinístico: cada bloque → <p>; líneas cortas sin puntuación de cierre → <h2>."""
     import html as _h
-    blocks = [b.strip() for b in re.split(r"\n\s*\n", cuerpo or "") if b.strip()]
     parts, h2s = [], []
     for b in blocks:
-        # subtítulo del autor: una sola línea, corta, sin puntuación de cierre de oración
+        b = b.strip()
+        if not b:
+            continue
         es_titulo = ("\n" not in b and len(b) <= 80
                      and not b.rstrip().endswith((".", ":", "?", "!", "…", ",", ";", '"', "»", ")")))
         if es_titulo:
@@ -15504,19 +15503,76 @@ def _format_columna_html(cuerpo: str) -> dict:
     return {"html": "".join(parts), "h2_headings": h2s, "bullets": []}
 
 
-def _build_nota_manual_data(ex: dict) -> dict:
-    """Toma lo extraído por GPT y arma el data listo para publicar (formato + SEO)."""
+def _cols_estructura_verbatim(cuerpo: str) -> dict | None:
+    """Un solo bloque grande → GPT inserta SOLO saltos de párrafo (sin cambiar palabras).
+    Guard VERBATIM: si el texto de salida no tiene EXACTAMENTE las mismas palabras en el mismo
+    orden, se descarta (no queremos reescritura). None si no se puede garantizar la fidelidad."""
+    if not OPENAI_API_KEY:
+        return None
+    prompt = ("Te doy el cuerpo de una columna de opinión escrita como un solo bloque. Tu ÚNICA tarea "
+              "es insertar SALTOS DE PÁRRAFO donde cambia la idea, para que se lea cómodo. "
+              "REGLA ABSOLUTA: NO cambies, agregues, saques ni reordenes NINGUNA palabra. NO resumas. "
+              "NO agregues títulos ni bullets. Devolvé EXACTAMENTE el mismo texto, palabra por palabra, "
+              "solo con una línea en blanco entre párrafos.\n\nTEXTO:\n" + cuerpo[:9000])
+    try:
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0},
+            timeout=60)
+        if r.status_code != 200:
+            return None
+        out = r.json()["choices"][0]["message"]["content"].strip()
+        w = lambda s: re.findall(r"\w+", (s or "").lower())
+        if w(out) != w(cuerpo):           # guard verbatim: mismas palabras, mismo orden
+            logger.warning("columna verbatim guard: GPT alteró palabras → formateo determinístico")
+            return None
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", out) if b.strip()]
+        return _cols_det_html(blocks)
+    except Exception as e:
+        logger.warning(f"_cols_estructura_verbatim: {e}")
+        return None
+
+
+def _format_columna_html(cuerpo: str) -> dict:
+    """Formatea una columna de autor SIN reescribirla (preserva las palabras). Si ya viene en
+    párrafos, los respeta; si es un solo bloque grande, inserta saltos de párrafo con GPT
+    verbatim-guarded (no cambia ni una palabra). Fix 2026-07-15."""
+    cuerpo = (cuerpo or "").strip()
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", cuerpo) if b.strip()]
+    if len(blocks) >= 3:                   # el autor ya lo separó en párrafos → respetar
+        return _cols_det_html(blocks)
+    if len(cuerpo) > 700:                  # bloque grande sin párrafos → estructurar (verbatim)
+        g = _cols_estructura_verbatim(cuerpo)
+        if g:
+            return g
+    return _cols_det_html(blocks or [cuerpo])
+
+
+def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
+    """Arma el data listo para publicar. `modo`:
+    - 'tal_cual' (recomendado): PRESERVA el texto del autor, solo lo formatea (sin reescribir).
+    - 'estilo_me': lo reescribe al formato del diario (bullets + secciones + resumen pymes)."""
     title  = (ex.get("title") or "").strip()
     bajada = (ex.get("bajada") or "").strip()
     autor  = (ex.get("autor") or "").strip()
     cuerpo = (ex.get("cuerpo") or "").strip()
     kw = focus_keyword(title)
-    # Columna de autor: se PRESERVA el texto (solo se formatea), NO se reescribe con GPT.
-    fmt = _format_columna_html(cuerpo)
-    body_html = fmt["html"] or ("<p>" + "</p><p>".join(
-        p.strip() for p in cuerpo.split("\n\n") if p.strip()) + "</p>")
-    bullets = fmt["bullets"]
-    h2      = fmt["h2_headings"]
+    _fallback = "<p>" + "</p><p>".join(p.strip() for p in cuerpo.split("\n\n") if p.strip()) + "</p>"
+    if modo == "estilo_me":
+        instr = (f"Es una COLUMNA DE OPINIÓN firmada por {autor or 'un lector'}. Respetá su tesis y "
+                 "postura; estructurá en secciones, agregá bullets y resumen para pymes.")
+        fmt = _gpt_format_article(title, cuerpo, source_url="columna-de-autor", kw=kw,
+                                  redactor_instr=instr) or {}
+        body_html = fmt.get("html") or _fallback
+        bullets = fmt.get("bullets", []) or []
+        h2      = fmt.get("h2_headings", []) or []
+    else:
+        fmt = _format_columna_html(cuerpo)
+        body_html = fmt["html"] or _fallback
+        bullets = fmt["bullets"]
+        h2      = fmt["h2_headings"]
     if autor:
         byline = ('<p style="font-size:14px;color:#15487F;border-left:4px solid #E97C1E;'
                   'padding-left:12px;margin:0 0 20px;">Por <strong>' + autor + '</strong></p>')
@@ -15700,25 +15756,41 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
         if status_msg: await status_msg.edit_text(m)
         else: await update.message.reply_text(m)
         return
-    data = await asyncio.to_thread(_build_nota_manual_data, ex)
-    data["pdf_images"] = pdf_images
-    context.user_data["nota_manual"] = data
-    # 1) Cuerpo tal como se va a publicar (bullets + cuerpo formateado)
+    # Elegir el TRATAMIENTO antes de armar (botones): tal cual (preserva) vs estilo ME (reescribe)
+    import html as _hh
+    context.user_data["nota_manual_ex"] = {"ex": ex, "pdf_images": pdf_images}
+    context.user_data.pop("nota_manual", None)
+    if status_msg:
+        try: await status_msg.edit_text("📝 Columna recibida.")
+        except Exception: pass
+    txt = ("📝 <b>Columna recibida</b> — «" + _hh.escape((ex.get("title") or "")[:70]) + "»\n\n"
+           "¿Cómo la publico?\n\n"
+           "📝 <b>Tal cual</b> (recomendado): tu texto exacto, solo formateado en párrafos + la "
+           "firma del autor. Respeta tu voz — no reescribe ni una palabra.\n\n"
+           "✍️ <b>Estilo ME</b>: lo reescribo con bullets, secciones y «Resumen para pymes», "
+           "como una nota del diario.")
+    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=_nota_manual_modo_kb())
+
+
+def _nota_manual_modo_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "📝 Tal cual (recomendado)", "callback_data": "nm_modo_talcual"}],
+        [{"text": "✍️ Reescribir estilo ME", "callback_data": "nm_modo_estilome"}],
+        [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+
+
+async def _nota_manual_preview(msg, data):
+    """Muestra el cuerpo como se va a publicar + el panel con metadatos y botones."""
     parts = []
     if data["bullets"]:
         parts.append("📌 Lo que tenés que saber:\n" + "\n".join("• " + b for b in data["bullets"]))
     parts.append(_html_to_telegram_text(data["content_html"]))
     body_txt = "\n\n".join(parts)
-    intro = "📄 <b>Cuerpo de la nota</b> (así se va a publicar):"
-    if status_msg:
-        await status_msg.edit_text(intro, parse_mode="HTML")
-    else:
-        await update.message.reply_text(intro, parse_mode="HTML")
+    await msg.reply_text("📄 <b>Cuerpo de la nota</b> (así se va a publicar):", parse_mode="HTML")
     for chunk in _chunks(body_txt, 3900):
-        await update.message.reply_text(chunk, disable_web_page_preview=True)
-    # 2) Panel con metadatos + foto + botones
-    sent = await update.message.reply_text(
-        _nota_manual_panel_text(data), parse_mode="HTML", reply_markup=_nota_manual_kb())
+        await msg.reply_text(chunk, disable_web_page_preview=True)
+    sent = await msg.reply_text(_nota_manual_panel_text(data), parse_mode="HTML",
+                                reply_markup=_nota_manual_kb())
     data["_panel_chat_id"] = sent.chat_id
     data["_panel_msg_id"] = sent.message_id
 
@@ -15730,7 +15802,24 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     data = context.user_data.get("nota_manual")
     if act == "cancel":
         context.user_data.pop("nota_manual", None)
+        context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    # Elección de tratamiento: arma la nota con el modo elegido y muestra el preview
+    if act in ("modo_talcual", "modo_estilome"):
+        stash = context.user_data.get("nota_manual_ex")
+        if not stash:
+            await q.edit_message_text("⚠️ Se perdió la columna. Reiniciá con /notamanual.")
+            return
+        modo = "tal_cual" if act == "modo_talcual" else "estilo_me"
+        etq = "tal cual (tu texto)" if modo == "tal_cual" else "estilo ME (reescrito)"
+        await q.edit_message_text(f"🧩 Armando la nota — {etq}…")
+        d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], modo)
+        d["pdf_images"] = stash.get("pdf_images", 0)
+        d["modo"] = modo
+        context.user_data["nota_manual"] = d
+        context.user_data.pop("nota_manual_ex", None)
+        await _nota_manual_preview(q.message, d)
         return
     if not data:
         await q.edit_message_text("⚠️ Se perdió la nota en memoria. Reiniciá con /notamanual.")
