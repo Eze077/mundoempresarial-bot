@@ -15433,7 +15433,9 @@ def _gpt_nota_manual_extract(raw_text: str):
         '  "title": "título de la nota; si el texto trae uno usalo, si no proponé uno fiel y sin clickbait",\n'
         '  "bajada": "1-2 oraciones que resuman el enfoque de la columna",\n'
         '  "autor": "nombre del autor y, si aparece, su cargo/empresa (ej: Juan Perez, presidente de CAME); si no se identifica, vacio",\n'
-        '  "cuerpo": "el cuerpo de la columna, limpio, sin el titulo ni la firma, respetando las palabras e ideas del autor",\n'
+        '  "cuerpo": "el cuerpo de la columna TAL CUAL, palabra por palabra, SIN reescribir, SIN '
+        'resumir y SIN cambiar el orden; solo sacá el título y la firma. Mantené los párrafos '
+        '(dejá una línea en blanco entre párrafos) y los subtítulos que el autor haya puesto (uno por línea)",\n'
         '  "tags": ["3 a 6 etiquetas: entidades, personas y temas mencionados"],\n'
         '  "hashtags": ["3 a 5 hashtags para redes, sin espacios, ej #Pymes"]\n'
         '}\n'
@@ -15483,6 +15485,25 @@ def _cat_names(ids: list) -> str:
     return ", ".join(_CAT_NAME_CACHE.get(i, str(i)) for i in ids)
 
 
+def _format_columna_html(cuerpo: str) -> dict:
+    """Formatea una columna de autor SIN reescribirla: preserva las palabras del autor, arma
+    párrafos y promueve a <h2> las líneas que él usó como subtítulo. NO agrega bullets/resumen/
+    H2 inventados — eso reinterpreta (lo que hacía _gpt_format_article). Fix 2026-07-15."""
+    import html as _h
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", cuerpo or "") if b.strip()]
+    parts, h2s = [], []
+    for b in blocks:
+        # subtítulo del autor: una sola línea, corta, sin puntuación de cierre de oración
+        es_titulo = ("\n" not in b and len(b) <= 80
+                     and not b.rstrip().endswith((".", ":", "?", "!", "…", ",", ";", '"', "»", ")")))
+        if es_titulo:
+            h2s.append(b)
+            parts.append(f'<h2 id="{url_slug(b) or "seccion"}">{_h.escape(b)}</h2>')
+        else:
+            parts.append("<p>" + "<br>".join(_h.escape(l) for l in b.split("\n")) + "</p>")
+    return {"html": "".join(parts), "h2_headings": h2s, "bullets": []}
+
+
 def _build_nota_manual_data(ex: dict) -> dict:
     """Toma lo extraído por GPT y arma el data listo para publicar (formato + SEO)."""
     title  = (ex.get("title") or "").strip()
@@ -15490,15 +15511,12 @@ def _build_nota_manual_data(ex: dict) -> dict:
     autor  = (ex.get("autor") or "").strip()
     cuerpo = (ex.get("cuerpo") or "").strip()
     kw = focus_keyword(title)
-    instr = (f"Es una COLUMNA DE OPINION firmada por {autor or 'un lector'}. "
-             "Respeta su voz, ideas y postura; NO inventes datos, NO agregues opiniones "
-             "ni cambies su tesis. Solo estructura en secciones y limpia.")
-    fmt = _gpt_format_article(title, cuerpo, source_url="columna-de-autor", kw=kw,
-                              redactor_instr=instr) or {}
-    body_html = fmt.get("html") or ("<p>" + "</p><p>".join(
+    # Columna de autor: se PRESERVA el texto (solo se formatea), NO se reescribe con GPT.
+    fmt = _format_columna_html(cuerpo)
+    body_html = fmt["html"] or ("<p>" + "</p><p>".join(
         p.strip() for p in cuerpo.split("\n\n") if p.strip()) + "</p>")
-    bullets = fmt.get("bullets", []) or []
-    h2      = fmt.get("h2_headings", []) or []
+    bullets = fmt["bullets"]
+    h2      = fmt["h2_headings"]
     if autor:
         byline = ('<p style="font-size:14px;color:#15487F;border-left:4px solid #E97C1E;'
                   'padding-left:12px;margin:0 0 20px;">Por <strong>' + autor + '</strong></p>')
