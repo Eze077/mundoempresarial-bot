@@ -5377,6 +5377,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 import impacto as _m; return _m.reformular(_aid, _aidx, text_in)
             if _flow == "gsc":
                 import gsc as _m; return _m.reformular(_aid, text_in)
+            if _flow == "gscln":
+                import gsc as _m; return _m.reformular_ln(_aid, text_in)
             return None
 
         try:
@@ -7068,6 +7070,50 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer(f"Error: {str(_eg)[:150]}", show_alert=True)
             except Exception:
                 pass
+        return
+
+    # ── GSC Living Notes: crear borrador / esqueleto / refrescar / ajustar / descartar ──
+    if (query.data.startswith("h_gsc_ln_ok:") or query.data.startswith("h_gsc_ln_esqueleto:")
+            or query.data.startswith("h_gsc_ln_no:") or query.data.startswith("h_gsc_lnref:")):
+        import sys as _sysln
+        _sysln.path.insert(0, "/opt/me-harness"); _sysln.path.insert(0, "/opt/me-harness/agents")
+        try:
+            pl = query.data.split(":")
+            actl = pl[0]; pidl = int(pl[1])
+            if actl in ("h_gsc_ln_ok", "h_gsc_ln_esqueleto"):
+                modo = "borrador" if actl == "h_gsc_ln_ok" else "esqueleto"
+                await query.answer("Armando el borrador (combino las crónicas)…", show_alert=False)
+                def _apply_ln():
+                    import gsc as _g; return _g.aplicar_ln_prop(pidl, modo)
+                res = await asyncio.wait_for(asyncio.to_thread(_apply_ln), timeout=240)
+                footer = f"\n\n✅ <b>{'Borrador' if modo=='borrador' else 'Esqueleto'} creado</b> — {res}"
+            elif actl == "h_gsc_lnref":
+                nid = int(pl[2]) if len(pl) > 2 else 0
+                await query.answer("Refrescar: revisá la nota y sumá el dato nuevo.", show_alert=True)
+                footer = f"\n\n🔄 Revisá la living note para sumar la crónica nueva (#{nid})."
+            else:
+                import broker as _bkl
+                _bkl.set_ln_prop_status(pidl, "dismissed")
+                footer = "\n\n❌ Descartada."
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          reply_markup=None, disable_web_page_preview=True)
+        except Exception as _el:
+            try:
+                await query.answer(f"Error: {str(_el)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    # ── GSC Living Notes: ✏️ Ajustar (flow explícito "gscln", NO derivar de split) ──
+    if query.data.startswith("h_gsc_ln_ajustar:"):
+        try:
+            _idln = int(query.data.split(":")[1])
+            context.user_data["awaiting_ajuste"] = {"flow": "gscln", "id": _idln, "idx": 0}
+            await query.message.reply_text(
+                "✏️ Escribí tu ajuste (título, ángulo o estructura). Reformulo la living note y te la re-muestro.")
+        except Exception:
+            pass
         return
 
     # ── ✏️ Ajustar (opinar/complementar): editor/supervisor/reco/impacto → pide el texto ──
