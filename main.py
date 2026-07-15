@@ -11310,22 +11310,36 @@ def _build_edit_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _build_publish_social_kb(tw_on: bool, tg_on: bool, wa_on: bool, li_on: bool = False) -> InlineKeyboardMarkup:
-    """Teclado para republicar una nota existente en redes."""
-    tw_label = ("✅" if tw_on else "❌") + " Twitter"
-    tg_label = ("✅" if tg_on else "❌") + " Canal TG"
-    wa_label = ("✅" if wa_on else "❌") + " WhatsApp"
-    li_label = ("✅" if li_on else "❌") + " LinkedIn"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(tw_label, callback_data="pubtoggle_tw")],
-        [InlineKeyboardButton(tg_label, callback_data="pubtoggle_tg")],
-        [InlineKeyboardButton(wa_label, callback_data="pubtoggle_wa")],
-        [InlineKeyboardButton(li_label, callback_data="pubtoggle_li")],
-        [
-            InlineKeyboardButton("📡 Publicar", callback_data="pub_execute"),
-            InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
-        ],
+# Redes de /editar → Publicar. Las 5 con API las difunde el AGENTE (redes.difundir_nota);
+# WhatsApp no tiene API → texto para copiar y pegar.
+_EDIT_PUB_NETS = [
+    ("tw", "🐦 Twitter"),
+    ("tg", "📣 Canal TG"),
+    ("li", "💼 LinkedIn"),
+    ("fb", "📘 Facebook"),
+    ("ig", "📷 Instagram"),
+    ("wa", "🟢 WhatsApp"),
+]
+# Mapa red del bot → canal del agente. WhatsApp queda afuera (sin API).
+_EDIT_PUB_CANAL = {"tw": "x", "tg": "tg", "li": "li", "fb": "fb", "ig": "ig"}
+
+
+def _build_publish_social_kb(st: dict) -> InlineKeyboardMarkup:
+    """Teclado para difundir una nota existente en TODAS las redes (vía agente redes).
+    `st` es un dict con claves pub_tw / pub_tg / pub_li / pub_fb / pub_ig / pub_wa."""
+    rows, row = [], []
+    for key, label in _EDIT_PUB_NETS:
+        icon = "✅" if st.get(f"pub_{key}") else "❌"
+        row.append(InlineKeyboardButton(f"{icon} {label}", callback_data=f"pubtoggle_{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("📡 Publicar", callback_data="pub_execute"),
+        InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _post_to_data(post: dict) -> dict:
@@ -11620,156 +11634,111 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("\n".join(results) or "Nada que borrar.")
         return
 
-    # ── Publicar en redes: mostrar toggles ──
+    # ── Publicar en redes: mostrar toggles (TODAS las redes vía agente) ──
     if query.data == "edit_publish":
         meta = parse_social_meta(post.get("content", ""))
         has_tw = bool(meta.get("tweet_id"))
         has_tg = bool(meta.get("tg_msg"))
-        # Default: ON los destinos que todavía no se publicaron
+        # Default ON en las redes con API que aún no se publicaron; WhatsApp OFF (manual).
         context.user_data["pub_tw"] = not has_tw
         context.user_data["pub_tg"] = not has_tg
+        context.user_data["pub_li"] = True
+        context.user_data["pub_fb"] = True
+        context.user_data["pub_ig"] = True
         context.user_data["pub_wa"] = False
-        context.user_data["pub_li"] = False
 
         status_lines = []
         if has_tw:
-            status_lines.append(f"⚠️ Ya tuiteado (id `{meta.get('tweet_id')}`) — se creará uno nuevo si lo marcás")
+            status_lines.append(f"⚠️ Ya tuiteado (`{meta.get('tweet_id')}`) — marcarlo crea uno nuevo")
         if has_tg:
-            status_lines.append(f"⚠️ Ya en canal TG (msg `{meta.get('tg_msg')}`) — se publicará un segundo mensaje")
+            status_lines.append(f"⚠️ Ya en canal TG (`{meta.get('tg_msg')}`) — se repite el mensaje")
         status_str = "\n".join(status_lines) if status_lines else "Sin publicaciones previas."
 
         await query.edit_message_text(
             f"📡 *Publicar en redes*\n\n*{post['title']}*\n\n"
             f"{status_str}\n\n"
+            "_TG/X/LinkedIn salen al toque · Facebook/Instagram se encolan con pacing "
+            "(≈15 min entre notas, sin ráfaga) · WhatsApp = texto para copiar._\n\n"
             "Elegí destinos:",
             parse_mode="Markdown",
-            reply_markup=_build_publish_social_kb(
-                context.user_data["pub_tw"],
-                context.user_data["pub_tg"],
-                context.user_data["pub_wa"],
-                context.user_data["pub_li"],
-            ),
+            reply_markup=_build_publish_social_kb(context.user_data),
         )
         return
 
-    # Toggles de publicar en redes
-    if query.data == "pubtoggle_tw":
-        context.user_data["pub_tw"] = not context.user_data.get("pub_tw", False)
+    # Toggle genérico de cualquier red (pubtoggle_tw / _tg / _li / _fb / _ig / _wa)
+    if query.data.startswith("pubtoggle_"):
+        net = query.data.split("_", 1)[1]
+        context.user_data[f"pub_{net}"] = not context.user_data.get(f"pub_{net}", False)
         await query.edit_message_reply_markup(
-            reply_markup=_build_publish_social_kb(
-                context.user_data["pub_tw"],
-                context.user_data.get("pub_tg", False),
-                context.user_data.get("pub_wa", False),
-                context.user_data.get("pub_li", False),
-            )
-        )
-        return
-
-    if query.data == "pubtoggle_tg":
-        context.user_data["pub_tg"] = not context.user_data.get("pub_tg", False)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_publish_social_kb(
-                context.user_data.get("pub_tw", False),
-                context.user_data["pub_tg"],
-                context.user_data.get("pub_wa", False),
-                context.user_data.get("pub_li", False),
-            )
-        )
-        return
-
-    if query.data == "pubtoggle_wa":
-        context.user_data["pub_wa"] = not context.user_data.get("pub_wa", False)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_publish_social_kb(
-                context.user_data.get("pub_tw", False),
-                context.user_data.get("pub_tg", False),
-                context.user_data["pub_wa"],
-                context.user_data.get("pub_li", False),
-            )
-        )
-        return
-
-    if query.data == "pubtoggle_li":
-        context.user_data["pub_li"] = not context.user_data.get("pub_li", False)
-        await query.edit_message_reply_markup(
-            reply_markup=_build_publish_social_kb(
-                context.user_data.get("pub_tw", False),
-                context.user_data.get("pub_tg", False),
-                context.user_data.get("pub_wa", False),
-                context.user_data["pub_li"],
-            )
+            reply_markup=_build_publish_social_kb(context.user_data)
         )
         return
 
     if query.data == "pub_execute":
-        pub_tw = context.user_data.get("pub_tw", False)
-        pub_tg = context.user_data.get("pub_tg", False)
-        pub_wa = context.user_data.get("pub_wa", False)
-        pub_li = context.user_data.get("pub_li", False)
-
-        if not any([pub_tw, pub_tg, pub_wa, pub_li]):
+        sel = [k for k, _ in _EDIT_PUB_NETS if context.user_data.get(f"pub_{k}")]
+        if not sel:
             await query.edit_message_text("Nada seleccionado. Cancelado.")
             return
 
-        await query.edit_message_text("Publicando en redes...")
-        data = await asyncio.to_thread(_post_to_data, post)
+        await query.edit_message_text("📡 Publicando en redes…")
         post_url = post["link"]
-
+        import html as _html
+        title_clean = _html.unescape(re.sub(r"<[^>]+>", "", post.get("title", ""))).strip()
         results = []
-        current_meta = parse_social_meta(post.get("content", ""))
-        new_tweet_id = current_meta.get("tweet_id", "")
-        try:
-            new_tg_msg = int(current_meta.get("tg_msg", 0) or 0)
-        except (ValueError, TypeError):
-            new_tg_msg = 0
 
-        if pub_tg:
-            tg_msg_id = await publish_to_channel(context.bot, data, post_url)
-            if tg_msg_id:
-                results.append("✅ Publicado en canal @MundoEmpresarial_AR")
-                new_tg_msg = tg_msg_id
-            else:
-                results.append("❌ Error al publicar en canal TG")
+        # 1) Redes con API → agente redes.difundir_nota (placas + UTM + pacing Meta).
+        canales = [_EDIT_PUB_CANAL[k] for k in sel if k in _EDIT_PUB_CANAL]
+        if canales:
+            cat_ids  = post.get("categories") or []
+            cat_name = CAT_NAMES.get(cat_ids[0], "Noticias") if cat_ids else "Noticias"
 
-        if pub_tw:
-            tweet_url = await asyncio.to_thread(post_tweet, data, post_url)
-            if tweet_url:
-                new_tweet_id = tweet_url.rsplit("/", 1)[-1]
-                warn = get_last_twitter_error()  # advertencia de retry sin imagen
-                results.append(f"✅ Tuit publicado: {tweet_url}" + (f"\n   {warn}" if warn else ""))
-            else:
-                err = get_last_twitter_error() or "(sin detalle)"
-                results.append(f"❌ Error al publicar en Twitter\n   ⚠️ `{err[:200]}`")
+            def _difundir():
+                import sys as _sys
+                if "/opt/me-harness" not in _sys.path:
+                    _sys.path.insert(0, "/opt/me-harness")
+                from agents import publicador as _pub
+                return _pub.post_to_social(
+                    wp_post_id=post["id"], wp_url=post_url, title=title_clean,
+                    excerpt="", tags=[], categoria=cat_name, canales=tuple(canales),
+                )
+            try:
+                social = await asyncio.wait_for(asyncio.to_thread(_difundir), timeout=150)
+            except Exception as e:
+                social = {}
+                results.append(f"❌ Error del agente de redes: `{str(e)[:200]}`")
 
-        if pub_wa:
+            errores = social.get("errores") or {}
+            if "tg" in canales:
+                results.append("✅ Canal @MundoEmpresarial_AR" if social.get("tg_msg_id")
+                               else f"❌ Telegram: {errores.get('tg', '—')}")
+            if "x" in canales:
+                results.append(f"✅ Twitter: https://x.com/i/status/{social['tweet_id']}"
+                               if social.get("tweet_id") else f"❌ Twitter: {errores.get('x', '—')}")
+            if "li" in canales:
+                results.append("✅ LinkedIn" if social.get("li_urn")
+                               else f"❌ LinkedIn: {errores.get('li', '—')}")
+            meta_enc = social.get("meta_encolados") or []
+            if "fb" in canales:
+                results.append("🕒 Facebook encolado (sale con pacing)" if "fb" in meta_enc
+                               else "❌ Facebook no encolado (revisar claves)")
+            if "ig" in canales:
+                results.append("🕒 Instagram encolado (sale con pacing)" if "ig" in meta_enc
+                               else "❌ Instagram no encolado (revisar claves)")
+
+        # 2) WhatsApp: sin API → texto para copiar y pegar.
+        if "wa" in sel:
+            data = await asyncio.to_thread(_post_to_data, post)
             s_title = get_title(data)
-            kw_wa2 = focus_keyword(data.get("original_title") or data.get("title", ""))
-            s_excerpt_wa2 = get_excerpt(data, kw=kw_wa2)
-            wa_text = f"📰 {s_title}\n\n{s_excerpt_wa2[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
+            kw_wa = focus_keyword(data.get("original_title") or data.get("title", ""))
+            s_excerpt_wa = get_excerpt(data, kw=kw_wa)
+            wa_text = f"📰 {s_title}\n\n{s_excerpt_wa[:200]}\n\n🔗 {utm_url(post_url, 'whatsapp')}"
             await query.message.reply_text(f"— Copiá y pegá en WhatsApp —\n\n{wa_text}")
             results.append("✅ Texto para WhatsApp preparado")
 
-        if pub_li:
-            li_url = await asyncio.to_thread(post_linkedin, data, post_url)
-            if li_url:
-                results.append(f"✅ Publicado en LinkedIn: {li_url}")
-            else:
-                results.append("❌ Error al publicar en LinkedIn")
-
-        # Persistir ids nuevos en el post
-        if (pub_tg and new_tg_msg) or (pub_tw and new_tweet_id):
-            await asyncio.to_thread(
-                append_social_meta,
-                post["id"], post.get("content", ""),
-                new_tweet_id, new_tg_msg,
-            )
-
         # Limpiar estado
+        for k, _ in _EDIT_PUB_NETS:
+            context.user_data.pop(f"pub_{k}", None)
         context.user_data.pop("edit_post", None)
-        context.user_data.pop("pub_tw", None)
-        context.user_data.pop("pub_tg", None)
-        context.user_data.pop("pub_wa", None)
-        context.user_data.pop("pub_li", None)
 
         await query.edit_message_text("\n".join(results) or "Nada ejecutado.")
         return
