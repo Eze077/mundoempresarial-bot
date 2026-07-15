@@ -286,19 +286,22 @@ CATEGORY_KEYWORDS = {
           "energía", "luz", "gas", "agua", "tarifas", "utilities"],
     93:  ["sindicato", "gremio", "sindical", "paritaria", "salario", "sueldo",
           "convenio colectivo", "huelga", "paro", "cgt", "uom", "camioneros"],
-    1139:["vino", "vinos", "bodega", "bodegas", "malbec", "torrontés", "torrontes",
-          "cabernet", "chardonnay", "syrah", "pinot", "viñedo", "viñedos",
-          "vitivinícola", "vitivinicola", "enología", "enólogo", "enólogos",
-          "sommelier", "sommeliers", "vinoteca", "maridaje", "cepa", "cepas",
-          "coviar", "industria vitivinícola", "exportación de vinos",
-          "vendimia", "cosecha vitivinícola"],
+    # Mundo del vino — SIN 'vino'/'vinos'/'bodega'/'bodegas' sueltos (matcheaban el verbo
+    # 'vino'/'provino' y depósitos). Solo términos inequívocos. Fix 2026-07-15.
+    1139:["malbec", "torrontés", "torrontes", "cabernet", "chardonnay", "syrah", "pinot",
+          "viñedo", "viñedos", "vitivinícola", "vitivinicola", "enología", "enólogo",
+          "enólogos", "sommelier", "sommeliers", "vinoteca", "maridaje", "cepa", "cepas",
+          "coviar", "industria vitivinícola", "exportación de vinos", "vino tinto",
+          "vino blanco", "vendimia", "cosecha vitivinícola"],
 }
 
 def detect_categories(title: str, text: str, excerpt: str) -> list:
+    import re as _re
     corpus = (title + " " + title + " " + title + " " + excerpt + " " + (text[:600] or "")).lower()
     scores = {}
     for cat_id, kws in CATEGORY_KEYWORDS.items():
-        score = sum(corpus.count(kw) for kw in kws)
+        # word-boundary: antes 'corpus.count(kw)' era substring ('gas'→'gaseosa', 'vino'→verbo)
+        score = sum(len(_re.findall(r"\b" + _re.escape(kw) + r"\b", corpus)) for kw in kws)
         if score > 0:
             scores[cat_id] = score
     if not scores:
