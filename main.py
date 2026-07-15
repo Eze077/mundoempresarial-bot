@@ -1405,9 +1405,10 @@ def wp_auth():
     return {"Authorization": f"Basic {token}"}
 
 
-# Ferozo bloquea los writes REST directos del VPS (responde 415 + HTML del WAF):
-# upload de media, update/delete/create de posts y tags. WARP (Cloudflare) los saltea,
-# mismo patrón que el harness (_WARP en publicador.py). Reads siguen directos (no se bloquean).
+# Ferozo bloquea los REST directos del VPS (responde 415 + HTML del WAF): upload de media,
+# update/delete/create de posts y tags Y TAMBIÉN los GET (desde 2026-07, el WAF endureció y
+# bloquea lectura además de escritura). TODA llamada a wp-json va por WARP (Cloudflare), mismo
+# patrón que el harness (_WARP en publicador.py). Ver [[bot_wp_writes_warp]].
 _WP_PROXIES = {"http": "socks5://127.0.0.1:40000", "https": "socks5://127.0.0.1:40000"}
 
 
@@ -12459,7 +12460,7 @@ def _find_or_create_feedback_post() -> int | None:
     try:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts?slug={_FEEDBACK_POST_SLUG}&status=private,draft",
-            headers=h, timeout=10,
+            headers=h, proxies=_WP_PROXIES, timeout=15,
         )
         if r.status_code == 200 and r.json():
             _FEEDBACK_POST_ID = r.json()[0]["id"]
@@ -12480,7 +12481,7 @@ def _find_or_create_feedback_post() -> int | None:
         r = requests.post(
             f"{WP_URL}/wp-json/wp/v2/posts",
             headers={**h, "Content-Type": "application/json"},
-            json=payload, timeout=15,
+            json=payload, proxies=_WP_PROXIES, timeout=20,
         )
         if r.status_code == 201:
             _FEEDBACK_POST_ID = r.json()["id"]
@@ -12739,7 +12740,7 @@ def _load_feedback() -> dict:
     try:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit",
-            headers=wp_auth(), timeout=10,
+            headers=wp_auth(), proxies=_WP_PROXIES, timeout=15,
         )
         if r.status_code == 200:
             raw_content = r.json().get("content", {}).get("raw", "") or ""
@@ -12776,8 +12777,10 @@ def _save_feedback(data: dict) -> bool:
         r = requests.post(
             f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
             headers={**wp_auth(), "Content-Type": "application/json"},
-            json=payload, timeout=15,
+            json=payload, proxies=_WP_PROXIES, timeout=20,
         )
+        if r.status_code not in (200, 201):
+            logger.error(f"Save feedback {r.status_code}: {r.text[:200]}")
         return r.status_code in (200, 201)
     except Exception as e:
         logger.error(f"Save feedback: {e}")
