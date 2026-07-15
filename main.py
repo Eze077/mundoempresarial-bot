@@ -5374,6 +5374,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 import direccion as _m; return _m.reformular_esquema(_aid, text_in)
             if _flow == "imp":
                 import impacto as _m; return _m.reformular(_aid, _aidx, text_in)
+            if _flow == "gsc":
+                import gsc as _m; return _m.reformular(_aid, text_in)
             return None
 
         try:
@@ -7040,10 +7042,37 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── GSC: aplicar el título SEO propuesto (PATCH a WP) / descartar ──
+    if query.data.startswith("h_gsc_ok:") or query.data.startswith("h_gsc_no:"):
+        import sys as _sysgsc
+        _sysgsc.path.insert(0, "/opt/me-harness"); _sysgsc.path.insert(0, "/opt/me-harness/agents")
+        try:
+            pg = query.data.split(":")
+            actg = pg[0]; pidg = int(pg[1])
+            if actg == "h_gsc_ok":
+                await query.answer("Aplicando el título SEO…", show_alert=False)
+                def _apply_gsc():
+                    import gsc as _g; return _g.aplicar_prop(pidg)
+                res = await asyncio.wait_for(asyncio.to_thread(_apply_gsc), timeout=120)
+                footer = f"\n\n✅ <b>Aplicado</b> — {res}"
+            else:
+                import broker as _bkg
+                _bkg.set_gsc_prop_status(pidg, "dismissed")
+                footer = "\n\n❌ Descartada."
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          reply_markup=None, disable_web_page_preview=True)
+        except Exception as _eg:
+            try:
+                await query.answer(f"Error: {str(_eg)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── ✏️ Ajustar (opinar/complementar): editor/supervisor/reco/impacto → pide el texto ──
     if (query.data.startswith("h_edit_ajustar:") or query.data.startswith("h_sup_ajustar:")
             or query.data.startswith("h_reco_ajustar:") or query.data.startswith("h_imp_ajustar:")
-            or query.data.startswith("h_esq_ajustar:")):
+            or query.data.startswith("h_esq_ajustar:") or query.data.startswith("h_gsc_ajustar:")):
         try:
             _pa = query.data.split(":")
             _flow = _pa[0].split("_")[1]   # edit | sup | reco | imp
