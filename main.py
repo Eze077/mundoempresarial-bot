@@ -9760,6 +9760,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             pass
                 asyncio.create_task(_run_lv())
 
+            elif action == "h_cur_rebrief" and arg:
+                job_id = int(arg)
+                await query.answer("📰 Reenviando el briefing de esa nota…", show_alert=False)
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(_cur.run_briefing_single, job_id), timeout=60)
+                except Exception as _e_rb:
+                    try:
+                        await context.bot.send_message(query.message.chat_id,
+                                                       f"⚠️ No pude reenviar el briefing #{job_id}: {_e_rb}")
+                    except Exception:
+                        pass
+
             elif action == "h_cur_publinota" and arg:
                 job_id = int(arg)
                 try:
