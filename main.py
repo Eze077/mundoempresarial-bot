@@ -9706,6 +9706,60 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+            elif action == "h_cur_living" and arg:
+                job_id = int(arg)
+                try:
+                    _seen_lv = set(); _opts_lv = []
+                    for _ln in _br.get_living_notes():
+                        _wp = _ln.get("wp_post_id")
+                        if not _wp or _wp in _seen_lv:
+                            continue
+                        _seen_lv.add(_wp)
+                        _opts_lv.append((_ln["id"], _ln["tema"]))
+                    rows = [[{"text": f"📄 {_t[:44]}", "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
+                            for _lid, _t in _opts_lv[:20]]
+                    rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
+                    await query.edit_message_text(
+                        f"📌 <b>¿A qué living note corresponde esta noticia?</b> — job #{job_id}\n"
+                        f"<i>Elegí la ficha. El agente busca 2 fuentes que ratifiquen el dato y la corrige solo.</i>",
+                        parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+                except Exception as _e_lv:
+                    await query.answer(f"Error: {_e_lv}", show_alert=True)
+
+            elif action == "h_cur_setliving" and len(parts) >= 3:
+                job_id = int(parts[1]); ln_id = int(parts[2])
+                state = _load_state(job_id); state["living_note_id"] = ln_id; _save_state(job_id, state)
+                _fs_txt = ""
+                try:
+                    from agents import living_update as _lu0
+                    _lnx = next((x for x in _br.get_living_notes() if x["id"] == ln_id), None)
+                    _fs = _lu0.fuentes_de_ln(_lnx) if _lnx else []
+                    if _fs:
+                        _fs_txt = "\n\n📋 <b>Fuentes calificadas:</b> " + "; ".join(_fs)
+                except Exception:
+                    pass
+                await query.answer("🔎 Analizando la novedad…", show_alert=False)
+                try:
+                    await query.edit_message_text(
+                        f"🔎 <b>Evaluando la novedad…</b> — job #{job_id}\n"
+                        f"<i>Busco 2 fuentes que ratifiquen el dato y, si se confirma, corrijo la ficha solo. "
+                        f"Te aviso el resultado.</i>{_fs_txt}", parse_mode="HTML")
+                except Exception:
+                    pass
+                _chat_lv = query.message.chat_id
+                async def _run_lv(_lid=ln_id, _jid=job_id, _ch=_chat_lv):
+                    try:
+                        import sys as _s2; _s2.path.insert(0, "/opt/me-harness")
+                        from agents import living_update as _lu
+                        await asyncio.wait_for(
+                            asyncio.to_thread(_lu.evaluar_y_corregir, _lid, _jid), timeout=280)
+                    except Exception as _e2:
+                        try:
+                            await context.bot.send_message(_ch, f"⚠️ Living Note: error evaluando #{_jid}: {_e2}")
+                        except Exception:
+                            pass
+                asyncio.create_task(_run_lv())
+
             elif action == "h_cur_publinota" and arg:
                 job_id = int(arg)
                 try:
