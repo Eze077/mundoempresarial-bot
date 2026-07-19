@@ -15076,10 +15076,14 @@ def _chequeo_rapido() -> str:
     else:
         lineas.append("✅ Difusión a redes: al día")
 
-    # 3. Cola del gate de calidad (frenadas te esperan; rechazadas es normal salvo que crezcan)
+    # 3. Cola del gate: la FRENADA es accionable (te espera); las rechazadas son descartes
+    # normales — solo alarman si se disparan (gate muy duro / entra basura).
     rev, rech = st.get("revision_queue", 0), st.get("rechazada_queue", 0)
-    if rev or rech > 3:
-        lineas.append(f"⚠️ Gate: <b>{rev} frenada(s)</b> esperándote · {rech} rechazadas"); alertas += 1
+    if rev:
+        extra = f" · {rech} rechazadas" if rech else ""
+        lineas.append(f"⚠️ Gate: <b>{rev} frenada(s)</b> esperándote{extra}"); alertas += 1
+    elif rech >= 15:
+        lineas.append(f"⚠️ Gate: {rech} rechazadas acumuladas — fijate si está muy duro"); alertas += 1
     else:
         lineas.append(f"✅ Gate de calidad: {rev} frenadas, {rech} rechazadas (normal)")
 
