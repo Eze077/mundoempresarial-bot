@@ -7021,6 +7021,51 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── SUPERVISOR (mejora diaria del harness): aplicar/descartar propuesta ──
+    # ── AUTO-PARCHE del supervisor: generar diff / aplicar+deploy / revertir (async, con rollback) ──
+    if (query.data.startswith("h_sup_patch:") or query.data.startswith("h_sup_patchok:")
+            or query.data.startswith("h_sup_revert:")):
+        import sys as _spx
+        _spx.path.insert(0, "/opt/me-harness"); _spx.path.insert(0, "/opt/me-harness/agents")
+        ps = query.data.split(":")
+        act = ps[0]
+        base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+        kb_after = None
+        try:
+            if act == "h_sup_patch":
+                pid = int(ps[1]); idx = int(ps[2])
+                await query.answer("Generando el parche… (GPT lee el código)", show_alert=False)
+                def _gen():
+                    import supervisor as _s; return _s.generar_parche(pid, idx)
+                res = await asyncio.wait_for(asyncio.to_thread(_gen), timeout=160)
+                footer = ("\n\n🔧 Parche generado ⤵️ (revisalo y aplicá abajo)" if res and res.get("ok")
+                          else f"\n\n⚠️ No pude generar un parche exacto: "
+                               f"{res.get('motivo') if res else 'error'}\n(queda anotado en pendientes)")
+            elif act == "h_sup_patchok":
+                pid = int(ps[1]); idx = int(ps[2])
+                await query.answer("Aplicando… compile · import · restart · health", show_alert=False)
+                def _app():
+                    import supervisor as _s; return _s.aplicar_parche(pid, idx)
+                res = await asyncio.wait_for(asyncio.to_thread(_app), timeout=220)
+                footer = f"\n\n{res.get('msg')}" if res else "\n\n⚠️ error aplicando"
+                if res and res.get("ok") and res.get("patch_id"):
+                    kb_after = InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "↩️ Revertir", callback_data=f"h_sup_revert:{res['patch_id']}")]])
+            else:  # h_sup_revert
+                pidr = int(ps[1])
+                await query.answer("Revirtiendo + restart…", show_alert=False)
+                def _rev():
+                    import autopatch as _ap; return _ap.revert(pidr)
+                res = await asyncio.wait_for(asyncio.to_thread(_rev), timeout=140)
+                footer = f"\n\n{res.get('msg')}" if res else "\n\n⚠️ error revirtiendo"
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          reply_markup=kb_after, disable_web_page_preview=True)
+        except Exception as _epx:
+            try:
+                await query.answer(f"Error: {str(_epx)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     if query.data.startswith("h_sup_apply:") or query.data.startswith("h_sup_skip:"):
         import sys as _syssup
         _syssup.path.insert(0, "/opt/me-harness"); _syssup.path.insert(0, "/opt/me-harness/agents")
