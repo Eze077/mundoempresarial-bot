@@ -7021,6 +7021,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── SUPERVISOR (mejora diaria del harness): aplicar/descartar propuesta ──
+    # ── /rutina: chequeo de salud en un toque (semáforo en criollo) ──
+    if query.data == "rutina_check":
+        await query.answer("Chequeando…")
+        try:
+            txt = await asyncio.wait_for(asyncio.to_thread(_chequeo_rapido), timeout=45)
+        except Exception as _erc:
+            txt = f"⚠️ No pude chequear ahora ({str(_erc)[:70]}). Probá de nuevo."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Chequear de nuevo", callback_data="rutina_check")]])
+        try:
+            await query.message.reply_text(txt, parse_mode="HTML", reply_markup=kb,
+                                            disable_web_page_preview=True)
+        except Exception:
+            pass
+        return
+
     # ── AUTO-PARCHE del supervisor: generar diff / aplicar+deploy / revertir (async, con rollback) ──
     if (query.data.startswith("h_sup_patch:") or query.data.startswith("h_sup_patchok:")
             or query.data.startswith("h_sup_revert:")):
@@ -15008,6 +15023,114 @@ async def cmd_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
+# ── /rutina — tu día con el sistema + chequeo de salud en un toque ────────────
+_RUTINA_TXT = (
+    "📅 <b>Tu rutina con el sistema</b>\n\n"
+    "El diario se hace solo. Vos sos el <b>editor</b>: aprobás, corregís rumbo y mirás que no se trabe.\n\n"
+    "🔵 <b>Lo único obligatorio: los briefings</b>\n"
+    "<b>08:00 · 12:00 · 18:00</b> → te llegan 5 notas. Marcás las que van y <b>Aprobar</b>. ~2 min c/u. "
+    "Es lo único que frena la máquina si no lo hacés.\n\n"
+    "👉 <b>A demanda</b> (1 toque cuando el sistema te consulta):\n"
+    "• 🩺 03:00 — Supervisor: si propone un parche → 🔧 Generar → ves el código → ✅ Aplicar\n"
+    "• 🚫 Nota frenada por el gate → <b>Publicar igual</b> o la dejás\n"
+    "• 📅 Efeméride (08:15) → elegís esfuerzo de campaña\n"
+    "• 📈 Impacto / 🎯 Título SEO → 1 toque\n"
+    "• 🧭 Lunes → recos editoriales de la semana → aprobás\n\n"
+    "🟢 <b>Corre sin vos:</b> cotizaciones, living notes, difusión a redes, hitos, auto-cura.\n\n"
+    "🔎 <b>¿Cómo sé si está todo bien?</b>\n"
+    "Apretá el botón de abajo cuando quieras. Y si algo se rompe, el sistema te avisa solo "
+    "(silencio = todo bien). El detalle fino lo ves con /pipeline."
+)
+
+
+def _rutina_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔎 ¿Está todo bien?", callback_data="rutina_check")]])
+
+
+def _chequeo_rapido() -> str:
+    """Chequeo de salud en criollo para /rutina. Reusa los sensores del auditor + RAM + servicio.
+    Devuelve un semáforo simple: qué está bien y qué mirar."""
+    import sys as _srx
+    _srx.path.insert(0, "/opt/me-harness"); _srx.path.insert(0, "/opt/me-harness/agents")
+    import datetime as _dt
+    import subprocess as _sp
+    try:
+        from agents import auditor as _aud
+        st = _aud._pipeline_stats()
+    except Exception as e:
+        return f"⚠️ No pude leer el estado ahora ({str(e)[:70]}). Probá de nuevo o /pipeline."
+    hora = (_dt.datetime.utcnow() - _dt.timedelta(hours=3)).hour  # ARG (UTC-3)
+    lineas, alertas = [], 0
+
+    # 1. ¿Está publicando?
+    p6, p24 = st.get("published_6h", 0), st.get("published_24h", 0)
+    if p6 == 0 and 9 <= hora <= 22:
+        lineas.append("🔴 <b>No publicó nada en 6h</b> (y es horario diurno) — algo se trabó"); alertas += 1
+    else:
+        lineas.append(f"✅ Publicando: {p6} en las últimas 6h ({p24} en el día)")
+
+    # 2. ¿Sale a redes?
+    dif, meta = st.get("stuck_difusion", 0), st.get("meta_queue_stuck", 0)
+    if dif or meta:
+        lineas.append(f"⚠️ <b>Difusión trabada</b>: {dif} nota(s) sin salir / {meta} en cola de FB·IG"); alertas += 1
+    else:
+        lineas.append("✅ Difusión a redes: al día")
+
+    # 3. Cola del gate de calidad (frenadas te esperan; rechazadas es normal salvo que crezcan)
+    rev, rech = st.get("revision_queue", 0), st.get("rechazada_queue", 0)
+    if rev or rech > 3:
+        lineas.append(f"⚠️ Gate: <b>{rev} frenada(s)</b> esperándote · {rech} rechazadas"); alertas += 1
+    else:
+        lineas.append(f"✅ Gate de calidad: {rev} frenadas, {rech} rechazadas (normal)")
+
+    # 4. Jobs trabados (la auto-cura los destraba sola — informativo, no alarma dura)
+    stuck = st.get("stuck_auto_jobs", 0)
+    if stuck:
+        lineas.append(f"ℹ️ {stuck} nota(s) trabada(s) &gt;2h — la auto-cura las resuelve sola (mirá si sigue mañana)")
+
+    # 5. Newsletter (riesgo de exceder el cupo de envío)
+    if (st.get("email_health") or {}).get("riesgo"):
+        lineas.append("⚠️ <b>Newsletter</b>: una campaña supera el cupo por hora — puede fallar el excedente"); alertas += 1
+
+    # 6. Servidor: RAM + que el harness esté corriendo
+    ram = None
+    try:
+        m = {}
+        for l in open("/proc/meminfo"):
+            pp = l.split(":")
+            if len(pp) == 2:
+                m[pp[0]] = int(pp[1].split()[0])
+        tot, av = m.get("MemTotal", 1), m.get("MemAvailable", 0)
+        ram = round(100 * (tot - av) / tot)
+    except Exception:
+        pass
+    try:
+        act = _sp.run(["systemctl", "is-active", "me-harness"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        act = "?"
+    if act != "active":
+        lineas.append(f"🔴 <b>El harness no está corriendo</b> (estado: {act}) — avisame"); alertas += 1
+    elif ram is not None and ram >= 90:
+        lineas.append(f"⚠️ <b>Servidor</b>: RAM {ram}% (alta)"); alertas += 1
+    else:
+        lineas.append(f"✅ Servidor: RAM {ram if ram is not None else '?'}% , todo corriendo")
+
+    hhmm = (_dt.datetime.utcnow() - _dt.timedelta(hours=3)).strftime("%H:%M")
+    if alertas == 0:
+        head = f"🟢 <b>Todo en orden</b>  <i>({hhmm})</i>\n\n"
+        foot = "\n\nNo tenés que hacer nada 👍"
+    else:
+        head = f"🟠 <b>Hay {alertas} cosa(s) para mirar</b>  <i>({hhmm})</i>\n\n"
+        foot = "\n\nSi una alerta sigue después de un rato, avisame y lo miro."
+    return head + "\n".join(lineas) + foot
+
+
+async def cmd_rutina(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tu rutina diaria con el sistema + botón de chequeo de salud."""
+    await update.message.reply_text(_RUTINA_TXT, parse_mode="HTML",
+                                    reply_markup=_rutina_kb(), disable_web_page_preview=True)
+
+
 # ── Command + callback ────────────────────────────────────────────────────────
 
 async def cmd_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15423,6 +15546,7 @@ async def _post_init(application: Application) -> None:
     from telegram import BotCommand
     await application.bot.set_my_commands([
         # ── Pipeline editorial ────────────────────────────────────────────────
+        BotCommand("rutina",            "Tu rutina diaria + chequeo de salud en un toque"),
         BotCommand("pipeline",          "Estado del pipeline editorial — todas las etapas"),
         BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
         BotCommand("eventos",           "Agenda — boletín semanal + efemérides que vienen"),
@@ -16301,6 +16425,7 @@ def main():
     app.add_handler(CommandHandler("lector", cmd_lector))
     app.add_handler(CommandHandler("editor", cmd_editor))
     app.add_handler(CommandHandler("pipeline", cmd_pipeline))
+    app.add_handler(CommandHandler("rutina", cmd_rutina))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CommandHandler("evento", cmd_evento))
     app.add_handler(CommandHandler("campania", cmd_campania))
