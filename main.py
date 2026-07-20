@@ -7129,7 +7129,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 footer = "\n\n❌ Descartada."
             base = query.message.text_html if query.message.text else (query.message.caption_html or "")
             await query.edit_message_text(base + footer, parse_mode="HTML",
-                                          reply_markup=None, disable_web_page_preview=True)
+                                          reply_markup=query.message.reply_markup, disable_web_page_preview=True)
         except Exception as _eg:
             try:
                 await query.answer(f"Error: {str(_eg)[:150]}", show_alert=True)
@@ -7162,7 +7162,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 footer = "\n\n❌ Descartada."
             base = query.message.text_html if query.message.text else (query.message.caption_html or "")
             await query.edit_message_text(base + footer, parse_mode="HTML",
-                                          reply_markup=None, disable_web_page_preview=True)
+                                          reply_markup=query.message.reply_markup, disable_web_page_preview=True)
         except Exception as _el:
             try:
                 await query.answer(f"Error: {str(_el)[:150]}", show_alert=True)
