@@ -7055,6 +7055,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 footer = ("\n\n🔧 Parche generado ⤵️ (revisalo y aplicá abajo)" if res and res.get("ok")
                           else f"\n\n⚠️ No pude generar un parche exacto: "
                                f"{res.get('motivo') if res else 'error'}\n(queda anotado en pendientes)")
+                # NO borrar los botones del original: dejarlos para poder VOLVER (re-generar / ajustar / descartar)
+                kb_after = query.message.reply_markup
             elif act == "h_sup_patchok":
                 pid = int(ps[1]); idx = int(ps[2])
                 await query.answer("Aplicando… compile · import · restart · health", show_alert=False)
