@@ -5705,6 +5705,37 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error al programar: {e}")
         return
 
+    # ── /notamanual: campos editados desde los botones de la tarjeta ──────────
+    _nm_campo = next((c for c in ("title", "bajada", "tags")
+                      if context.user_data.get(f"awaiting_nota_manual_{c}")), None)
+    if _nm_campo:
+        context.user_data.pop(f"awaiting_nota_manual_{_nm_campo}", None)
+        _nm = context.user_data.get("nota_manual")
+        if not _nm:
+            await update.message.reply_text("⚠️ Se perdió la nota. Reiniciá con /notamanual.")
+            return
+        _val = (text_in or "").strip()
+        if not _val:
+            await update.message.reply_text("Vino vacío — no cambié nada.")
+            return
+        if _nm_campo == "title":
+            _nm["title"] = _val
+            # El SEO cuelga del título: si cambia el título, cambia la keyword.
+            try:
+                _nm["focus_keyword"] = focus_keyword(_val)
+            except Exception:
+                pass
+            _aviso = "✅ Título actualizado."
+        elif _nm_campo == "bajada":
+            _nm["excerpt"] = _val
+            _aviso = "✅ Bajada actualizada."
+        else:
+            _nm["tag_names"] = [t.strip() for t in _val.split(",") if t.strip()][:6]
+            _aviso = f"✅ {len(_nm['tag_names'])} etiqueta(s)."
+        await update.message.reply_text(_aviso)
+        await _nm_redraw(context, _nm)
+        return
+
     # ── Editor: esperando nuevo nombre para renombrar tema ───────────────────
     rename_id = context.user_data.pop("edito_rename_id", None)
     if rename_id:
@@ -12604,7 +12635,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.edit_message_text(
                     chat_id=_nm["_panel_chat_id"], message_id=_nm["_panel_msg_id"],
                     text=_nota_manual_panel_text(_nm), parse_mode="HTML",
-                    reply_markup=_nota_manual_kb())
+                    reply_markup=_nota_manual_kb(_nm))
         except Exception:
             pass
         return
@@ -15932,6 +15963,7 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
     return {"title": title, "excerpt": bajada or cuerpo[:160], "content_html": body_html,
             "bullets": bullets, "h2_headings": h2, "category_ids": cat_ids,
             "tag_names": tags, "hashtags": hts, "focus_keyword": kw, "autor": autor,
+            "formato": "continua", "portada": False,
             "source_url": f"columna://{url_slug(title) or 'autor'}"}
 
 
@@ -15951,9 +15983,12 @@ def _enqueue_nota_manual(data: dict, scheduled_dt=None) -> int:
         "category_ids":  data["category_ids"],
         "tag_names":     data["tag_names"],
         "matched_kw":    [],
-        "formato":       "continua",
-        "portada":       False,
-        "meta_desc":     (data["excerpt"] or "")[:155],
+        # Lo que Leo eligió en la tarjeta manda sobre el default.
+        "formato":       data.get("formato") or "continua",
+        "portada":       bool(data.get("portada")),
+        # 210 y no 155: la bajada es una ORACIÓN COMPLETA y cortarla a 155 la parte al
+        # medio de una palabra — más ahora que Leo la puede escribir a mano. [[harness_quirks]]
+        "meta_desc":     (data["excerpt"] or "")[:210],
         "focus_keyword": data["focus_keyword"],
         "source":        data["source_url"],
         "source_url":    data["source_url"],
@@ -16006,11 +16041,68 @@ def _chunks(s: str, n: int = 3900) -> list:
     return out or [""]
 
 
-def _nota_manual_kb() -> dict:
+# Mismas categorías que el panel del briefing (h_cur_setcat), para que decidir sea igual
+# en los dos lados.
+_NM_CATS = {
+    94: "Economía", 87: "Política", 96: "Empresas", 97: "Internacional",
+    100: "Gobierno", 95: "AFIP/ARCA", 90: "Industria", 91: "Opinión",
+    89: "Comercio", 88: "Agro", 103: "Informes", 102: "Provincias",
+    93: "Sindicatos", 92: "Servicios", 239: "Digital pymes", 1139: "Mundo del vino",
+    101: "Poder Judicial", 99: "Congreso", 98: "Nacional",
+    104: "ME TV", 1048: "Coberturas",
+}
+
+
+def _nm_cat_kb(sel_ids: list) -> dict:
+    """Submenú de categorías multi-select, igual que el del briefing."""
+    rows, items = [], list(_NM_CATS.items())
+    for i in range(0, len(items), 2):
+        rows.append([{"text": ("☑️ " if cid in (sel_ids or []) else "") + cname,
+                      "callback_data": f"nm_setcat:{cid}"}
+                     for cid, cname in items[i:i + 2]])
+    rows.append([{"text": "↩ Volver", "callback_data": "nm_back"}])
+    return {"inline_keyboard": rows}
+
+
+def _nota_manual_kb(data: dict = None) -> dict:
+    """Teclado de la nota manual — mismo espíritu que la tarjeta del briefing: todo lo que
+    Leo puede decidir queda a un toque, sin salir de la tarjeta. Los ✓ muestran el estado."""
+    d = data or {}
+    _foto = "📷 Foto ✓" if d.get("image_id_override") else "📷 Foto"
+    _port = "📌 Portada ✓" if d.get("portada") else "📌 Portada"
+    _fmt  = d.get("formato") or "continua"
+    _fmt_lbl = "📄 Desplegable" if _fmt == "desplegable" else "📃 Continua"
     return {"inline_keyboard": [
+        [{"text": "✏️ Título",     "callback_data": "nm_title"},
+         {"text": "📝 Bajada",     "callback_data": "nm_bajada"}],
+        [{"text": _foto,           "callback_data": "nm_foto"},
+         {"text": "🗂 Categorías", "callback_data": "nm_cat"}],
+        [{"text": "🏷 Etiquetas",  "callback_data": "nm_tags"},
+         {"text": _fmt_lbl,        "callback_data": "nm_formato"}],
+        [{"text": _port,           "callback_data": "nm_portada"}],
         [{"text": "✅ Publicar ahora", "callback_data": "nm_pub"},
-         {"text": "🗓️ Programar", "callback_data": "nm_prog"}],
-        [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+         {"text": "🗓️ Programar",     "callback_data": "nm_prog"}],
+        [{"text": "✖️ Cancelar",   "callback_data": "nm_cancel"}]]}
+
+
+async def _nm_redraw(context, data: dict, query=None):
+    """Redibuja la tarjeta en su lugar tras cada cambio, para que el estado que se ve sea
+    siempre el que se va a publicar. Si el toque vino de la propia tarjeta se edita esa;
+    si vino de un mensaje de texto se usa el id guardado en el preview."""
+    try:
+        if query is not None:
+            await query.edit_message_text(_nota_manual_panel_text(data), parse_mode="HTML",
+                                          reply_markup=_nota_manual_kb(data))
+            data["_panel_chat_id"] = query.message.chat_id
+            data["_panel_msg_id"]  = query.message.message_id
+            return
+        if data.get("_panel_chat_id") and data.get("_panel_msg_id"):
+            await context.bot.edit_message_text(
+                chat_id=data["_panel_chat_id"], message_id=data["_panel_msg_id"],
+                text=_nota_manual_panel_text(data), parse_mode="HTML",
+                reply_markup=_nota_manual_kb(data))
+    except Exception:
+        pass
 
 
 def _nota_manual_panel_text(data: dict) -> str:
@@ -16021,7 +16113,8 @@ def _nota_manual_panel_text(data: dict) -> str:
     elif data.get("pdf_images"):
         foto = f"el PDF trae {data['pdf_images']} imagen(es) — mandá una foto para portada, o va el logo ME"
     else:
-        foto = "sin foto → se publica con el logo ME (placeholder). Mandá una imagen si querés portada propia"
+        foto = "sin foto → se publica con el logo ME (placeholder). Tocá 📷 Foto o mandá una imagen"
+    _fmt = data.get("formato") or "continua"
     return (
         "📝 <b>Nota manual lista para revisar</b>\n\n"
         f"<b>Título:</b> {esc(data['title'])}\n"
@@ -16031,9 +16124,12 @@ def _nota_manual_panel_text(data: dict) -> str:
         f"<b>Etiquetas:</b> {esc(', '.join(data['tag_names']) or '—')}\n"
         f"<b>Hashtags:</b> {esc(' '.join(data['hashtags']) or '—')}\n"
         f"<b>📷 Foto:</b> {esc(foto)}\n"
+        f"<b>Formato:</b> {'desplegable' if _fmt == 'desplegable' else 'continua'}"
+        f"{'  ·  <b>📌 va a portada</b>' if data.get('portada') else ''}\n"
         f"<b>Cuerpo:</b> {len(data['content_html'])} car · "
         f"{len(data['h2_headings'])} secciones · {len(data['bullets'])} bullets ☝️ (arriba)\n\n"
-        "Se publica con el formato y SEO de siempre (Capa 3 · Opinión). ¿Avanzamos?")
+        "Se publica con el formato y SEO de siempre (Capa 3 · Opinión). "
+        "Tocá cualquier botón para cambiarlo antes de publicar.")
 
 
 async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16125,7 +16221,7 @@ async def _nota_manual_preview(msg, data):
     for chunk in _chunks(body_txt, 3900):
         await msg.reply_text(chunk, disable_web_page_preview=True)
     sent = await msg.reply_text(_nota_manual_panel_text(data), parse_mode="HTML",
-                                reply_markup=_nota_manual_kb())
+                                reply_markup=_nota_manual_kb(data))
     data["_panel_chat_id"] = sent.chat_id
     data["_panel_msg_id"] = sent.message_id
 
@@ -16159,6 +16255,68 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     if not data:
         await q.edit_message_text("⚠️ Se perdió la nota en memoria. Reiniciá con /notamanual.")
         return
+
+    # ── Edición de campos: se pide por texto y la tarjeta se redibuja sola ────────
+    _pedidos = {
+        "title":  ("awaiting_nota_manual_title",
+                   "✏️ Escribí el <b>título exacto</b>. Se usa tal cual: nadie lo reescribe."),
+        "bajada": ("awaiting_nota_manual_bajada",
+                   "📝 Escribí la <b>bajada</b> (una oración completa; es lo que ve Google)."),
+        "tags":   ("awaiting_nota_manual_tags",
+                   "🏷 Escribí las <b>etiquetas</b> separadas por coma (máx. 6)."),
+    }
+    if act in _pedidos:
+        _flag, _txt = _pedidos[act]
+        context.user_data[_flag] = True
+        await q.message.reply_text(_txt, parse_mode="HTML")
+        return
+
+    if act == "foto":
+        await q.message.reply_text(
+            "📷 Mandame la imagen acá como <b>foto</b> y la subo a WordPress como portada "
+            "de esta columna.\n\nSi no mandás ninguna, sale con el logo ME.",
+            parse_mode="HTML")
+        return
+
+    if act == "portada":
+        data["portada"] = not data.get("portada", False)
+        await _nm_redraw(context, data, q)
+        await q.answer("Va a portada" if data["portada"] else "Sin portada", show_alert=False)
+        return
+
+    if act == "formato":
+        data["formato"] = "desplegable" if (data.get("formato") or "continua") == "continua" else "continua"
+        await _nm_redraw(context, data, q)
+        await q.answer(f"Formato: {data['formato']}", show_alert=False)
+        return
+
+    if act == "cat":
+        await q.edit_message_text(
+            "🗂 <b>Categorías</b> — tocá para marcar o desmarcar:",
+            parse_mode="HTML", reply_markup=_nm_cat_kb(data.get("category_ids") or []))
+        return
+
+    if act.startswith("setcat:"):
+        try:
+            _cid = int(act.split(":", 1)[1])
+        except ValueError:
+            return
+        _ids = data.get("category_ids") or []
+        if _cid in _ids:
+            _ids.remove(_cid)
+        else:
+            _ids.append(_cid)
+        data["category_ids"] = _ids
+        try:
+            await q.edit_message_reply_markup(reply_markup=_nm_cat_kb(_ids))
+        except Exception:
+            pass
+        return
+
+    if act == "back":
+        await _nm_redraw(context, data, q)
+        return
+
     if act == "pub":
         try:
             jid = await asyncio.to_thread(_enqueue_nota_manual, data, None)
