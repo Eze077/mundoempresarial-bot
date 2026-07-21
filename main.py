@@ -5699,6 +5699,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             _jid = await asyncio.to_thread(_enqueue_nota_manual, _nm, _dt)
+            await _nm_cerrar(context, _nm,
+                             f"🗓️ <b>Columna #{_jid} programada</b> para "
+                             f"{_dt.strftime('%d/%m %H:%M')}.\n\n"
+                             f"<b>{_nm.get('title', '')}</b>")
+            _nm_espera(context)
             context.user_data.pop("nota_manual", None)
             await update.message.reply_text(f"🗓️ Columna #{_jid} programada para {_dt.strftime('%d/%m %H:%M')}.")
         except Exception as e:
@@ -16085,6 +16090,34 @@ def _nota_manual_kb(data: dict = None) -> dict:
         [{"text": "✖️ Cancelar",   "callback_data": "nm_cancel"}]]}
 
 
+_NM_ESPERAS = ("awaiting_nota_manual_title", "awaiting_nota_manual_bajada",
+               "awaiting_nota_manual_tags", "awaiting_nota_manual_sched")
+
+
+def _nm_espera(context, flag: str = None):
+    """El bot solo puede estar esperando UNA cosa a la vez.
+
+    Sin esto, tocar 🗓️ Programar y después ✏️ Título dejaba el flag de la fecha vivo: el
+    título que escribías lo agarraba el parser de fechas. Cada botón limpia los demás.
+    """
+    for f in _NM_ESPERAS:
+        context.user_data.pop(f, None)
+    if flag:
+        context.user_data[flag] = True
+
+
+async def _nm_cerrar(context, data: dict, texto: str):
+    """Deja la tarjeta en estado final y SIN botones: una vez encolada, no se puede
+    volver a disparar por accidente desde la misma tarjeta."""
+    try:
+        if data.get("_panel_chat_id") and data.get("_panel_msg_id"):
+            await context.bot.edit_message_text(
+                chat_id=data["_panel_chat_id"], message_id=data["_panel_msg_id"],
+                text=texto, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 async def _nm_redraw(context, data: dict, query=None):
     """Redibuja la tarjeta en su lugar tras cada cambio, para que el estado que se ve sea
     siempre el que se va a publicar. Si el toque vino de la propia tarjeta se edita esa;
@@ -16136,6 +16169,7 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if BOT_PAUSED:
         await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
         return
+    _nm_espera(context)          # arrancar limpio: nada de flags colgados de una nota anterior
     context.user_data["awaiting_nota_manual"] = True
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
@@ -16232,6 +16266,7 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     act = q.data[len("nm_"):]
     data = context.user_data.get("nota_manual")
     if act == "cancel":
+        _nm_espera(context)
         context.user_data.pop("nota_manual", None)
         context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
@@ -16267,7 +16302,7 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     }
     if act in _pedidos:
         _flag, _txt = _pedidos[act]
-        context.user_data[_flag] = True
+        _nm_espera(context, _flag)
         await q.message.reply_text(_txt, parse_mode="HTML")
         return
 
@@ -16320,15 +16355,21 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     if act == "pub":
         try:
             jid = await asyncio.to_thread(_enqueue_nota_manual, data, None)
+            _nm_espera(context)
             context.user_data.pop("nota_manual", None)
             await q.edit_message_text(
                 f"✅ Columna #{jid} encolada en publicación. Sale en breve con el formato y SEO de siempre.")
         except Exception as e:
             await q.edit_message_text(f"❌ Error al encolar: {e}")
     elif act == "prog":
-        context.user_data["awaiting_nota_manual_sched"] = True
-        await q.edit_message_text(
-            "🗓️ ¿Para cuándo? Escribí <code>DD/MM HH:MM</code> (ej: 27/06 09:00):",
+        # La pregunta va en un mensaje NUEVO, no pisando la tarjeta: si la reemplazábamos,
+        # el menú desaparecía y lo siguiente que escribieras se disparaba como fecha, sin
+        # forma de volver atrás.
+        _nm_espera(context, "awaiting_nota_manual_sched")
+        await q.message.reply_text(
+            "🗓️ ¿Para cuándo? Escribí <code>DD/MM HH:MM</code> (ej: 27/06 09:00).\n\n"
+            "La tarjeta sigue arriba: si querés cambiar otra cosa antes, tocá el botón que "
+            "haga falta y esto se cancela solo.",
             parse_mode="HTML")
 
 
