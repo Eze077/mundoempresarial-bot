@@ -9723,8 +9723,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"WHERE id IN ({','.join('?'*len(similar_ids))})",
                             similar_ids
                         )
-                # Guardar URLs multi-fuente en el job primario
-                state["multi_source_urls"] = multi_urls
+                # Guardar URLs multi-fuente en el job primario.
+                # ⚠️ Se MERGEA, no se pisa: el agente `ecos` ya pudo haber adjuntado fuentes
+                # solo (pre_briefing 07:15/11:15/17:15) y un '=' las borraba (fix 2026-07-21).
+                _ya = state.get("multi_source_urls") or []
+                state["multi_source_urls"] = _ya + [u for u in multi_urls if u not in _ya]
                 _save_state(job_id, state)
                 # Aprobar el job primario → va a cola
                 inst = state.get("instructions", "")
@@ -9738,6 +9741,55 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ),
                     parse_mode="HTML"
                 )
+
+            # ── Actualizar una nota YA publicada en vez de publicar otra ──────────
+            # El curador detectó que esta noticia continúa algo que publicamos hace 24-48h
+            # (agents/nutrir.py). Le suma un bloque de ACTUALIZACIÓN a la nota viva: NO la
+            # reescribe, así conserva URL, fecha, SEO, comentarios y ranking.
+            elif action == "h_cur_nutrir" and arg:
+                job_id = int(arg)
+                state  = _load_state(job_id)
+                cand   = state.get("nutre")
+                if not cand:
+                    await query.answer("Ya no tengo la nota candidata", show_alert=True)
+                else:
+                    await query.answer("Actualizando la nota…")
+                    import sys as _sys
+                    _sys.path.insert(0, "/opt/me-harness")
+                    from agents import nutrir as _nut
+                    import broker as _br_n
+
+                    def _do():
+                        return _nut.nutrir(_br_n.get_job(job_id), cand, auto=False)
+
+                    res = await asyncio.get_event_loop().run_in_executor(None, _do)
+                    if res.get("ok") and res.get("dry"):
+                        txt = ("🧪 <b>Modo shadow</b> — no toqué WordPress.\n"
+                               "Te mandé aparte cómo habría quedado. Para activarlo de verdad: "
+                               "<code>touch /opt/me-harness/nutrir_live.flag</code>")
+                    elif res.get("ok"):
+                        txt = (f"🔄 <b>Nota actualizada</b>\n"
+                               f"<a href=\"{res['wp_url']}\">{cand['titulo'][:70]}</a>\n\n"
+                               f"<b>Lo que sumé:</b> {res['parrafo'][:400]}")
+                        await query.message.delete()
+                    else:
+                        _motivos = {
+                            "no_aporta": "la noticia nueva no agrega ningún dato que la nota no tenga",
+                            "max_bloques": "esa nota ya tiene 3 actualizaciones (no es un feed)",
+                            "ya_actualizada_hoy": "ya la actualicé hoy",
+                            "fuente_repetida": "esa misma fuente ya se usó para actualizarla",
+                            "sin_dato_duro": "el párrafo no traía ninguna cifra",
+                            "cifra_inventada": "el párrafo traía una cifra que no está en la fuente",
+                            "es_living_note": "es una living note (se actualiza por su propio flujo)",
+                            "invariante": "el guard de no-destrucción falló — no toqué nada",
+                        }
+                        _g = res.get("gate")
+                        txt = (f"⛔ No la actualicé: {_motivos.get(_g, _g)}."
+                               f"{chr(10) + res['motivo'][:200] if res.get('motivo') else ''}\n\n"
+                               f"<i>La propuesta sigue en pie si querés publicarla como nota aparte.</i>")
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=txt,
+                                                   parse_mode="HTML",
+                                                   disable_web_page_preview=True)
 
             # ── Like toggle (👍/☑️ Es tema ME.ar) ────────────────────
             elif action == "h_cur_like" and arg:
