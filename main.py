@@ -7021,6 +7021,48 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── SUPERVISOR (mejora diaria del harness): aplicar/descartar propuesta ──
+    # ── VENTANA de tareas que esperan decisión: avanzar / más tarde / saltear / no proponer más ──
+    if query.data.startswith("h_vent_"):
+        import sys as _sv
+        _sv.path.insert(0, "/opt/me-harness"); _sv.path.insert(0, "/opt/me-harness/agents")
+        try:
+            pv = query.data.split(":")
+            actv, tid = pv[0], (pv[1] if len(pv) > 1 else "")
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            if actv == "h_vent_later":
+                import ventana as _vn
+                await query.edit_message_text(base + "\n\n⏰ ¿Para cuándo?", parse_mode="HTML",
+                                              reply_markup=_vn.kb_later(tid))
+                return
+            if actv == "h_vent_snz":
+                _h = int(pv[2]) if len(pv) > 2 else 2
+                def _snz():
+                    import ventana as _v1; return _v1.accion(tid, "snooze", _h)
+                res = await asyncio.to_thread(_snz)
+            elif actv == "h_vent_go":
+                await query.answer("Avanzando…", show_alert=False)
+                def _go():
+                    import ventana as _v2; return _v2.accion(tid, "go")
+                res = await asyncio.wait_for(asyncio.to_thread(_go), timeout=150)
+            elif actv == "h_vent_skip":
+                def _sk():
+                    import ventana as _v3; return _v3.accion(tid, "skip")
+                res = await asyncio.to_thread(_sk)
+            else:  # h_vent_never
+                def _nv():
+                    import ventana as _v4; return _v4.accion(tid, "never")
+                res = await asyncio.to_thread(_nv)
+            # Se conservan los botones (pedido de Leo: poder volver / cambiar de opinión).
+            await query.edit_message_text(base + f"\n\n{res}", parse_mode="HTML",
+                                          reply_markup=query.message.reply_markup,
+                                          disable_web_page_preview=True)
+        except Exception as _ev:
+            try:
+                await query.answer(f"Error: {str(_ev)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── /rutina: chequeo de salud en un toque (semáforo en criollo) ──
     if query.data == "rutina_check":
         await query.answer("Chequeando…")
