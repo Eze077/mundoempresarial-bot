@@ -1581,6 +1581,11 @@ def _enqueue_to_harness(data: dict, image_id: int | None = None,
                                  data.get("title", ""), data.get("text", ""),
                                  data.get("excerpt", "")),
         "matched_kw":        data.get("matched_kw", []),
+        # Estos jobs entran directo en stage='publicacion' y se saltean al redactor, así que
+        # la keyword que ya tenga la nota tiene que VIAJAR: si no, el publicador escribe
+        # rank_math_focus_keyword vacía y Google nunca la ve. Vacía no es drama —el publicador
+        # la resuelve desde matched_kw—, pero lo que el bot ya sabe no se pierde más.
+        "focus_keyword":     data.get("focus_keyword", ""),
         "formato":           "continua",
         "portada":           destacado,
         "source":            source,
@@ -6630,9 +6635,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _wp_updated = False
             if _wp_pid_ct and _stage_ct == "done":
                 try:
+                    # Sin [:60]: el ≤60 es dogma FALSO y cortaba el <title> a mitad de palabra
+                    # justo en el camino por el que Leo ARREGLA un título malo. _meta_safe ya
+                    # limpia los emojis de 4 bytes que rompen wp_postmeta. Ver [[title_policy]].
                     _wp_updated = await asyncio.to_thread(
                         update_post, int(_wp_pid_ct),
-                        {"title": new_title, "meta": {"rank_math_title": _meta_safe(new_title)[:60]}}
+                        {"title": new_title, "meta": {"rank_math_title": _meta_safe(new_title)}}
                     )
                 except Exception as _ewp:
                     logger.warning(f"update_post título #{job_id}: {_ewp}")
