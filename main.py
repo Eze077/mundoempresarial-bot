@@ -5623,7 +5623,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nl_on = fp.get("canales", {}).get("nl")
         if nl_on and r and r.get("ok"):
             context.user_data["enc_nl"] = {"enc": r["enc"], "pregunta": fp["pregunta"],
-                                           "opciones": fp["opciones"], "notas": fp.get("notas")}
+                                           "opciones": fp["opciones"], "notas": fp.get("notas"),
+                                           "nota_url": r.get("wp_url")}   # → botones del mail a la nota-landing
             context.user_data.pop("enc", None)
             await update.message.reply_text(txt + "\n\n📧 Newsletter — ¿a qué base?",
                                             reply_markup=_enc_nl_base_kb())
@@ -7586,7 +7587,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nl_on = fp.get("canales", {}).get("nl")
         if nl_on and r and r.get("ok"):
             context.user_data["enc_nl"] = {"enc": r["enc"], "pregunta": fp["pregunta"],
-                                           "opciones": fp["opciones"], "notas": fp.get("notas")}
+                                           "opciones": fp["opciones"], "notas": fp.get("notas"),
+                                           "nota_url": r.get("wp_url")}   # → botones del mail a la nota-landing
             context.user_data.pop("enc", None)
             await query.edit_message_text(txt + "\n\n📧 Newsletter — ¿a qué base?",
                                           reply_markup=_enc_nl_base_kb(), disable_web_page_preview=True)
@@ -14175,7 +14177,7 @@ async def _do_enc_newsletter(context, nl: dict, scheduled_at) -> str:
         from agents import encuesta as _E
         return _E.enviar_newsletter(nl["enc"], nl["pregunta"], nl["opciones"], nl.get("notas"),
                                     base=nl.get("base", "base"), subject=nl.get("subject"),
-                                    scheduled_at=scheduled_at)
+                                    scheduled_at=scheduled_at, nota_url=nl.get("nota_url"))
     try:
         r = await asyncio.wait_for(asyncio.to_thread(_run), timeout=120)
     except Exception as e:
