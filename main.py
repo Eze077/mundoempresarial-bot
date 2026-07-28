@@ -7224,6 +7224,42 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── Reciclador: nota vencida con tráfico → 301 / banner / dejar (Fase 2 ciclo de vida) ──
+    if (query.data.startswith("h_recic_301:") or query.data.startswith("h_recic_banner:")
+            or query.data.startswith("h_recic_no:")):
+        try:
+            pr = query.data.split(":")
+            actr = pr[0]; post_id = int(pr[1])
+            guia_id = int(pr[2]) if len(pr) > 2 else 0
+            import os as _osr, requests as _rqr
+            _tok = _osr.environ.get("ME_REDIRECTS_TOKEN", "")
+            _ep = f"https://mundoempresarial.ar/?me_redir=1&token={_tok}"
+            if not _tok:
+                footer = "\n\n⚠️ Falta ME_REDIRECTS_TOKEN en el env."
+            elif actr == "h_recic_301":
+                await query.answer("Redirigiendo a la guía…", show_alert=False)
+                r = await asyncio.to_thread(
+                    lambda: _rqr.post(_ep, data={"from": post_id, "to": guia_id}, timeout=40))
+                footer = ("\n\n🔀 <b>301 aplicado</b> — el tráfico de esta nota va a la guía."
+                          if r.ok else f"\n\n⚠️ Error: {r.text[:80]}")
+            elif actr == "h_recic_banner":
+                await query.answer("Poniendo el banner…", show_alert=False)
+                r = await asyncio.to_thread(
+                    lambda: _rqr.post(_ep + "&banner=1", data={"from": post_id, "to": guia_id}, timeout=40))
+                footer = ("\n\n📌 <b>Banner puesto</b> — la nota queda viva, con aviso a la guía."
+                          if r.ok else f"\n\n⚠️ Error: {r.text[:80]}")
+            else:
+                await query.answer("Dejada como está", show_alert=False)
+                footer = "\n\n✖️ Dejada como está."
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(base + footer, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as _er:
+            try:
+                await query.answer(f"Error: {str(_er)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── GSC Living Notes: crear borrador / esqueleto / refrescar / ajustar / descartar ──
     if (query.data.startswith("h_gsc_ln_ok:") or query.data.startswith("h_gsc_ln_esqueleto:")
             or query.data.startswith("h_gsc_ln_no:") or query.data.startswith("h_gsc_lnref:")):
