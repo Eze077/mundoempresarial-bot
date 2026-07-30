@@ -5361,6 +5361,29 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── Panel de nueva efeméride: capturar nombre/fecha/ángulo/segmento por texto ──
+    _efc = next((c for c in ("nombre", "fecha", "angulo", "segmento")
+                 if context.user_data.get(f"awaiting_efem_{c}")), None)
+    if _efc:
+        context.user_data.pop(f"awaiting_efem_{_efc}", None)
+        _efd = context.user_data.get("efem")
+        if _efd is not None:
+            if _efc == "fecha":
+                import sys as _syse2
+                _syse2.path.insert(0, "/opt/me-harness")
+                _syse2.path.insert(0, "/opt/me-harness/agents")
+                import eventos as _eve
+                _nf = _eve._norm_fecha(text_in)
+                if not _nf:
+                    await update.message.reply_text(
+                        "Fecha inválida. Usá DD/MM (ej: 29/07). Tocá 📅 Fecha y probá de nuevo.")
+                    return
+                _efd["fecha"] = _nf
+            else:
+                _efd[_efc] = text_in.strip()
+            await _efem_redraw(context, _efd)
+        return
+
     # ── ✏️ Ajustar sobre una ALERTA del auditor: Leo escribe qué quiere que se haga ──
     # No hay propuesta que reformular acá (una alerta es un hecho, no una sugerencia), así
     # que su texto se guarda como pedido con el detalle técnico adjunto. Directiva Leo 29/7.
@@ -13345,8 +13368,197 @@ async def cmd_eventos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{_EMO.get(e.get('tipo'), '•')} <b>{e.get('nombre')}</b> — {f} ({cuando})\n"
                      f"    <i>{e.get('segmento')}</i> · {e.get('estado')}")
     lines.append("\n<i>Notas con slot futuro → /programadas</i>")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML",
-                                    disable_web_page_preview=True)
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True,
+        reply_markup={"inline_keyboard": [[{"text": "➕ Nueva efeméride",
+                                            "callback_data": "efem_new"}]]})
+
+
+# ── Panel para cargar una efeméride al calendario del agente de eventos ────────
+# "todo el set de botones para armar el evento con sus características" (Leo 30/7).
+# Mismo patrón mutex que /notamanual: un flag awaiting a la vez, panel que se redibuja.
+# El save escribe en eventos_calendario.json vía eventos.add_evento() (harness).
+_EFEM_ESPERAS = ("awaiting_efem_nombre", "awaiting_efem_fecha",
+                 "awaiting_efem_angulo", "awaiting_efem_segmento")
+
+_EFEM_SEGMENTOS = ["empleadores y RRHH pyme", "contadores y estudios contables",
+                   "industriales y fabricantes", "comerciantes y retail",
+                   "empresarias y emprendedoras", "profesionales", "toda la base"]
+
+
+def _efem_espera(context, flag: str = None):
+    """El bot espera UNA sola cosa a la vez (evita que un flag viejo capture el próximo texto)."""
+    for f in _EFEM_ESPERAS:
+        context.user_data.pop(f, None)
+    if flag:
+        context.user_data[flag] = True
+
+
+def _efem_panel_text(d: dict) -> str:
+    import html as _h
+    def e(s): return _h.escape(str(s or ""))
+    _f = d.get("fecha") or ""
+    _fd = f"{_f[3:5]}/{_f[0:2]}" if len(_f) >= 5 else "—"
+    return (
+        "🗓️ <b>Nueva efeméride</b>\n\n"
+        f"📛 <b>Nombre:</b> {e(d.get('nombre')) or '—'}\n"
+        f"📅 <b>Fecha:</b> {_fd}\n"
+        f"🎯 <b>Segmento:</b> {e(d.get('segmento')) or '—'}\n"
+        f"💬 <b>Ángulo:</b> {e(d.get('angulo')) or '—'}\n"
+        f"⏰ <b>Anticipación:</b> {d.get('anticipacion', 5)} días\n"
+        f"💪 <b>Esfuerzo:</b> {e(d.get('esfuerzo') or 'media')}\n\n"
+        "Cargá los campos y tocá ✅ Guardar. <i>Nombre y fecha son obligatorios; "
+        "el ángulo es lo que más ayuda a los agentes a cubrirla bien.</i>")
+
+
+def _efem_kb(d: dict) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✏️ Nombre",  "callback_data": "efem_nombre"},
+         {"text": "📅 Fecha",   "callback_data": "efem_fecha"}],
+        [{"text": "🎯 Segmento", "callback_data": "efem_segmento"},
+         {"text": "💬 Ángulo",  "callback_data": "efem_angulo"}],
+        [{"text": "⏰ Anticipación", "callback_data": "efem_anticip"},
+         {"text": "💪 Esfuerzo",     "callback_data": "efem_esfuerzo"}],
+        [{"text": "✅ Guardar",  "callback_data": "efem_save"},
+         {"text": "✖️ Cancelar", "callback_data": "efem_cancel"}]]}
+
+
+async def _efem_redraw(context, d: dict, query=None):
+    """Redibuja el panel en su lugar tras cada cambio."""
+    try:
+        if query is not None:
+            await query.edit_message_text(_efem_panel_text(d), parse_mode="HTML",
+                                          reply_markup=_efem_kb(d))
+            d["_chat"] = query.message.chat_id
+            d["_msg"] = query.message.message_id
+            return
+        if d.get("_chat") and d.get("_msg"):
+            await context.bot.edit_message_text(
+                chat_id=d["_chat"], message_id=d["_msg"], text=_efem_panel_text(d),
+                parse_mode="HTML", reply_markup=_efem_kb(d))
+    except Exception:
+        pass
+
+
+async def handle_efem_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+
+    if data == "efem_new":
+        d = {"nombre": "", "fecha": "", "segmento": "", "angulo": "",
+             "anticipacion": 5, "esfuerzo": "media"}
+        context.user_data["efem"] = d
+        _efem_espera(context)
+        await q.edit_message_text(_efem_panel_text(d), parse_mode="HTML",
+                                  reply_markup=_efem_kb(d))
+        d["_chat"] = q.message.chat_id
+        d["_msg"] = q.message.message_id
+        return
+
+    d = context.user_data.get("efem")
+    if d is None:
+        await q.edit_message_text("Esta tarjeta expiró. Abrí /eventos y tocá ➕ de nuevo.")
+        return
+
+    if data == "efem_cancel":
+        context.user_data.pop("efem", None)
+        _efem_espera(context)
+        await q.edit_message_text("✖️ Cancelado.")
+        return
+
+    if data in ("efem_nombre", "efem_fecha", "efem_angulo"):
+        campo = data.split("_")[1]
+        _efem_espera(context, f"awaiting_efem_{campo}")
+        _prompts = {"nombre": "Escribí el NOMBRE de la efeméride.",
+                    "fecha": "Escribí la FECHA (DD/MM, ej: 29/07).",
+                    "angulo": "Escribí el ÁNGULO editorial: con qué mirada cubrirla."}
+        await q.message.reply_text(_prompts[campo])
+        return
+
+    if data == "efem_segmento":
+        rows = [[{"text": s, "callback_data": f"efem_seg:{i}"}]
+                for i, s in enumerate(_EFEM_SEGMENTOS)]
+        rows.append([{"text": "✏️ Otro (escribir)", "callback_data": "efem_seg:otro"},
+                     {"text": "⬅️ Volver", "callback_data": "efem_back"}])
+        await q.edit_message_text("🎯 Elegí el segmento:",
+                                  reply_markup={"inline_keyboard": rows})
+        return
+    if data.startswith("efem_seg:"):
+        val = data.split(":", 1)[1]
+        if val == "otro":
+            _efem_espera(context, "awaiting_efem_segmento")
+            await q.message.reply_text("Escribí el SEGMENTO (a quién apunta).")
+            return
+        d["segmento"] = _EFEM_SEGMENTOS[int(val)]
+        await _efem_redraw(context, d, q)
+        return
+
+    if data == "efem_anticip":
+        rows = [[{"text": f"{n} días", "callback_data": f"efem_ant:{n}"} for n in (3, 5, 7, 10)],
+                [{"text": "⬅️ Volver", "callback_data": "efem_back"}]]
+        await q.edit_message_text("⏰ ¿Con cuántos días de anticipación te aviso?",
+                                  reply_markup={"inline_keyboard": rows})
+        return
+    if data.startswith("efem_ant:"):
+        d["anticipacion"] = int(data.split(":")[1])
+        await _efem_redraw(context, d, q)
+        return
+
+    if data == "efem_esfuerzo":
+        rows = [[{"text": "Mínima", "callback_data": "efem_esf:minima"},
+                 {"text": "Media", "callback_data": "efem_esf:media"},
+                 {"text": "Máxima", "callback_data": "efem_esf:maxima"}],
+                [{"text": "⬅️ Volver", "callback_data": "efem_back"}]]
+        await q.edit_message_text(
+            "💪 Nivel de esfuerzo de la campaña:\n"
+            "• Mínima: 3 noticias → newsletter\n"
+            "• Media: + opinión curada, intro y copy de redes\n"
+            "• Máxima: + una columna propia (te pide insumos)",
+            reply_markup={"inline_keyboard": rows})
+        return
+    if data.startswith("efem_esf:"):
+        d["esfuerzo"] = data.split(":")[1]
+        await _efem_redraw(context, d, q)
+        return
+
+    if data == "efem_back":
+        await _efem_redraw(context, d, q)
+        return
+
+    if data == "efem_save":
+        if not d.get("nombre") or not d.get("fecha"):
+            await q.message.reply_text("Faltan el nombre o la fecha (obligatorios).")
+            return
+        import sys as _syse
+        _syse.path.insert(0, "/opt/me-harness"); _syse.path.insert(0, "/opt/me-harness/agents")
+
+        def _save():
+            import eventos as _ev
+            return _ev.add_evento(d)
+
+        try:
+            r = await asyncio.wait_for(asyncio.to_thread(_save), timeout=30)
+        except Exception as e:
+            await q.edit_message_text(f"⚠️ No pude guardar: {str(e)[:150]}")
+            return
+        if not r.get("ok"):
+            await q.message.reply_text(f"⚠️ {r.get('error', 'no se pudo guardar')}")
+            return
+        ev = r["evento"]
+        context.user_data.pop("efem", None)
+        _efem_espera(context)
+        _f = ev["fecha"]
+        _fd = f"{_f[3:5]}/{_f[0:2]}"
+        await q.edit_message_text(
+            "✅ <b>Efeméride guardada en el calendario</b>\n\n"
+            f"📛 {ev['nombre']}\n"
+            f"📅 {_fd} · ⏰ avisa {ev['anticipacion_dias']}d antes · 💪 {ev['esfuerzo_sugerido']}\n"
+            f"🎯 {ev['segmento'] or '—'}\n"
+            f"💬 {ev['angulo'] or '—'}\n\n"
+            "El agente te la va a proponer al entrar en su ventana. La ves en /eventos.",
+            parse_mode="HTML")
+        return
 
 
 async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16901,6 +17113,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))
+    app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
