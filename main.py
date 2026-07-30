@@ -5361,6 +5361,39 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── ✏️ Ajustar sobre una ALERTA del auditor: Leo escribe qué quiere que se haga ──
+    # No hay propuesta que reformular acá (una alerta es un hecho, no una sugerencia), así
+    # que su texto se guarda como pedido con el detalle técnico adjunto. Directiva Leo 29/7.
+    if context.user_data.get("awaiting_ajuste_aud"):
+        _ajau = context.user_data.pop("awaiting_ajuste_aud")
+        import json as _jsau2, datetime as _dtau2
+        _Hau = "/opt/me-harness"
+        try:
+            try:
+                _ctxau = _jsau2.load(open(f"{_Hau}/alertas_ctx.json", encoding="utf-8"))
+            except Exception:
+                _ctxau = {}
+            try:
+                _pedau = _jsau2.load(open(f"{_Hau}/alertas_pedidos.json", encoding="utf-8"))
+            except Exception:
+                _pedau = {}
+            _cau = _ctxau.get(_ajau["fp"], {})
+            _pedau[_ajau["fp"]] = {
+                "ts": _dtau2.datetime.now(_dtau2.timezone.utc).isoformat(),
+                "señales": _cau.get("señales", []),
+                "resumen": _cau.get("resumen", ""),
+                "detalle": _cau.get("detalle", {}),
+                "pedido_de_leo": text_in,
+                "estado": "pendiente",
+            }
+            _jsau2.dump(_pedau, open(f"{_Hau}/alertas_pedidos.json", "w", encoding="utf-8"),
+                        ensure_ascii=False)
+            await update.message.reply_text(
+                "📝 Anotado. Queda en la cola de pedidos con el detalle técnico de la alerta.")
+        except Exception as _e:
+            await update.message.reply_text(f"No pude guardarlo: {str(_e)[:120]}")
+        return
+
     # ── ✏️ Ajustar (opinar/complementar) una propuesta: editor/supervisor/reco/impacto ──
     # Leo tocó "✏️ Ajustar" en una propuesta y ahora escribe su criterio. El agente reformula
     # la propuesta incorporándolo, la persiste revisada y la RE-MANDA con los botones (por
@@ -7220,6 +7253,85 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as _eg:
             try:
                 await query.answer(f"Error: {str(_eg)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    # ── Auditor: acuse de recibo + corregir (directiva Leo 29/7) ──
+    # El auditor avisaba al vacío: mandaba la alerta y nunca sabía si Leo se enteró, así que
+    # o repetía o se callaba por cooldown. Con estos botones el loop cierra. "Visto" silencia
+    # ese estado (mientras no cambie el fingerprint); "Corregir" intenta la autocura mecánica
+    # y lo que no tenga fix automático lo deja anotado en alertas_pedidos.json para Claude.
+    if (query.data.startswith("h_aud_ok:") or query.data.startswith("h_aud_fix:")
+            or query.data.startswith("h_aud_ajustar:")):
+        import sys as _sysau, json as _jsau, datetime as _dtau
+        _sysau.path.insert(0, "/opt/me-harness"); _sysau.path.insert(0, "/opt/me-harness/agents")
+        _Hau = "/opt/me-harness"
+        try:
+            _actau, _fpau = query.data.split(":", 1)
+
+            def _loadau(p):
+                try:
+                    return _jsau.load(open(p, encoding="utf-8"))
+                except Exception:
+                    return {}
+
+            def _saveau(p, d):
+                _jsau.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+
+            _ahoraau = _dtau.datetime.now(_dtau.timezone.utc).isoformat()
+            _ctxau = _loadau(f"{_Hau}/alertas_ctx.json").get(_fpau, {})
+
+            # Cualquier botón implica acuse: si lo tocó, se enteró.
+            _ackau = _loadau(f"{_Hau}/alertas_ack.json")
+            _ackau[_fpau] = {"ts": _ahoraau, "accion": _actau}
+            _saveau(f"{_Hau}/alertas_ack.json", _ackau)
+
+            if _actau == "h_aud_ajustar":
+                context.user_data["awaiting_ajuste_aud"] = {"fp": _fpau}
+                await query.answer()
+                await query.message.reply_text(
+                    "✏️ Escribí qué querés que se haga con esto. Lo guardo como pedido "
+                    "junto con el detalle técnico de la alerta.")
+                return
+
+            if _actau == "h_aud_ok":
+                await query.answer("Anotado. No te molesto más con esto.")
+                _footau = "\n\n✅ <b>Visto</b> — silenciado hasta que cambie la condición."
+            else:
+                await query.answer("Viendo si hay autocura…")
+                _senau = _ctxau.get("señales", [])
+                _hechosau = []
+                if "stuck" in _senau:
+                    def _curaau():
+                        import supervisor as _supau
+                        return _supau.autocura()
+                    _hechosau = list(await asyncio.wait_for(
+                        asyncio.to_thread(_curaau), timeout=120) or [])
+                _sinfixau = [s for s in _senau if s != "stuck"]
+                if _sinfixau:
+                    _pedau = _loadau(f"{_Hau}/alertas_pedidos.json")
+                    _pedau[_fpau] = {"ts": _ahoraau, "señales": _sinfixau,
+                                     "resumen": _ctxau.get("resumen", ""),
+                                     "detalle": _ctxau.get("detalle", {}),
+                                     "estado": "pendiente"}
+                    _saveau(f"{_Hau}/alertas_pedidos.json", _pedau)
+                if _hechosau and _sinfixau:
+                    _footau = (f"\n\n🔧 <b>Autocura</b>: {len(_hechosau)} acción(es).\n"
+                               f"📝 Sin fix automático ({', '.join(_sinfixau)}) → anotado para Claude.")
+                elif _hechosau:
+                    _footau = ("\n\n🔧 <b>Autocura aplicada</b>: "
+                               + "; ".join(str(a)[:70] for a in _hechosau[:3]))
+                else:
+                    _footau = (f"\n\n📝 <b>Sin fix automático</b> ({', '.join(_sinfixau) or 'n/d'}). "
+                               f"Anotado para Claude en la próxima sesión.")
+
+            _baseau = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            await query.edit_message_text(_baseau + _footau, parse_mode="HTML",
+                                          reply_markup=None, disable_web_page_preview=True)
+        except Exception as _eau:
+            try:
+                await query.answer(f"Error: {str(_eau)[:150]}", show_alert=True)
             except Exception:
                 pass
         return
