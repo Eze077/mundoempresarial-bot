@@ -13370,8 +13370,9 @@ async def cmd_eventos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("\n<i>Notas con slot futuro → /programadas</i>")
     await update.message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True,
-        reply_markup={"inline_keyboard": [[{"text": "➕ Nueva efeméride",
-                                            "callback_data": "efem_new"}]]})
+        reply_markup={"inline_keyboard": [[
+            {"text": "➕ Nueva efeméride", "callback_data": "efem_new"},
+            {"text": "✏️ Editar / borrar", "callback_data": "efem_list"}]]})
 
 
 # ── Panel para cargar una efeméride al calendario del agente de eventos ────────
@@ -13399,8 +13400,9 @@ def _efem_panel_text(d: dict) -> str:
     def e(s): return _h.escape(str(s or ""))
     _f = d.get("fecha") or ""
     _fd = f"{_f[3:5]}/{_f[0:2]}" if len(_f) >= 5 else "—"
+    _tit = "Editar efeméride" if d.get("_edit_id") else "Nueva efeméride"
     return (
-        "🗓️ <b>Nueva efeméride</b>\n\n"
+        f"🗓️ <b>{_tit}</b>\n\n"
         f"📛 <b>Nombre:</b> {e(d.get('nombre')) or '—'}\n"
         f"📅 <b>Fecha:</b> {_fd}\n"
         f"🎯 <b>Segmento:</b> {e(d.get('segmento')) or '—'}\n"
@@ -13412,7 +13414,7 @@ def _efem_panel_text(d: dict) -> str:
 
 
 def _efem_kb(d: dict) -> dict:
-    return {"inline_keyboard": [
+    rows = [
         [{"text": "✏️ Nombre",  "callback_data": "efem_nombre"},
          {"text": "📅 Fecha",   "callback_data": "efem_fecha"}],
         [{"text": "🎯 Segmento", "callback_data": "efem_segmento"},
@@ -13420,7 +13422,10 @@ def _efem_kb(d: dict) -> dict:
         [{"text": "⏰ Anticipación", "callback_data": "efem_anticip"},
          {"text": "💪 Esfuerzo",     "callback_data": "efem_esfuerzo"}],
         [{"text": "✅ Guardar",  "callback_data": "efem_save"},
-         {"text": "✖️ Cancelar", "callback_data": "efem_cancel"}]]}
+         {"text": "✖️ Cancelar", "callback_data": "efem_cancel"}]]
+    if d.get("_edit_id"):
+        rows.append([{"text": "🗑 Borrar esta efeméride", "callback_data": "efem_del"}])
+    return {"inline_keyboard": rows}
 
 
 async def _efem_redraw(context, d: dict, query=None):
@@ -13456,6 +13461,61 @@ async def handle_efem_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         d["_msg"] = q.message.message_id
         return
 
+    if data == "efem_list":
+        import sys as _syse
+        _syse.path.insert(0, "/opt/me-harness"); _syse.path.insert(0, "/opt/me-harness/agents")
+
+        def _list():
+            import eventos as _ev
+            return _ev.listar_efemerides()
+
+        try:
+            efs = await asyncio.wait_for(asyncio.to_thread(_list), timeout=30)
+        except Exception as e:
+            await q.edit_message_text(f"⚠️ No pude leer el calendario: {str(e)[:150]}")
+            return
+        if not efs:
+            await q.edit_message_text("No hay efemérides cargadas todavía.")
+            return
+        rows = []
+        for ef in efs:
+            _f = ef.get("fecha") or ""
+            _fd = f"{_f[3:5]}/{_f[0:2]}" if len(_f) >= 5 else _f
+            rows.append([{"text": f"{(ef.get('nombre') or '?')[:38]} ({_fd})",
+                          "callback_data": f"efem_edit:{ef['id']}"}])
+        await q.edit_message_text("✏️ Elegí la efeméride a editar o borrar:",
+                                  reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("efem_edit:"):
+        _eid = data.split(":", 1)[1]
+        import sys as _syse
+        _syse.path.insert(0, "/opt/me-harness"); _syse.path.insert(0, "/opt/me-harness/agents")
+
+        def _load():
+            import eventos as _ev
+            return _ev.get_evento(_eid)
+
+        try:
+            ev = await asyncio.wait_for(asyncio.to_thread(_load), timeout=30)
+        except Exception as e:
+            await q.edit_message_text(f"⚠️ No pude cargarla: {str(e)[:150]}")
+            return
+        if not ev:
+            await q.edit_message_text("Esa efeméride ya no existe.")
+            return
+        d = {"nombre": ev.get("nombre", ""), "fecha": ev.get("fecha", ""),
+             "segmento": ev.get("segmento", ""), "angulo": ev.get("angulo", ""),
+             "anticipacion": ev.get("anticipacion_dias", 5),
+             "esfuerzo": ev.get("esfuerzo_sugerido", "media"), "_edit_id": _eid}
+        context.user_data["efem"] = d
+        _efem_espera(context)
+        await q.edit_message_text(_efem_panel_text(d), parse_mode="HTML",
+                                  reply_markup=_efem_kb(d))
+        d["_chat"] = q.message.chat_id
+        d["_msg"] = q.message.message_id
+        return
+
     d = context.user_data.get("efem")
     if d is None:
         await q.edit_message_text("Esta tarjeta expiró. Abrí /eventos y tocá ➕ de nuevo.")
@@ -13465,6 +13525,29 @@ async def handle_efem_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("efem", None)
         _efem_espera(context)
         await q.edit_message_text("✖️ Cancelado.")
+        return
+
+    if data == "efem_del":
+        _eid = d.get("_edit_id")
+        if not _eid:
+            await q.message.reply_text("Esta efeméride todavía no está guardada.")
+            return
+        import sys as _syse
+        _syse.path.insert(0, "/opt/me-harness"); _syse.path.insert(0, "/opt/me-harness/agents")
+
+        def _del():
+            import eventos as _ev
+            return _ev.del_evento(_eid)
+
+        try:
+            ok = await asyncio.wait_for(asyncio.to_thread(_del), timeout=30)
+        except Exception as e:
+            await q.edit_message_text(f"⚠️ No pude borrar: {str(e)[:150]}")
+            return
+        context.user_data.pop("efem", None)
+        _efem_espera(context)
+        await q.edit_message_text(
+            "🗑 Efeméride borrada." if ok else "No la encontré (¿ya no estaba?).")
         return
 
     if data in ("efem_nombre", "efem_fecha", "efem_angulo"):
@@ -13535,7 +13618,8 @@ async def handle_efem_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         def _save():
             import eventos as _ev
-            return _ev.add_evento(d)
+            return (_ev.update_evento(d["_edit_id"], d) if d.get("_edit_id")
+                    else _ev.add_evento(d))
 
         try:
             r = await asyncio.wait_for(asyncio.to_thread(_save), timeout=30)
@@ -13546,12 +13630,13 @@ async def handle_efem_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await q.message.reply_text(f"⚠️ {r.get('error', 'no se pudo guardar')}")
             return
         ev = r["evento"]
+        _accion = "actualizada" if d.get("_edit_id") else "guardada en el calendario"
         context.user_data.pop("efem", None)
         _efem_espera(context)
         _f = ev["fecha"]
         _fd = f"{_f[3:5]}/{_f[0:2]}"
         await q.edit_message_text(
-            "✅ <b>Efeméride guardada en el calendario</b>\n\n"
+            f"✅ <b>Efeméride {_accion}</b>\n\n"
             f"📛 {ev['nombre']}\n"
             f"📅 {_fd} · ⏰ avisa {ev['anticipacion_dias']}d antes · 💪 {ev['esfuerzo_sugerido']}\n"
             f"🎯 {ev['segmento'] or '—'}\n"
