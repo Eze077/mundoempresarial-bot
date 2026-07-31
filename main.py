@@ -6173,81 +6173,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error guardando instrucción: {_e}")
         return
 
-    # ── Harness: consolidar fuentes manual — recibe números separados por coma ──
-    if context.user_data.get("awaiting_consolidar_manual"):
-        context.user_data.pop("awaiting_consolidar_manual")
-        jobs_ordered = context.user_data.pop("briefing_jobs_ordered", [])
-        import sys as _sys3, sqlite3 as _sq3, json as _js3
-        _sys3.path.insert(0, "/opt/me-harness")
-        try:
-            from agents import curador as _cur3
-            nums = [int(x.strip()) for x in text_in.replace(" ", "").split(",") if x.strip().isdigit()]
-            if len(nums) < 2:
-                await update.message.reply_text("❌ Ingresá al menos 2 números. Ej: <code>3,7</code>", parse_mode="HTML")
-                return
-            pos_map = {pos: (jid, title) for pos, jid, title in jobs_ordered}
-            primary_pos  = nums[0]
-            secondary_nums = nums[1:]
-            if primary_pos not in pos_map:
-                await update.message.reply_text(f"❌ Nota {primary_pos} no encontrada en el briefing.")
-                return
-            primary_id, primary_title = pos_map[primary_pos]
-            secondary_ids, secondary_urls, missing = [], [], []
-            with _sq3.connect("/opt/me-harness/harness.db") as _c3:
-                primary_row = _c3.execute("SELECT content_json FROM jobs WHERE id=?", (primary_id,)).fetchone()
-                primary_state = _js3.loads(primary_row[0]) if primary_row and primary_row[0] else {}
-                for p in secondary_nums:
-                    if p not in pos_map:
-                        missing.append(p)
-                        continue
-                    sid = pos_map[p][0]
-                    row = _c3.execute("SELECT source_url, content_json FROM jobs WHERE id=?", (sid,)).fetchone()
-                    if row and row[0]:
-                        secondary_ids.append(sid)
-                        secondary_urls.append(row[0])
-                        # Borrar tarjeta TG del secundario
-                        try:
-                            sec_state = _js3.loads(row[1]) if row[1] else {}
-                            mid = sec_state.get("card_msg_id")
-                            if mid:
-                                await context.bot.delete_message(chat_id=update.message.chat_id, message_id=mid)
-                        except Exception:
-                            pass
-                # Guardar multi_source_urls en job primario
-                primary_state["multi_source_urls"] = secondary_urls
-                _c3.execute("UPDATE jobs SET content_json=? WHERE id=?",
-                            (_js3.dumps(primary_state), primary_id))
-                # Rechazar secundarios
-                if secondary_ids:
-                    _c3.execute(
-                        f"UPDATE jobs SET stage='rejected', updated_at=datetime('now') "
-                        f"WHERE id IN ({','.join('?'*len(secondary_ids))})",
-                        secondary_ids,
-                    )
-            # Borrar tarjeta TG del primario y reenviarla como briefing
-            try:
-                pmid = primary_state.get("card_msg_id")
-                if pmid:
-                    await context.bot.delete_message(chat_id=update.message.chat_id, message_id=pmid)
-                    primary_state.pop("card_msg_id", None)
-            except Exception:
-                pass
-            # Guardar estado sin card_msg_id para que run_briefing_single envíe tarjeta nueva
-            with _sq3.connect("/opt/me-harness/harness.db") as _c3b:
-                _c3b.execute("UPDATE jobs SET content_json=? WHERE id=?",
-                             (_js3.dumps(primary_state), primary_id))
-            # Reenviar como tarjeta del briefing (sigue en curado, Leo aprueba manualmente)
-            await asyncio.to_thread(_cur3.run_briefing_single, primary_id)
-            warn = f"\n⚠️ No encontradas: {missing}" if missing else ""
-            await update.message.reply_text(
-                f"🔀 <b>{len(secondary_ids)+1} fuentes consolidadas</b>{warn}\n"
-                f"La nota volvió al briefing — aprobala cuando esté lista.",
-                parse_mode="HTML",
-            )
-        except Exception as _e3:
-            await update.message.reply_text(f"❌ Error consolidando: {_e3}")
-        return
-
     # ── Si el bot espera hashtags nuevos ──
     if context.user_data.get("waiting_for_hashtags"):
         context.user_data["waiting_for_hashtags"] = False
@@ -6642,7 +6567,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _title_mh = _url_mh.rstrip("/").split("/")[-1].replace("-", " ").capitalize()
         try:
             import broker as _br_mh
-            _content_mh = {"title": _title_mh, "excerpt": _exc_mh,
+            _content_mh = {"title": _title_mh, "excerpt": _exc_mh, "manual_submission": True,
                            "source_name": _url_mh.split("/")[2] if "/" in _url_mh else _url_mh}
             _jid_mh = _br_mh.enqueue("curado", source_url=_url_mh, title=_title_mh,
                                       content=_content_mh, score=8.0, hilo=_hilo_mh, force=True)
@@ -6828,6 +6753,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 hilo = hilo_hint or (3 if es_entrevista_opinion(url, title_hl, text_hl) else 2)
                 content = {"title": title_hl, "excerpt": excerpt_hl,
                            "source_name": url.split("/")[2] if "/" in url else url,
+                           "manual_submission": True,
                            # 8000 (antes 3000): con poco contexto GPT alucina más — caso
                            # Ayerra 7/7 ("secretario de Macri" + "20 mil pymes" inventados)
                            "text": text_hl[:8000]}
@@ -10638,30 +10564,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.delete()
                 await query.answer()
 
-            # ── Consolidar manual — lista notas y pide números ────────────────
-            elif action == "h_cur_consolidar_manual":
-                import sys as _sys2, sqlite3 as _sq2, json as _js2
-                _sys2.path.insert(0, "/opt/me-harness")
-                with _sq2.connect("/opt/me-harness/harness.db") as _c2:
-                    _jobs_ord = _c2.execute(
-                        "SELECT id, title, score FROM jobs WHERE stage='curado' ORDER BY score DESC"
-                    ).fetchall()
-                context.user_data["awaiting_consolidar_manual"] = True
-                jobs_list = [(i + 1, r[0], r[1]) for i, r in enumerate(_jobs_ord)]
-                context.user_data["briefing_jobs_ordered"] = jobs_list
-                lines = ["📎 <b>Consolidar fuentes manual</b>", ""]
-                lines.append("Ingresá los números de nota separados por coma.")
-                lines.append("El <b>primer número</b> será la nota principal:\n")
-                for pos, jid, title in jobs_list[:30]:
-                    lines.append(f"  <b>{pos}.</b> {(title or '')[:55]}")
-                lines.append("\nEj: <code>3,7</code> → nota 3 con fuente de nota 7")
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text="\n".join(lines),
-                    parse_mode="HTML",
-                )
-                await query.answer()
-
             # ── Cancelar briefing — borra tarjetas + resumen ──────────────────
             elif action == "h_cur_cancel":
                 chat_id = query.message.chat_id
@@ -10689,6 +10591,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "h_cur_more" and arg:
                 offset = int(arg)
                 await asyncio.to_thread(_cur.run_briefing, offset)
+
+            # ── Liberar la tanda mostrada y traer la próxima (vacía el registro) ──
+            elif action == "h_cur_liberar":
+                await query.answer("Liberando…", show_alert=False)
+                _cleared = await asyncio.to_thread(_cur.liberar_batch)
+                for _mid in (_cleared or []):
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=query.message.chat_id, message_id=_mid)
+                    except Exception:
+                        pass
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await asyncio.to_thread(_cur.run_briefing, 0)
 
         except Exception as _he:
             logger.warning(f"h_cur handler error: {_he}")
@@ -17068,7 +16986,7 @@ def _enqueue_evento(ev: dict, modo: str) -> list:
             "text": text, "multi_source_urls": links,
             "image_id_override": img_override, "image_url": img_url_fallback,
             "images": extra_imgs,
-            "matched_kw": [], "fuente_propia_evento": True,
+            "matched_kw": [], "fuente_propia_evento": True, "manual_submission": True,
         }
         with _sq.connect("/opt/me-harness/harness.db") as conn:
             cur = conn.execute(
