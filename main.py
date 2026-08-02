@@ -9684,6 +9684,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         _thr.Thread(target=_cola_a.run_once, daemon=True).start()
                     except Exception:
                         pass
+                if done:
+                    await _borrar_cards_briefing(context, query.message.chat_id, jids)
                 try:
                     if done:
                         await query.edit_message_text(
@@ -9736,8 +9738,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
             elif action == "h_cur_auto_cancel":
+                _jids_c = [x for x in (arg or "").split("-") if x.strip().isdigit()]
+                await _borrar_cards_briefing(context, query.message.chat_id, _jids_c)
                 try:
-                    await query.edit_message_text("✖️ Cancelado. Las dejo en la cola.")
+                    await query.edit_message_text("✖️ Briefing cancelado. Las dejo en la cola.")
                 except Exception:
                     pass
 
@@ -13623,10 +13627,36 @@ async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _borrar_cards_briefing(context, chat_id, jids):
+    """Borra las tarjetas del briefing (por card_msg_id en content_json) de los jobs dados."""
+    import sqlite3 as _sq, json as _js
+    for _jid in jids:
+        try:
+            with _sq.connect("/opt/me-harness/harness.db") as _c:
+                _row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (int(_jid),)).fetchone()
+            _st = _js.loads(_row[0]) if _row and _row[0] else {}
+            if _st.get("card_msg_id"):
+                await context.bot.delete_message(chat_id=chat_id, message_id=_st["card_msg_id"])
+        except Exception:
+            pass
+
+
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lanza el briefing del Curador (harness) de forma manual."""
+    """Briefing del Curador. `/briefing` o `/briefing manual` → briefing manual (revisar notas).
+    `/briefing auto` → menú del briefing AUTOMÁTICO (cantidad de notas + horarios + pausa)."""
+    _a0 = (context.args[0].lower() if context.args else "")
+    if _a0.startswith("auto"):
+        import sys as _sys
+        _sys.path.insert(0, "/opt/me-harness")
+        try:
+            from agents import curador as _cur
+            await update.message.reply_text(_cur.ciclaje_texto(), parse_mode="HTML",
+                                            reply_markup=_cur.ciclaje_kb())
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ No pude abrir el ciclaje: {e}")
+        return
     offset = 0
-    if context.args:
+    if context.args and _a0 != "manual":
         try:
             offset = int(context.args[0])
         except ValueError:
@@ -16072,8 +16102,8 @@ async def _post_init(application: Application) -> None:
         BotCommand("pipeline",          "Estado del pipeline editorial — todas las etapas"),
         BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
         BotCommand("eventos",           "Agenda — boletín semanal + efemérides que vienen"),
-        BotCommand("briefing",          "Briefing editorial — revisar notas pendientes"),
-        BotCommand("ciclaje",           "Ciclaje — cantidad de notas y horarios del briefing auto"),
+        BotCommand("briefing",          "Briefing manual — /briefing (notas) · /briefing auto (config)"),
+        BotCommand("ciclaje",           "Briefing auto — notas por corrida + horarios (= /briefing auto)"),
         BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
         BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
