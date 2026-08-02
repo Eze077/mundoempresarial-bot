@@ -13628,7 +13628,7 @@ async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _borrar_cards_briefing(context, chat_id, jids):
-    """Borra las tarjetas del briefing (por card_msg_id en content_json) de los jobs dados."""
+    """Borra las tarjetas del briefing (card_msg_id) + el encabezado del briefing auto."""
     import sqlite3 as _sq, json as _js
     for _jid in jids:
         try:
@@ -13639,6 +13639,12 @@ async def _borrar_cards_briefing(context, chat_id, jids):
                 await context.bot.delete_message(chat_id=chat_id, message_id=_st["card_msg_id"])
         except Exception:
             pass
+    try:  # encabezado "🤖 Briefing AUTO…" (lo guarda curador.run_briefing_auto)
+        _h = _js.load(open("/opt/me-harness/auto_briefing_hdr.json"))
+        if _h.get("header_msg_id"):
+            await context.bot.delete_message(chat_id=chat_id, message_id=_h["header_msg_id"])
+    except Exception:
+        pass
 
 
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
