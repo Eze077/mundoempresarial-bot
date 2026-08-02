@@ -5506,6 +5506,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML", reply_markup=None)
         return
 
+    # -- Ciclaje: recibir la CANTIDAD de notas por corrida (numero manual) --
+    if context.user_data.get("awaiting_ciclaje_n"):
+        context.user_data.pop("awaiting_ciclaje_n")
+        _num = "".join(ch for ch in text_in if ch.isdigit())
+        if not _num or not (1 <= int(_num) <= 20):
+            await update.message.reply_text(
+                "Ese no parece un numero valido (1 a 20). Toca Notas de nuevo para reintentar.")
+            return
+        import sys as _sysn
+        _sysn.path.insert(0, "/opt/me-harness")
+        from agents import curador as _curn
+        _curn.save_briefing_config({"n": int(_num)})
+        await update.message.reply_text(
+            _curn.ciclaje_texto(), parse_mode="HTML", reply_markup=_curn.ciclaje_kb())
+        return
+
     # ── Frases: reemplazar los textos del header (kicker / etiqueta) y regenerar ──
     if context.user_data.get("awaiting_frase_header"):
         campo = context.user_data.pop("awaiting_frase_header")
@@ -9773,6 +9789,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=("🕘 Pasame los HORARIOS de corrida separados por coma (hora ARG).\n"
                           "Ej: <code>08:00, 13:00, 19:00</code>"), parse_mode="HTML")
                 await query.answer("Esperando horarios…")
+
+            elif action == "h_cur_auto_cfg_n_ask":
+                context.user_data.pop("awaiting_ciclaje_horarios", None)
+                context.user_data["awaiting_ciclaje_n"] = True
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="🔢 Cuantas notas por corrida? Pasame un numero (ej: <code>6</code>).",
+                    parse_mode="HTML")
+                await query.answer("Esperando el numero...")
+
+            elif action == "h_cur_auto_cfg_cancel":
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.answer("Menu cerrado")
 
             elif action == "h_cur_auto_cfg_run":
                 await query.answer("Corriendo briefing…")
