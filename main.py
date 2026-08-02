@@ -13642,6 +13642,19 @@ async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Error en briefing: {e}")
 
 
+async def cmd_ciclaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Abre el menú de config del briefing AUTOMÁTICO: cantidad de notas por corrida + horarios
+    (turnos) + pausar/reanudar + correr ahora. Antes solo se llegaba por el botón ⚙️ de la tarjeta."""
+    import sys as _sys
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        from agents import curador as _cur
+        await update.message.reply_text(_cur.ciclaje_texto(), parse_mode="HTML",
+                                        reply_markup=_cur.ciclaje_kb())
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ No pude abrir el ciclaje: {e}")
+
+
 async def cmd_lector(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Evalúa una nota con el Lector QA a pedido.
@@ -16060,6 +16073,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
         BotCommand("eventos",           "Agenda — boletín semanal + efemérides que vienen"),
         BotCommand("briefing",          "Briefing editorial — revisar notas pendientes"),
+        BotCommand("ciclaje",           "Ciclaje — cantidad de notas y horarios del briefing auto"),
         BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
         BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
@@ -17080,6 +17094,7 @@ def main():
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("ingesta", cmd_ingesta))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
+    app.add_handler(CommandHandler("ciclaje", cmd_ciclaje))
     app.add_handler(CommandHandler("programadas", cmd_programadas))
     app.add_handler(CommandHandler("eventos", cmd_eventos))
     app.add_handler(CommandHandler("coladepublicacion", cmd_coladepublicacion))
