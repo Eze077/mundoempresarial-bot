@@ -310,8 +310,6 @@ def detect_categories(title: str, text: str, excerpt: str) -> list:
     return ranked[:3]
 
 
-
-
 # ── Helpers SEO ────────────────────────────────────────────────────────────────
 
 def seo_title(title: str) -> str:
@@ -681,37 +679,6 @@ def _gpt_html_to_gutenberg(html: str) -> str:
             else:
                 break
     return '\n\n'.join(blocks)
-
-
-def _build_upd_preview(patch: dict, gpt_result: dict | None, desp_requested: bool) -> str:
-    """Genera texto de preview (Markdown Telegram) antes de confirmar la actualización."""
-    def _esc(s: str) -> str:
-        return s.replace("*", "").replace("_", "").replace("`", "").replace("[", "").replace("]", "")
-
-    lines = ["*Vista previa — ¿publicamos?*\n"]
-    if "title" in patch:
-        lines.append(f"*Título:* {_esc(str(patch['title']))}")
-    if "featured_media" in patch:
-        lines.append("*Imagen:* nueva portada subida")
-    if "categories" in patch:
-        lines.append(f"*Categorías:* {patch['categories']}")
-    if "content" in patch:
-        if gpt_result:
-            h2s    = gpt_result.get("h2_headings", [])
-            buls   = gpt_result.get("bullets", [])
-            fmt    = "desplegable" if desp_requested else "estándar"
-            lines.append(f"*Formato:* {fmt} · {len(h2s)} secciones · {len(buls)} bullets")
-            if buls:
-                lines.append("\n*Lo que tenés que saber:*")
-                for b in buls[:3]:
-                    lines.append(f"• {_esc(b)}")
-            if h2s:
-                lines.append("\n*Secciones:*")
-                for h in h2s[:5]:
-                    lines.append(f"— {_esc(h['content'])}")
-        else:
-            lines.append("*Contenido:* actualizado")
-    return "\n".join(lines)
 
 
 def get_excerpt(data: dict, kw: str = "") -> str:
@@ -2293,7 +2260,6 @@ def generate_thread_with_gpt(title: str, body_text: str, wp_url: str, hashtags: 
     # Asegurar que ninguno pase 280
     tweets = [_fit_tweet(t, 280) for t in tweets]
     return tweets
-
 
 
 def post_twitter_thread(tweets: list[str], image_url: str = "") -> list[str]:
@@ -4528,8 +4494,6 @@ async def send_weekly_credits_check(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"weekly_credits_check: {e}")
 
 
-
-
 async def cmd_reglas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra el registro de reglas editoriales activas, desactivadas y patrones ignorados."""
     import sys as _sys_r
@@ -6444,70 +6408,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Corregir actualización pendiente ────────────────────────────────────
-    if context.user_data.get("waiting_for_upd_correct"):
-        context.user_data["waiting_for_upd_correct"] = False
-        pend = context.user_data.get("pending_update")
-        if not pend:
-            await update.message.reply_text("No hay actualización pendiente.")
-            return
-        corr_instr = text_in.strip()
-        # Combinar con instrucción anterior para contexto acumulativo
-        prev_instr = pend.get("redactor_instr", "")
-        new_instr  = (prev_instr + ". " + corr_instr).strip(". ") if prev_instr else corr_instr
-        msg = await update.message.reply_text("Refinando con GPT...")
-        try:
-            gpt_result = await asyncio.to_thread(
-                _gpt_format_article,
-                pend["title"], pend["body_text"], pend["source_url"],
-                pend["kw"], new_instr,
-                pend.get("content_type", "standard"), pend.get("expected_count", 0)
-            )
-        except Exception as e:
-            await msg.edit_text(f"Error al refinar: {e}")
-            return
-        if not gpt_result:
-            await msg.edit_text("GPT no pudo refinar. Intentá de nuevo o cancelá.")
-            return
-        # Reconstruir contenido
-        data_upd      = pend.get("data_upd", {})
-        desp_req      = pend["desp_requested"]
-        hilo          = detect_hilo({"title": pend["title"], "text": pend["body_text"], "excerpt": pend["body_text"][:200]})
-        data_upd["_gpt_html"]    = gpt_result["html"]
-        data_upd["_gpt_bullets"] = gpt_result.get("bullets", [])
-        data_upd["hilo"]         = hilo
-        toc_block  = _build_rank_math_toc(gpt_result["h2_headings"], hilo)
-        fuente_html = (
-            f'<!-- wp:paragraph -->\n'
-            f'<p><em>Fuente: <a href="{pend["source_url"]}" target="_blank" '
-            f'rel="noopener noreferrer">Ver nota original</a></em></p>\n'
-            f'<!-- /wp:paragraph -->'
-        )
-        if desp_req:
-            body_block = f'<!-- wp:html -->\n{gpt_result["html"]}\n<!-- /wp:html -->'
-        else:
-            body_block = _gpt_html_to_gutenberg(gpt_result["html"])
-        new_content = (toc_block + "\n" if toc_block else "") + body_block + "\n" + fuente_html
-        if desp_req:
-            new_content = _wrap_nota_desplegable(pend["post_id"], pend["slug"], new_content, data_upd)
-        pend["patch"]["content"] = new_content
-        s_desc = get_excerpt(data_upd, kw=pend["kw"])
-        pend["patch"].setdefault("meta", {})
-        pend["patch"]["meta"].update({
-            "rank_math_focus_keyword": pend["kw"],
-            "rank_math_description":   s_desc,
-        })
-        pend["gpt_result"]     = gpt_result
-        pend["redactor_instr"] = new_instr
-        pend["data_upd"]       = data_upd
-        context.user_data["pending_update"] = pend
-        preview_text = _build_upd_preview(pend["patch"], gpt_result, desp_req)
-        kb_upd = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirmar", callback_data="upd_confirm"),
-            InlineKeyboardButton("✏️ Corregir",  callback_data="upd_correct"),
-            InlineKeyboardButton("❌ Cancelar",  callback_data="upd_cancel"),
-        ]])
-        await msg.edit_text(preview_text, parse_mode="Markdown", reply_markup=kb_upd)
-        return
 
     # ── Reprogramar post WP: Leo escribe la nueva fecha ─────────────────────
     if context.user_data.get("awaiting_reschedule_wp_id"):
@@ -10773,47 +10673,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    # ── Actualizar post — confirmar / corregir / cancelar ───────────────────
-    if query.data == "upd_confirm":
-        pend = context.user_data.pop("pending_update", None)
-        if not pend:
-            await query.edit_message_text("No hay actualización pendiente.")
-            return
-        await query.edit_message_text("Publicando...")
-        rp = await asyncio.to_thread(
-            requests.post,
-            f"{WP_URL}/wp-json/wp/v2/posts/{pend['post_id']}",
-            headers={**wp_auth(), "Content-Type": "application/json"},
-            json=pend["patch"], timeout=30
-        )
-        if rp.ok:
-            post_link = rp.json().get("link", pend["post_url"])
-            cambios = []
-            if "featured_media" in pend["patch"]: cambios.append("imagen")
-            if "title"          in pend["patch"]: cambios.append("título")
-            if "categories"     in pend["patch"]: cambios.append("categorías")
-            if "content"        in pend["patch"]:
-                cambios.append("contenido" + (" + desplegable" if pend["desp_requested"] else ""))
-            await query.edit_message_text(f"✅ Post actualizado ({', '.join(cambios)}):\n{post_link}")
-        else:
-            await query.edit_message_text(f"Error WP {rp.status_code}: {rp.text[:200]}")
-        return
-
-    if query.data == "upd_correct":
-        if not context.user_data.get("pending_update"):
-            await query.edit_message_text("No hay actualización pendiente.")
-            return
-        context.user_data["waiting_for_upd_correct"] = True
-        await query.edit_message_text("✏️ ¿Qué querés corregir? Escribí la instrucción y lo proceso de nuevo.")
-        return
-
-    if query.data == "upd_cancel":
-        context.user_data.pop("pending_update", None)
-        await query.edit_message_text("Actualización cancelada.")
-        return
-
-
-
     if query.data == "change_title":
         context.user_data["waiting_for_title"] = True
         await query.edit_message_text(
@@ -13040,7 +12899,6 @@ _FEEDBACK_POST_ID: int | None = None
 _FEEDBACK_POST_SLUG = "mebot-feedback-store"
 
 
-
 def _find_or_create_feedback_post() -> int | None:
     """Busca el post privado donde vive el feedback store. Si no existe, lo crea."""
     global _FEEDBACK_POST_ID
@@ -13379,12 +13237,6 @@ def _save_feedback(data: dict) -> bool:
         return False
 
 
-
-
-
-
-
-
 def _title_keywords(title: str) -> list[str]:
     """Extrae keywords significativas del título (sin stop-words, >3 chars, lowercase)."""
     clean = re.sub(r'[^\w\sáéíóúñ]', ' ', (title or "").lower())
@@ -13392,38 +13244,6 @@ def _title_keywords(title: str) -> list[str]:
         w for w in clean.split()
         if len(w) > 3 and w not in STOP_WORDS
     ]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def cmd_ingesta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14131,10 +13951,6 @@ async def _auto_publish_url(bot, context, url: str, chat_id: int):
     return await _publish_processed(bot, context, data, chat_id)
 
 
-
-
-
-
 # ── Reporte diario programado ────────────────────────────────────────────────
 
 def _ga4_fetch_data() -> dict:
@@ -14397,8 +14213,6 @@ async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"_learn_hashtags_daily: {e}")
-
-
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -15072,16 +14886,6 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
 
     if chat_id:
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
-
-
-
-
-
-
-
-
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -17356,7 +17160,6 @@ def main():
     from datetime import timezone, timedelta
     tz_arg = timezone(timedelta(hours=-3))
     job_queue = app.job_queue
-
 
 
     # Aprendizaje de hashtags a las 23:15 ARG
