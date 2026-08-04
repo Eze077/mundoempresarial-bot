@@ -1435,17 +1435,27 @@ def get_or_create_tags(names: list) -> list:
     return ids
 
 
-def upload_image(image_url: str, alt: str = "") -> int | None:
+def upload_image(image_url: str, alt: str = "", watermark: bool = False) -> int | None:
     try:
         img = requests.get(image_url, headers=HEADERS_BROWSER, timeout=15)
         img.raise_for_status()
         ctype = img.headers.get("Content-Type", "image/jpeg").split(";")[0]
         ext = ctype.split("/")[-1]
+        content_bytes = img.content
+        if watermark:
+            try:
+                import sys as _sw
+                _sw.path.insert(0, "/opt/me-harness")
+                from agents import marca_agua as _ma
+                content_bytes = _ma.aplicar_watermark(content_bytes)
+                ctype, ext = "image/jpeg", "jpg"
+            except Exception as _we:
+                logger.warning(f"watermark upload_image: {_we}")
 
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=nota.{ext}",
              "Content-Type": ctype}
         r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=img.content,
+            f"{WP_URL}/wp-json/wp/v2/media", headers=h, data=content_bytes,
             proxies=_WP_PROXIES, timeout=60
         )
         if r.ok:
@@ -1464,9 +1474,18 @@ def upload_image(image_url: str, alt: str = "") -> int | None:
     return None
 
 
-def upload_image_bytes(img_bytes: bytes, ext: str = "jpg", alt: str = "") -> int | None:
+def upload_image_bytes(img_bytes: bytes, ext: str = "jpg", alt: str = "", watermark: bool = False) -> int | None:
     """Sube bytes de imagen directamente a la media library de WP."""
     try:
+        if watermark:
+            try:
+                import sys as _sw
+                _sw.path.insert(0, "/opt/me-harness")
+                from agents import marca_agua as _ma
+                img_bytes = _ma.aplicar_watermark(img_bytes)
+                ext = "jpg"
+            except Exception as _we:
+                logger.warning(f"watermark upload_image_bytes: {_we}")
         ctype = f"image/{ext}"
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=nota.{ext}",
              "Content-Type": ctype}
@@ -6530,6 +6549,36 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── URL de imagen para nota sin foto ────────────────────────────────────
+    if context.user_data.get("awaiting_wm_foto_for"):
+        _wmf_job = context.user_data.pop("awaiting_wm_foto_for")
+        _u = text_in.strip()
+        if not (_u.startswith("http://") or _u.startswith("https://")):
+            context.user_data["awaiting_wm_foto_for"] = _wmf_job
+            await update.message.reply_text("Mandá una URL válida (https://) o enviá la foto directamente.")
+            return
+        msg = await update.message.reply_text("⏳ Subiendo la foto (con watermark)…")
+        try:
+            import sys as _sy_wu, json as _js_wu, sqlite3 as _sq_wu
+            _sy_wu.path.insert(0, "/opt/me-harness")
+            import broker as _br_wu
+            _job = _br_wu.get_job(_wmf_job)
+            _cj = {}
+            try: _cj = _js_wu.loads(_job.get("content_json") or "{}")
+            except Exception: pass
+            _wmon = not _cj.get("sin_watermark", False)
+            mid = await asyncio.to_thread(upload_image, _u, "", _wmon)
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude subir la foto: {e}")
+            return
+        if not mid:
+            await msg.edit_text("❌ No pude subir esa imagen. Probá otra URL o enviá la foto.")
+            return
+        _cj["image_id_override"] = mid
+        with _sq_wu.connect("/opt/me-harness/harness.db") as _c_wu:
+            _c_wu.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js_wu.dumps(_cj), _wmf_job))
+        await msg.edit_text(f"✅ Foto cargada (#{mid}) para la nota #{_wmf_job}" + (" con watermark." if _wmon else " sin watermark."))
+        return
+
     if context.user_data.get("awaiting_img_url_for"):
         job_id_iv = context.user_data.pop("awaiting_img_url_for")
         context.user_data.pop("awaiting_img_msg_id", None)
@@ -10268,6 +10317,24 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        else "Capa deseleccionada")
                 await query.answer(ans, show_alert=False)
 
+            # Watermark toggle (marca_agua) por nota del briefing
+            elif action == "h_cur_wm" and len(parts) >= 2:
+                job_id = int(parts[1])
+                state  = _load_state(job_id)
+                state["sin_watermark"] = not state.get("sin_watermark", False)
+                _save_state(job_id, state)
+                await query.edit_message_reply_markup(reply_markup=_cur.build_card_keyboard(job_id, state))
+                await query.answer("Sin marca de agua" if state["sin_watermark"] else "Con marca de agua", show_alert=False)
+
+            # Cambiar la foto de la nota del briefing (con watermark, sin tocar el stage)
+            elif action == "h_cur_foto" and len(parts) >= 2:
+                job_id = int(parts[1])
+                context.user_data["awaiting_wm_foto_for"] = job_id
+                await query.answer()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"📷 Foto para la nota #{job_id}. Pegá la URL o enviá la foto directamente. Sale con la marca de agua salvo que la hayas apagado con 🏷.")
+
             # ── Sub-menú categorías (con preseleción marcada) ───────────────────
             # -- Sub-menu categorias multi-select ----------------------------------
             elif action == "h_cur_cats" and arg:
@@ -11773,6 +11840,9 @@ def _build_edit_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🖼️ Cambiar foto", callback_data="edit_photo"),
+            InlineKeyboardButton("🏷 Watermark", callback_data="edit_wm"),
+        ],
+        [
             InlineKeyboardButton("📡 Publicar en redes", callback_data="edit_publish"),
         ],
         [
@@ -11956,6 +12026,20 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Mandame la nueva foto (como imagen en Telegram) "
             "o pegá la URL de la imagen:",
         )
+        return
+
+    if query.data == "edit_wm":
+        post = context.user_data.get("edit_post")
+        if not post:
+            await query.answer("No hay nota en edición.", show_alert=True)
+            return
+        if not (post.get("featured_media") or 0):
+            await query.answer("La nota no tiene foto destacada.", show_alert=True)
+            return
+        await query.answer("Aplicando watermark…")
+        ok = await asyncio.to_thread(_apply_wm_to_featured, post)
+        _txt = ("✅ Watermark aplicado a la foto. " if ok else "❌ No pude aplicar el watermark. ") + post.get("link", "")
+        await query.edit_message_text(_txt)
         return
 
     # Cambio de categoría: callback setcat_<id>
@@ -12666,11 +12750,39 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 
+def _apply_wm_to_featured(post: dict) -> bool:
+    """Baja la featured actual del post, le aplica el watermark y la re-sube como destacada."""
+    try:
+        fm = post.get("featured_media") or 0
+        if not fm:
+            return False
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/media/{fm}",
+                         headers=wp_auth(), proxies=_WP_PROXIES, timeout=20)
+        src = (r.json() or {}).get("source_url") if r.ok else None
+        if not src:
+            return False
+        dl = requests.get(src, headers=HEADERS_BROWSER, timeout=20)
+        if not dl.ok:
+            return False
+        import sys as _sw
+        _sw.path.insert(0, "/opt/me-harness")
+        from agents import marca_agua as _ma
+        wm_bytes = _ma.aplicar_watermark(dl.content)
+        kw = focus_keyword(post["title"])
+        new_mid = upload_image_bytes(wm_bytes, "jpg", f"{kw} - {post['title']}")
+        if not new_mid:
+            return False
+        return update_post(post["id"], {"featured_media": new_mid})
+    except Exception as e:
+        logger.error(f"_apply_wm_to_featured: {e}")
+        return False
+
+
 async def _handle_edit_photo_url(url: str, post: dict) -> bool:
     """Descarga imagen desde URL y la setea como destacada del post."""
     kw = focus_keyword(post["title"])
     alt = f"{kw} - {post['title']}"
-    media_id = upload_image(url, alt)
+    media_id = upload_image(url, alt, watermark=True)
     if not media_id:
         return False
     return update_post(post["id"], {"featured_media": media_id})
@@ -12679,6 +12791,14 @@ async def _handle_edit_photo_url(url: str, post: dict) -> bool:
 async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> bool:
     """Sube bytes de imagen a WordPress y la setea como destacada."""
     try:
+        try:
+            import sys as _sw
+            _sw.path.insert(0, "/opt/me-harness")
+            from agents import marca_agua as _ma
+            img_bytes = _ma.aplicar_watermark(img_bytes)
+            ctype = "image/jpeg"
+        except Exception as _we:
+            logger.warning(f"watermark edit_photo_bytes: {_we}")
         ext = ctype.split("/")[-1] if "/" in ctype else "jpg"
         h = {**wp_auth(), "Content-Disposition": f"attachment; filename=editada.{ext}",
              "Content-Type": ctype}
@@ -12781,6 +12901,36 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # ── Flujo sin_imagen: Leo envía foto para una nota sin imagen ────────────
+    _wmf_job = context.user_data.get("awaiting_wm_foto_for")
+    if _wmf_job:
+        context.user_data.pop("awaiting_wm_foto_for", None)
+        msg = await update.message.reply_text("⏳ Subiendo la foto (con watermark)…")
+        try:
+            photo = update.message.photo[-1]
+            file  = await photo.get_file(read_timeout=30, connect_timeout=15)
+            import requests as _rq_wf
+            dl = await asyncio.to_thread(lambda: _rq_wf.get(file.file_path, timeout=30))
+            import sys as _sy_wf, json as _js_wf, sqlite3 as _sq_wf
+            _sy_wf.path.insert(0, "/opt/me-harness")
+            import broker as _br_wf
+            _job = _br_wf.get_job(_wmf_job)
+            _cj = {}
+            try: _cj = _js_wf.loads(_job.get("content_json") or "{}")
+            except Exception: pass
+            _wmon = not _cj.get("sin_watermark", False)
+            mid = await asyncio.to_thread(upload_image_bytes, dl.content, "jpg", "", _wmon)
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude subir la foto: {e}")
+            return
+        if not mid:
+            await msg.edit_text("❌ No pude subir la foto. Reintentá.")
+            return
+        _cj["image_id_override"] = mid
+        with _sq_wf.connect("/opt/me-harness/harness.db") as _c_wf:
+            _c_wf.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js_wf.dumps(_cj), _wmf_job))
+        await msg.edit_text(f"✅ Foto cargada (#{mid}) para la nota #{_wmf_job}" + (" con watermark." if _wmon else " sin watermark."))
+        return
+
     job_id_photo = context.user_data.get("awaiting_img_url_for")
     if job_id_photo:
         context.user_data.pop("awaiting_img_url_for", None)
