@@ -17095,6 +17095,56 @@ async def handle_evento_button(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+REDACCION_BLOCKED_FILE = "/opt/redaccion-app/blocked.json"
+
+async def cmd_desbloquear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista y desbloquea IPs bloqueadas en redaccion.mundoempresarial.ar (2 intentos fallidos = bloqueo)."""
+    import json as _jdb
+    try:
+        with open(REDACCION_BLOCKED_FILE) as _f:
+            data = _jdb.load(_f)
+    except Exception:
+        data = {}
+    blocked = {ip: r for ip, r in data.items() if isinstance(r, dict) and r.get("blocked")}
+    if not blocked:
+        await update.message.reply_text("✅ No hay IPs bloqueadas en redaccion.mundoempresarial.ar.")
+        return
+    lineas = [f"• <code>{ip}</code> — {r.get('count', 0)} fallos, último {r.get('last_fail', '?')}"
+              for ip, r in blocked.items()]
+    txt = "🔒 <b>IPs bloqueadas en redacción</b>" + chr(10) + chr(10) + chr(10).join(lineas)
+    rows = [[InlineKeyboardButton(f"🔓 Desbloquear {ip}", callback_data=f"desbloq_{ip}")] for ip in blocked]
+    rows.append([InlineKeyboardButton("🔓 Desbloquear TODAS", callback_data="desbloq___ALL__")])
+    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def handle_desbloq_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botones del /desbloquear: quita una IP o vacía todo el blocked.json de la app de redacción."""
+    query = update.callback_query
+    import json as _jdb
+    target = query.data[len("desbloq_"):]
+    try:
+        with open(REDACCION_BLOCKED_FILE) as _f:
+            data = _jdb.load(_f)
+    except Exception:
+        data = {}
+    if target == "__ALL__":
+        n = sum(1 for r in data.values() if isinstance(r, dict) and r.get("blocked"))
+        data = {}
+        msg = f"✅ Desbloqueadas todas las IPs ({n})."
+    else:
+        data.pop(target, None)
+        msg = f"✅ Desbloqueada <code>{target}</code>."
+    try:
+        with open(REDACCION_BLOCKED_FILE, "w") as _f:
+            _jdb.dump(data, _f, indent=2)
+    except Exception as e:
+        await query.answer(f"Error al guardar: {e}", show_alert=True)
+        return
+    await query.answer("Desbloqueado ✅")
+    await query.edit_message_text(msg + chr(10) + chr(10) + "Ya podés entrar a redaccion.mundoempresarial.ar.",
+                                  parse_mode="HTML")
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -17106,6 +17156,7 @@ def main():
         logger.warning("⚠️ ADMIN_CHAT_ID vacío — el guard bloqueará a TODOS (fail-closed).")
     app.add_handler(TypeHandler(Update, _solo_admin), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("desbloquear", cmd_desbloquear))
     app.add_handler(CommandHandler("STOP", cmd_stop))
     app.add_handler(CommandHandler("RESUME", cmd_resume))
     app.add_handler(CommandHandler("comandos", cmd_comandos))
@@ -17154,6 +17205,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
+    app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
