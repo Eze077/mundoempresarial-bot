@@ -6448,6 +6448,24 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error WP {r_rs.status_code}: {r_rs.text[:100]}")
         return
 
+    # ── Proponer living note: Leo manda un link, lo guardamos para retomar ───
+    if context.user_data.get("awaiting_propuesta_ln") is not None:
+        _pj = context.user_data.pop("awaiting_propuesta_ln")
+        _link = text_in.strip()
+        import json as _jpl, os as _opl, datetime as _dpl
+        _PROP = "/opt/me-harness/living_notes_propuestas.json"
+        try:
+            _lst = _jpl.load(open(_PROP)) if _opl.path.exists(_PROP) else []
+        except Exception:
+            _lst = []
+        _lst.append({"link": _link, "from_job": _pj, "fecha": _dpl.date.today().isoformat()})
+        try:
+            open(_PROP, "w").write(_jpl.dumps(_lst, ensure_ascii=False, indent=2))
+            await update.message.reply_text(f"✅ Propuesta de living note guardada ({len(_lst)} en cola). La ejecutamos cuando la conversemos.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ No pude guardar: {e}")
+        return
+
     # ── URL de imagen para nota sin foto ────────────────────────────────────
     if context.user_data.get("awaiting_wm_foto_for"):
         _wmf_job = context.user_data.pop("awaiting_wm_foto_for")
@@ -10002,6 +10020,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         _opts_lv.append((_ln["id"], _ln["tema"]))
                     rows = [[{"text": f"📄 {_t[:44]}", "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
                             for _lid, _t in _opts_lv[:20]]
+                    rows.append([{"text": "➕ Proponer nueva living note (mandá un link)", "callback_data": f"h_cur_propln:{job_id}"}])
                     rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
                     await query.edit_message_text(
                         f"📌 <b>¿A qué living note corresponde esta noticia?</b> — job #{job_id}\n"
@@ -10009,6 +10028,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML", reply_markup={"inline_keyboard": rows})
                 except Exception as _e_lv:
                     await query.answer(f"Error: {_e_lv}", show_alert=True)
+
+            elif action == "h_cur_propln" and arg:
+                job_id = int(arg)
+                context.user_data["awaiting_propuesta_ln"] = job_id
+                await query.answer()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="➕ Proponer living note. Mandame el link (o el texto) de la living note que querés proponer y lo guardo para ejecutar cuando lo conversemos.")
 
             elif action == "h_cur_setliving" and len(parts) >= 3:
                 job_id = int(parts[1]); ln_id = int(parts[2])
