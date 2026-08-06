@@ -9593,6 +9593,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        f"({(_jb or {}).get('stage', 'inexistente')}).", show_alert=True)
                     return
                 state  = _load_state(job_id)
+                # ── Nota manual: el contenido YA es final → publicación DIRECTA (sin redactor,
+                # que la reescribiría). Misma ruta de fotos del publicador (img_gen + watermark). ──
+                if state.get("es_nota_manual"):
+                    await query.message.delete()
+                    _txt_nm = await asyncio.to_thread(_publicar_nota_manual_directo, job_id, state)
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=_txt_nm)
+                    return
                 inst   = state.get("instructions", "")
                 ok     = _cur.approve(job_id, instructions=inst)
                 await query.message.delete()
@@ -16415,6 +16422,65 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
             "source_url": f"columna://{url_slug(title) or 'autor'}"}
 
 
+def _crear_job_nota_manual(d: dict, modo: str) -> int:
+    """Crea el job de una nota manual en 'curado' (flag es_nota_manual) para mostrarla con el
+    MISMO card del curador del briefing (build_card_keyboard). El contenido YA es final
+    (tal_cual formatea / estilo_me reescribe en el bot), así que al aprobar va DIRECTO a
+    'publicacion' sin pasar por el redactor (que lo reescribiría). La foto sigue la ruta del
+    publicador (override → og → biblioteca → img_gen → logo) con watermark de marca."""
+    import sys as _s; _s.path.insert(0, "/opt/me-harness")
+    import broker as _br
+    cj = {
+        "title": d["title"], "excerpt": d.get("excerpt", ""), "content_html": d["content_html"],
+        "bullets": d.get("bullets", []), "h2_headings": d.get("h2_headings", []),
+        "image_url": None, "image_id_override": d.get("image_id_override"),
+        "category_ids": d.get("category_ids", []), "tag_names": d.get("tag_names", []),
+        "hashtags": d.get("hashtags", []), "matched_kw": [],
+        "formato": d.get("formato") or "continua", "portada": bool(d.get("portada")),
+        "meta_desc": (d.get("excerpt") or "")[:210], "focus_keyword": d.get("focus_keyword", ""),
+        "source": d["source_url"], "source_url": d["source_url"],
+        "fuente_propia": True, "pre_passed": True, "autor": d.get("autor", ""),
+        # Una columna es una nota deliberada y autónoma: nunca se consolida en otra.
+        "skip_consolidacion": True, "title_locked": True,
+        "es_nota_manual": True, "manual_modo": modo, "manual_submission": True,
+        "pdf_images": d.get("pdf_images", 0), "hilo": 3,
+    }
+    return _br.enqueue("curado", source_url=d["source_url"], title=d["title"],
+                       content=cj, score=8.0, hilo=3, force=True)
+
+
+def _publicar_nota_manual_directo(job_id: int, state: dict) -> str:
+    """Publica una nota manual DIRECTO a 'publicacion' (contenido final, sin redactor).
+    Traduce el destino elegido en el card (pub_dest_override / pub_date_override) a la
+    programación del publicador con _next_available_slot. Devuelve el texto de confirmación."""
+    import sys as _s; _s.path.insert(0, "/opt/me-harness")
+    import broker as _br, sqlite3 as _sq
+    from agents import publicador as _pub
+    HDB = "/opt/me-harness/harness.db"
+    override = state.get("pub_dest_override")
+    fecha_ov = state.get("pub_date_override")
+    instr = None; cuando = None
+    if fecha_ov:
+        instr = f"programar:{fecha_ov}"; cuando = str(fecha_ov).replace("T", " ")[:16]
+    elif override in ("mejor_horario", "finde"):
+        try:
+            iso = _pub._next_available_slot(override)
+            instr = f"programar:{iso}"; cuando = iso.replace("T", " ")[:16]
+        except Exception:
+            pass
+    if override == "hoy_portada":
+        state["portada"] = True
+    # Mover a publicación con el contenido ya editado en el card (formato, portada, foto, título)
+    _br.update_stage(job_id, "publicacion", content=state)
+    if instr:
+        with _sq.connect(HDB) as conn:
+            conn.execute("UPDATE jobs SET instructions=? WHERE id=?", (instr, job_id))
+    _tit = (state.get("title") or "")[:60]
+    if instr:
+        return f"🗓️ «{_tit}» programada para {cuando}."
+    return f"✅ «{_tit}» → publicando ahora (foto automática con watermark si no cargaste una)."
+
+
 def _enqueue_nota_manual(data: dict, scheduled_dt=None) -> int:
     """Inserta la columna en harness.db stage='publicacion' (formato continua + SEO).
     pre_passed=True bypasea el gate Lector PRE: NO se reescribe contenido humano."""
@@ -16714,7 +16780,8 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
         return
-    # Elección de tratamiento: arma la nota con el modo elegido y muestra el preview
+    # Elección de tratamiento: arma la nota con el modo elegido y la muestra con el MISMO
+    # card del curador del briefing (menú unificado). El cuerpo va como preview arriba.
     if act in ("modo_talcual", "modo_estilome"):
         stash = context.user_data.get("nota_manual_ex")
         if not stash:
@@ -16725,10 +16792,32 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         await q.edit_message_text(f"🧩 Armando la nota — {etq}…")
         d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], modo)
         d["pdf_images"] = stash.get("pdf_images", 0)
-        d["modo"] = modo
-        context.user_data["nota_manual"] = d
         context.user_data.pop("nota_manual_ex", None)
-        await _nota_manual_preview(q.message, d)
+        context.user_data.pop("nota_manual", None)
+        try:
+            jid = await asyncio.to_thread(_crear_job_nota_manual, d, modo)
+        except Exception as _e_nm:
+            await q.message.reply_text(f"❌ No pude crear la nota: {_e_nm}")
+            return
+        # Preview del cuerpo (así se va a publicar)
+        try:
+            parts = []
+            if d.get("bullets"):
+                parts.append("📌 Lo que tenés que saber:\n" + "\n".join("• " + b for b in d["bullets"]))
+            parts.append(_html_to_telegram_text(d["content_html"]))
+            await q.message.reply_text("📄 <b>Cuerpo de la nota</b> (así se va a publicar):", parse_mode="HTML")
+            for chunk in _chunks("\n\n".join(parts), 3900):
+                await q.message.reply_text(chunk, disable_web_page_preview=True)
+        except Exception:
+            pass
+        # Card del curador (mismo menú que el briefing) + borrar el mensaje "Armando…"
+        import sys as _s_nmj; _s_nmj.path.insert(0, "/opt/me-harness")
+        from agents import curador as _cur_nmj
+        await asyncio.to_thread(_cur_nmj.run_briefing_single, jid)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         return
     if not data:
         await q.edit_message_text("⚠️ Se perdió la nota en memoria. Reiniciá con /notamanual.")
