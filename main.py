@@ -6448,24 +6448,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error WP {r_rs.status_code}: {r_rs.text[:100]}")
         return
 
-    # ── Proponer living note: Leo manda un link, lo guardamos para retomar ───
-    if context.user_data.get("awaiting_propuesta_ln") is not None:
-        _pj = context.user_data.pop("awaiting_propuesta_ln")
-        _link = text_in.strip()
-        import json as _jpl, os as _opl, datetime as _dpl
-        _PROP = "/opt/me-harness/living_notes_propuestas.json"
-        try:
-            _lst = _jpl.load(open(_PROP)) if _opl.path.exists(_PROP) else []
-        except Exception:
-            _lst = []
-        _lst.append({"link": _link, "from_job": _pj, "fecha": _dpl.date.today().isoformat()})
-        try:
-            open(_PROP, "w").write(_jpl.dumps(_lst, ensure_ascii=False, indent=2))
-            await update.message.reply_text(f"✅ Propuesta de living note guardada ({len(_lst)} en cola). La ejecutamos cuando la conversemos.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ No pude guardar: {e}")
-        return
-
     # ── URL de imagen para nota sin foto ────────────────────────────────────
     if context.user_data.get("awaiting_wm_foto_for"):
         _wmf_job = context.user_data.pop("awaiting_wm_foto_for")
@@ -10031,11 +10013,36 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "h_cur_propln" and arg:
                 job_id = int(arg)
-                context.user_data["awaiting_propuesta_ln"] = job_id
-                await query.answer()
+                import json as _jpl, os as _opl, datetime as _dpl
+                _jb = _br.get_job(job_id) or {}
+                try:
+                    _cjp = _jpl.loads(_jb.get("content_json") or "{}")
+                except Exception:
+                    _cjp = {}
+                _linkp = _jb.get("source_url") or _cjp.get("source") or _cjp.get("source_url") or ""
+                _titp = _cjp.get("title") or _jb.get("title") or ""
+                _PROP = "/opt/me-harness/living_notes_propuestas.json"
+                try:
+                    _lst = _jpl.load(open(_PROP)) if _opl.path.exists(_PROP) else []
+                except Exception:
+                    _lst = []
+                _lst.append({"link": _linkp, "titulo": _titp, "from_job": job_id,
+                             "fecha": _dpl.date.today().isoformat()})
+                try:
+                    open(_PROP, "w").write(_jpl.dumps(_lst, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+                await query.answer("➕ Propuesta guardada")
+                try:
+                    await query.message.delete()   # borra el menú del curador
+                except Exception:
+                    pass
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text="➕ Proponer living note. Mandame el link (o el texto) de la living note que querés proponer y lo guardo para ejecutar cuando lo conversemos.")
+                    text=("➕ <b>Living note propuesta guardada</b> (" + str(len(_lst)) + " en cola)"
+                          + chr(10) + "📄 " + _titp[:70] + chr(10) + "🔗 " + _linkp
+                          + chr(10) + chr(10) + "La ejecutamos cuando la conversemos."),
+                    parse_mode="HTML")
 
             elif action == "h_cur_setliving" and len(parts) >= 3:
                 job_id = int(parts[1]); ln_id = int(parts[2])
