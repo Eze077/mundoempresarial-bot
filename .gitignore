@@ -1,0 +1,14 @@
+# mundoempresarial-bot .gitignore — git = código, secretos y datos afuera
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.bak*
+*.log
+
+# Secretos
+.env
+.env.*
+.deepseek_key
+*.key
+claves.txt
