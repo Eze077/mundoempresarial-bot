@@ -5605,15 +5605,17 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Mandá una hora FUTURA de hoy, o volvé a la tarjeta y tocá «✅ Enviar ahora».")
             return   # sigue esperando la hora
         context.user_data.pop("awaiting_bol_hora")
-        # NO programar todavía: mostrar confirmación. Recién dispara al tocar el botón (pedido Leo 10/8).
+        # Guardar hora y volver al menú: elegir la hora NO agenda nada. Solo «Confirmar envío»
+        # dispara el schedule. Podés cambiar la hora o cancelar sin mandar (pedido Leo 10/8).
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"✅ Confirmar y programar {hh:02d}:{mm:02d}",
+            [InlineKeyboardButton(f"✅ Confirmar envío {hh:02d}:{mm:02d}",
                                   callback_data=f"h_bol_confirm:{info['cid']}:{info['publico']}:{hh:02d}{mm:02d}")],
+            [InlineKeyboardButton("🕐 Cambiar hora",
+                                  callback_data=f"h_bol_horaask:{info['cid']}:{info['publico']}")],
             [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{info['cid']}")]])
         await update.message.reply_text(
-            f"🕐 Vas a programar el boletín #{info['cid']} → <b>{info['publico']}</b> "
-            f"para las <b>{hh:02d}:{mm:02d}</b> (AR).\n"
-            f"Hasta que toques <b>Confirmar</b> no se dispara nada — podés seguir revisando.",
+            f"🗓️ <b>Boletín #{info['cid']}</b> — hora elegida: <b>{hh:02d}:{mm:02d}</b> ({info['publico']})\n"
+            f"No se manda hasta que toques <b>Confirmar envío</b>. Podés cambiar la hora o cancelar.",
             reply_markup=kb, parse_mode="HTML")
         return
 
