@@ -5605,9 +5605,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Mandá una hora FUTURA de hoy, o volvé a la tarjeta y tocá «✅ Enviar ahora».")
             return   # sigue esperando la hora
         context.user_data.pop("awaiting_bol_hora")
-        await update.message.reply_text(f"⏳ Programando #{info['cid']} ({hh:02d}:{mm:02d})…")
-        ok, txt = await asyncio.to_thread(_boletin_programar, info["cid"], info["publico"], hh, mm)
-        await update.message.reply_text(txt, parse_mode="HTML", disable_web_page_preview=True)
+        # NO programar todavía: mostrar confirmación. Recién dispara al tocar el botón (pedido Leo 10/8).
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Confirmar y programar {hh:02d}:{mm:02d}",
+                                  callback_data=f"h_bol_confirm:{info['cid']}:{info['publico']}:{hh:02d}{mm:02d}")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{info['cid']}")]])
+        await update.message.reply_text(
+            f"🕐 Vas a programar el boletín #{info['cid']} → <b>{info['publico']}</b> "
+            f"para las <b>{hh:02d}:{mm:02d}</b> (AR).\n"
+            f"Hasta que toques <b>Confirmar</b> no se dispara nada — podés seguir revisando.",
+            reply_markup=kb, parse_mode="HTML")
         return
 
     # ── /encuesta: pregunta → opciones (2-6) → notas (1-4) → redes/acción ───────
@@ -7632,6 +7639,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_bol_hora"] = {"cid": pv[1], "publico": pv[2] if len(pv) >= 3 else "lectores"}
         await query.edit_message_text("🕐 Escribí la hora de envío (hoy), formato HH:MM. Ej: 14:00",
                                       parse_mode="HTML")
+        return
+
+    # ── Boletín: CONFIRMAR la programación (recién acá dispara el schedule) ───────
+    if query.data.startswith("h_bol_confirm:"):
+        pv = query.data.split(":"); cid = pv[1]
+        publico = pv[2] if len(pv) >= 3 else "lectores"
+        hhmm = pv[3] if len(pv) >= 4 else "1030"
+        hh, mm = int(hhmm[:2]), int(hhmm[2:])
+        await query.edit_message_text(f"⏳ Programando #{cid} ({hh:02d}:{mm:02d})…", parse_mode="HTML")
+        ok, txt = await asyncio.to_thread(_boletin_programar, cid, publico, hh, mm)
+        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     # ── Boletín: programar el envío (hora fija 10:30 o ajustada) o cancelar ──────
