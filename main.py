@@ -2524,6 +2524,72 @@ def detect_url_kind(url: str) -> str:
     return "unknown"
 
 
+def _clean_tweet_text(t: str) -> str:
+    """Saca los https://t.co/... del texto del tweet."""
+    return re.sub(r'https://t\.co/\S+', '', (t or "")).strip()
+
+
+def scrape_tweet(url: str) -> dict | None:
+    """Trae el contenido de un tweet SIN API paga vía fxtwitter, con fallback a vxtwitter.
+    Devuelve {id, url, text, author_name, handle, date, media_urls} o None."""
+    m = re.search(r'(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)', url)
+    if not m:
+        return None
+    user, tid = m.group(1), m.group(2)
+    ua = {"User-Agent": "Mozilla/5.0"}
+    # 1) fxtwitter (probado OK)
+    try:
+        r = requests.get(f"https://api.fxtwitter.com/{user}/status/{tid}", headers=ua, timeout=15)
+        if r.status_code == 200:
+            tw = (r.json() or {}).get("tweet") or {}
+            if tw:
+                media = [p["url"] for p in ((tw.get("media") or {}).get("photos") or []) if p.get("url")]
+                a = tw.get("author") or {}
+                return {"id": tid, "url": tw.get("url") or url, "text": _clean_tweet_text(tw.get("text")),
+                        "author_name": a.get("name") or user, "handle": a.get("screen_name") or user,
+                        "date": tw.get("created_at") or "", "media_urls": media}
+    except Exception as e:
+        logger.warning(f"scrape_tweet fxtwitter: {e}")
+    # 2) fallback vxtwitter (mismo estilo, sin token)
+    try:
+        r = requests.get(f"https://api.vxtwitter.com/{user}/status/{tid}", headers=ua, timeout=15)
+        if r.status_code == 200:
+            j = r.json() or {}
+            media = [u for u in (j.get("mediaURLs") or []) if u and re.search(r'\.(jpg|jpeg|png|webp)', u, re.I)]
+            return {"id": tid, "url": url, "text": _clean_tweet_text(j.get("text")),
+                    "author_name": j.get("user_name") or user, "handle": j.get("user_screen_name") or user,
+                    "date": j.get("date") or "", "media_urls": media}
+    except Exception as e:
+        logger.warning(f"scrape_tweet vxtwitter: {e}")
+    return None
+
+
+def _describe_tweet_image(image_url: str) -> str:
+    """Lee la imagen (gráfico/foto) de un tweet con GPT-4o visión y extrae su info como texto,
+    para nutrir la nota. Devuelve '' si no hay key o falla."""
+    if not OPENAI_API_KEY or not image_url:
+        return ""
+    try:
+        prompt = ("Describí con precisión qué muestra esta imagen, para usarla como FUENTE de una nota "
+                  "periodística. Si es un gráfico o tabla: título, qué mide cada eje/serie, los VALORES "
+                  "numéricos clave, el período y la fuente citada. Si es una foto: qué se ve y todo el texto "
+                  "visible. NO interpretes ni inventes: reportá SOLO lo que está en la imagen. En español.")
+        r = openai_post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-4o", "max_tokens": 700, "temperature": 0,
+                  "messages": [{"role": "user", "content": [
+                      {"type": "text", "text": prompt},
+                      {"type": "image_url", "image_url": {"url": image_url}}]}]},
+            timeout=90)
+        if r.status_code == 200:
+            return (r.json()["choices"][0]["message"]["content"] or "").strip()
+        logger.warning(f"_describe_tweet_image {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"_describe_tweet_image: {e}")
+    return ""
+
+
 def youtube_video_id(url: str) -> str | None:
     m = _YOUTUBE_ID_RE.search(url or "")
     return m.group(1) if m else None
@@ -5344,6 +5410,17 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── Nota desde tweet: capturar la directiva (el ángulo) ──────────────────────
+    if context.user_data.get("awaiting_tweet_directiva"):
+        context.user_data.pop("awaiting_tweet_directiva", None)
+        _tw = context.user_data.pop("tweet_nota", None)
+        if not _tw:
+            await update.message.reply_text("⚠️ Se perdió el tweet. Reenviá el link.")
+            return
+        _directiva = "" if text_in.strip() == "-" else text_in.strip()
+        await _crear_nota_tweet(update, context, _tw, _directiva)
+        return
+
     # ── Panel de nueva efeméride: capturar nombre/fecha/ángulo/segmento por texto ──
     _efc = next((c for c in ("nombre", "fecha", "angulo", "segmento")
                  if context.user_data.get(f"awaiting_efem_{c}")), None)
@@ -6557,6 +6634,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Hint de hilo si el operador lo mencionó
     hilo_hint = extract_hilo_hint(text_in)
     kind = detect_url_kind(url)
+
+    # ── Tweet → nota (leo el tweet + su imagen, te pido la directiva) ─────────
+    if kind == "tweet":
+        await _start_tweet_nota(update, context, url)
+        return
 
     # Check de duplicados: si el slug de la URL ya existe en WP, avisar y salir
     try:
@@ -16857,6 +16939,78 @@ async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE
     ev["transcripts"].append({"orador": label, "texto": texto})
     await status.edit_text(f"✅ «{label}» transcripto ({len(texto.split())} palabras).")
     await m.reply_text(_evento_resumen(ev), parse_mode="HTML", reply_markup=_evento_kb())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Nota a partir de un TWEET: pegás el link → leo el tweet + su imagen → tu directiva
+# es el ángulo → el harness redacta → el publicador embebe el tweet. (10/8/2026)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _enqueue_tweet_nota(tw: dict, directiva: str, img_desc: str, media_id) -> int:
+    """Encola en 'curado' una nota basada en un tweet. text = tweet + info de la imagen;
+    instructions = ángulo; source_url = el tweet (para que el publicador lo embeba)."""
+    import sqlite3 as _sq
+    from datetime import datetime as _dt
+    text = f"Tweet de {tw['author_name']} (@{tw['handle']}), {tw.get('date','')}:\n{tw['text']}"
+    if img_desc:
+        text += f"\n\n[Contenido de la imagen del tweet]:\n{img_desc}"
+    base_instr = (f"Nota a partir de un tweet de {tw['author_name']} (@{tw['handle']}). Usá el tweet y la "
+                  "información de su imagen como ÚNICA fuente; NO inventes datos fuera de eso. El tweet va a "
+                  "quedar EMBEBIDO en la nota, así que no lo pegues textual entero: contextualizá y desarrollá.")
+    if directiva:
+        base_instr += " ÁNGULO EDITORIAL (lo que Leo quiere destacar): " + directiva
+    cj = {"title": "", "excerpt": "", "source_name": tw["author_name"],
+          "text": text, "image_id_override": media_id,
+          "manual_submission": True, "fuente_propia": True}
+    with _sq.connect("/opt/me-harness/harness.db") as conn:
+        cur = conn.execute(
+            "INSERT INTO jobs (stage, source_url, title, content_json, score, hilo, instructions, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("curado", tw["url"], "", json.dumps(cj, ensure_ascii=False), 8.0, 3,
+             base_instr, _dt.utcnow().isoformat()))
+        return cur.lastrowid
+
+
+async def _start_tweet_nota(update, context, url: str):
+    """Pegaste un link de tweet: lo leo y te pido la directiva (el ángulo)."""
+    msg = await update.message.reply_text("🐦 Leyendo el tweet…")
+    tw = await asyncio.to_thread(scrape_tweet, url)
+    if not tw:
+        await msg.edit_text("❌ No pude leer el tweet (¿protegido, borrado, o X caído?). Probá con otro.")
+        return
+    context.user_data["tweet_nota"] = tw
+    context.user_data["awaiting_tweet_directiva"] = True
+    import html as _h
+    resumen = (f"🐦 <b>Tweet de {_h.escape(tw['author_name'])}</b> (@{_h.escape(tw['handle'])})\n"
+               f"«{_h.escape((tw['text'] or '')[:600])}»")
+    if tw.get("media_urls"):
+        resumen += f"\n🖼️ +{len(tw['media_urls'])} imagen(es) — las leo para nutrir la nota"
+    await msg.edit_text(
+        resumen + "\n\n📝 <b>¿Cuál es tu ángulo / qué querés destacar?</b>\n"
+        "Escribí la directiva (así el redactor sabe el foco). O mandá <b>-</b> para una nota neutra.",
+        parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def _crear_nota_tweet(update, context, tw: dict, directiva: str):
+    """Lee la imagen del tweet, sube la destacada, encola el job y muestra el card del curador."""
+    status = await update.message.reply_text("🧠 Leyendo la imagen y armando la nota…")
+    img_url = next((u for u in (tw.get("media_urls") or [])
+                    if re.search(r'pbs\.twimg\.com/media|\.(jpg|jpeg|png|webp)', u, re.I)), None)
+    img_desc = await asyncio.to_thread(_describe_tweet_image, img_url) if img_url else ""
+    media_id = await asyncio.to_thread(upload_image, img_url, tw["author_name"], True) if img_url else None
+    try:
+        jid = await asyncio.to_thread(_enqueue_tweet_nota, tw, directiva, img_desc, media_id)
+    except Exception as e:
+        await status.edit_text(f"❌ No pude crear la nota: {e}")
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    import sys as _s_tw
+    _s_tw.path.insert(0, "/opt/me-harness")
+    from agents import curador as _cur_tw
+    await asyncio.to_thread(_cur_tw.run_briefing_single, jid)
 
 
 def _enqueue_evento(ev: dict, modo: str) -> list:
