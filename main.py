@@ -16463,44 +16463,49 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _nm_espera(context)          # arrancar limpio: nada de flags colgados de una nota anterior
     context.user_data["awaiting_nota_manual"] = True
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio")]])
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio"),
+        InlineKeyboardButton("🎥 Adjuntar video", callback_data="nm_video")]])
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
         "Pegá el <b>texto completo</b> de la columna, subí el <b>PDF</b>, o mandá un "
-        "<b>🎤 audio</b> (nota de voz de WhatsApp, m4a, mp3…) y lo <b>transcribo</b>.\n\n"
+        "<b>🎤 audio</b> o <b>🎥 video</b> (nota de voz o video de WhatsApp, m4a, mp4…) y lo <b>transcribo</b>.\n\n"
         "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
         "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
         parse_mode="HTML", reply_markup=kb)
 
 
-_NM_AUDIO_EXT = (".m4a", ".mp3", ".ogg", ".opus", ".wav", ".aac", ".flac", ".mp4", ".amr", ".mpeg", ".mpga")
+_NM_AUDIO_EXT = (".m4a", ".mp3", ".ogg", ".opus", ".wav", ".aac", ".flac", ".amr", ".mpga")
+_NM_VIDEO_EXT = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".3gp", ".mpeg")
 
 
 async def _nm_from_audio(update, context, media):
-    """Baja un audio (voz de Telegram, m4a/ogg/mp3 de WhatsApp, etc.), lo transcribe con Whisper
-    y lo procesa como el texto de la nota manual (misma ruta que el PDF/texto)."""
+    """Baja un audio o VIDEO (voz de Telegram, m4a/ogg/mp3, mp4/mov de WhatsApp, etc.), lo transcribe
+    con Whisper (_whisper_from_file saca el audio del video con ffmpeg) y lo procesa como el texto de
+    la nota manual (misma ruta que el PDF/texto)."""
     import os as _os, tempfile as _tmp
     m = update.message
-    status = await m.reply_text("🎙️ Bajando el audio…")
+    status = await m.reply_text("📥 Bajando el archivo…")
     path = None
     try:
-        f = await media.get_file(read_timeout=90, connect_timeout=30)
+        f = await media.get_file(read_timeout=120, connect_timeout=30)
         base = getattr(media, "file_name", None) or f"{media.file_unique_id}.ogg"
         ext = _os.path.splitext(base)[1].lower() or ".ogg"
         path = _os.path.join(_tmp.gettempdir(), f"nm_{media.file_unique_id}{ext}")
         await f.download_to_drive(path)
     except Exception as e:
         await status.edit_text(
-            f"❌ No pude bajar el audio ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB.")
+            f"❌ No pude bajar el archivo ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB "
+            "(si el video pesa más, mandá uno más corto o solo el audio).")
         return
-    await status.edit_text("🧠 Transcribiendo el audio… (puede tardar un rato)")
+    await status.edit_text("🧠 Transcribiendo… (puede tardar un rato)")
     texto = await asyncio.to_thread(_whisper_from_file, path)
     try:
         if path: _os.remove(path)
     except Exception:
         pass
     if not texto:
-        await status.edit_text("⚠️ No pude transcribir el audio. Probá reenviarlo (m4a, ogg, mp3…).")
+        await status.edit_text("⚠️ No pude transcribir. Probá reenviarlo (audio m4a/ogg/mp3 o video mp4/mov).")
         return
     context.user_data.pop("awaiting_nota_manual", None)
     await status.edit_text(f"✅ Audio transcripto ({len(texto.split())} palabras). Procesando la columna…")
@@ -16513,13 +16518,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     fn = (doc.file_name or "").lower()
     mime = (doc.mime_type or "").lower()
-    # Audio enviado como ARCHIVO (WhatsApp exporta .opus/.m4a como documento) → transcribir
-    if mime.startswith("audio/") or fn.endswith(_NM_AUDIO_EXT):
+    # Audio o VIDEO enviado como ARCHIVO (WhatsApp exporta .opus/.m4a/.mp4 como documento) → transcribir
+    if mime.startswith(("audio/", "video/")) or fn.endswith(_NM_AUDIO_EXT + _NM_VIDEO_EXT):
         await _nm_from_audio(update, context, doc)
         return
     if not (fn.endswith(".pdf") or (doc.mime_type or "") == "application/pdf"):
         await update.message.reply_text(
-            "Subí un <b>PDF</b>, un <b>audio</b> (nota de voz, m4a, mp3…), o pegá el texto de la columna.",
+            "Subí un <b>PDF</b>, un <b>audio/video</b> (nota de voz, m4a, mp4…), o pegá el texto de la columna.",
             parse_mode="HTML")
         return
     context.user_data.pop("awaiting_nota_manual", None)
@@ -16590,15 +16595,17 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
         return
-    if act == "audio":
-        # Adjuntar audio: dejamos el flag de espera y el usuario manda el audio (voz/m4a/ogg/mp3).
+    if act in ("audio", "video"):
+        # Adjuntar audio/video: dejamos el flag de espera; el usuario manda el archivo y lo transcribimos.
         context.user_data["awaiting_nota_manual"] = True
+        _ico = "🎤" if act == "audio" else "🎥"
+        _ej = ("nota de voz, m4a, mp3, ogg, opus…" if act == "audio"
+               else "video de WhatsApp, mp4, mov… (corto, hasta ~20 MB)")
         try:
             await q.edit_message_text(
-                "🎤 Dale — mandame el audio ahora (nota de voz, m4a, mp3, ogg, opus…) "
-                "y lo paso a texto para la columna.")
+                f"{_ico} Dale — mandame el {act} ahora ({_ej}) y lo paso a texto para la columna.")
         except Exception:
-            await q.message.reply_text("🎤 Mandame el audio ahora y lo transcribo.")
+            await q.message.reply_text(f"{_ico} Mandame el {act} ahora y lo transcribo.")
         return
     # Elección de tratamiento: arma la nota con el modo elegido y la muestra con el MISMO
     # card del curador del briefing (menú unificado). El cuerpo va como preview arriba.
@@ -16814,7 +16821,7 @@ async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Recibe audio/voz durante una cobertura de evento y lo transcribe.
     Si estamos esperando una NOTA MANUAL, transcribe el audio como texto de la columna."""
     m = update.message
-    media = m.voice or m.audio
+    media = m.voice or m.audio or m.video
     if context.user_data.get("awaiting_nota_manual") and media:
         await _nm_from_audio(update, context, media)
         return
@@ -17059,7 +17066,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_evento_media))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO, handle_evento_media))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
