@@ -16463,12 +16463,48 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _nm_espera(context)          # arrancar limpio: nada de flags colgados de una nota anterior
     context.user_data["awaiting_nota_manual"] = True
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio")]])
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
-        "Pegá el <b>texto completo</b> de la columna, o subí el <b>PDF</b>.\n\n"
+        "Pegá el <b>texto completo</b> de la columna, subí el <b>PDF</b>, o mandá un "
+        "<b>🎤 audio</b> (nota de voz de WhatsApp, m4a, mp3…) y lo <b>transcribo</b>.\n\n"
         "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
         "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
-        parse_mode="HTML")
+        parse_mode="HTML", reply_markup=kb)
+
+
+_NM_AUDIO_EXT = (".m4a", ".mp3", ".ogg", ".opus", ".wav", ".aac", ".flac", ".mp4", ".amr", ".mpeg", ".mpga")
+
+
+async def _nm_from_audio(update, context, media):
+    """Baja un audio (voz de Telegram, m4a/ogg/mp3 de WhatsApp, etc.), lo transcribe con Whisper
+    y lo procesa como el texto de la nota manual (misma ruta que el PDF/texto)."""
+    import os as _os, tempfile as _tmp
+    m = update.message
+    status = await m.reply_text("🎙️ Bajando el audio…")
+    path = None
+    try:
+        f = await media.get_file(read_timeout=90, connect_timeout=30)
+        base = getattr(media, "file_name", None) or f"{media.file_unique_id}.ogg"
+        ext = _os.path.splitext(base)[1].lower() or ".ogg"
+        path = _os.path.join(_tmp.gettempdir(), f"nm_{media.file_unique_id}{ext}")
+        await f.download_to_drive(path)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ No pude bajar el audio ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB.")
+        return
+    await status.edit_text("🧠 Transcribiendo el audio… (puede tardar un rato)")
+    texto = await asyncio.to_thread(_whisper_from_file, path)
+    try:
+        if path: _os.remove(path)
+    except Exception:
+        pass
+    if not texto:
+        await status.edit_text("⚠️ No pude transcribir el audio. Probá reenviarlo (m4a, ogg, mp3…).")
+        return
+    context.user_data.pop("awaiting_nota_manual", None)
+    await status.edit_text(f"✅ Audio transcripto ({len(texto.split())} palabras). Procesando la columna…")
+    await _process_nota_manual(update, context, texto, status_msg=status)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16476,8 +16512,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     doc = update.message.document
     fn = (doc.file_name or "").lower()
+    mime = (doc.mime_type or "").lower()
+    # Audio enviado como ARCHIVO (WhatsApp exporta .opus/.m4a como documento) → transcribir
+    if mime.startswith("audio/") or fn.endswith(_NM_AUDIO_EXT):
+        await _nm_from_audio(update, context, doc)
+        return
     if not (fn.endswith(".pdf") or (doc.mime_type or "") == "application/pdf"):
-        await update.message.reply_text("Subí un PDF, o pegá el texto de la columna directamente.")
+        await update.message.reply_text(
+            "Subí un <b>PDF</b>, un <b>audio</b> (nota de voz, m4a, mp3…), o pegá el texto de la columna.",
+            parse_mode="HTML")
         return
     context.user_data.pop("awaiting_nota_manual", None)
     msg = await update.message.reply_text("📄 Leyendo el PDF…")
@@ -16546,6 +16589,16 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("nota_manual", None)
         context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    if act == "audio":
+        # Adjuntar audio: dejamos el flag de espera y el usuario manda el audio (voz/m4a/ogg/mp3).
+        context.user_data["awaiting_nota_manual"] = True
+        try:
+            await q.edit_message_text(
+                "🎤 Dale — mandame el audio ahora (nota de voz, m4a, mp3, ogg, opus…) "
+                "y lo paso a texto para la columna.")
+        except Exception:
+            await q.message.reply_text("🎤 Mandame el audio ahora y lo transcribo.")
         return
     # Elección de tratamiento: arma la nota con el modo elegido y la muestra con el MISMO
     # card del curador del briefing (menú unificado). El cuerpo va como preview arriba.
@@ -16758,12 +16811,16 @@ async def _evento_add_text(update, context, text_in: str):
 
 
 async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Recibe audio/voz durante una cobertura de evento y lo transcribe."""
+    """Recibe audio/voz durante una cobertura de evento y lo transcribe.
+    Si estamos esperando una NOTA MANUAL, transcribe el audio como texto de la columna."""
+    m = update.message
+    media = m.voice or m.audio
+    if context.user_data.get("awaiting_nota_manual") and media:
+        await _nm_from_audio(update, context, media)
+        return
     ev = context.user_data.get("evento")
     if ev is None:
         return
-    m = update.message
-    media = m.voice or m.audio
     if not media:
         return
     status = await m.reply_text("🎙️ Bajando audio…")
