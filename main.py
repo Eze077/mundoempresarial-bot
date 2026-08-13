@@ -7853,44 +7853,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Error: {_he2}")
         return
 
-    # ── Harness — Recomendaciones generales / Reglas de agentes ─────────────
-    # h_agtrule_add:{agent}:{keyword} → escribe regla permanente
-    # h_agtrule_skip:{keyword}        → registra patrón como ignorado (no vuelve a aparecer)
+    # ── Harness — Reglas de agentes (RETIRADO 2026-08-13, decisión de Leo) ──────────────────
+    # El loop "recomendación general → ¿convertir en regla?" se eliminó del Lector: generalizar
+    # reglas desde opiniones de notas puntuales era mala señal, y las reglas de agente_curador/
+    # publicador no las leía nadie. Este handler queda SOLO para botones viejos en el historial.
     if query.data.startswith("h_agtrule_add:") or query.data.startswith("h_agtrule_skip:"):
-        import sys as _sys2
-        _sys2.path.insert(0, "/opt/me-harness")
         try:
-            import broker as _hb2
-            parts = query.data.split(":", 2)
-            action_ag = parts[0]
-            if action_ag == "h_agtrule_add" and len(parts) >= 3:
-                agent_name = parts[1]
-                keyword    = parts[2]
-                _PATTERNS_MAP = {
-                    "bullet":     "Los bullets se generan reformulando el título en lugar de extraer datos del cuerpo. Regla: cada bullet DEBE contener al menos un número, %, nombre propio o fecha extraído del cuerpo.",
-                    "título":     "El título no coincide con el eje central del artículo. Regla: verificar coherencia titulo-H2s antes de publicar.",
-                    "bajada":     "La bajada repite el título. Regla: bajada prohibida si tiene >60% de palabras en común con el título.",
-                    "coherencia": "Desconexión titulo-cuerpo. Regla: título, bajada, bullets y H2s deben responder la misma pregunta central.",
-                    "circular":   "Contenido circular en fuentes de video. Regla: usar al expositor como ancla narrativa.",
-                    "imagen":     "Imagen genérica. Regla: priorizar imagen con keyword exacto del título.",
-                    "h2":         "H2s vagos. Regla: cada H2 debe incluir un dato específico de la sección.",
-                    "relevancia": "Baja relevancia pyme. Regla: priorizar notas con impacto en costos, impuestos o regulaciones.",
-                }
-                rule_text = _PATTERNS_MAP.get(keyword, f"Patrón '{keyword}' detectado — revisar {agent_name}")
-                _hb2.add_rule(rule_text, category=f"agente_{agent_name}", source_tip=f"Pattern: {keyword}")
-                await query.edit_message_text(
-                    f"✅ <b>Regla guardada para {agent_name}</b>\n<i>{rule_text[:300]}</i>\n\nVer registro completo con /reglas",
-                    parse_mode="HTML",
-                )
-            elif action_ag == "h_agtrule_skip" and len(parts) >= 2:
-                keyword = parts[1]
-                _hb2.add_ignored_pattern(keyword)
-                await query.edit_message_text(
-                    f"❌ <b>Patrón ignorado para siempre: <code>{keyword}</code></b>\nNo se volverá a proponer esta recomendación.\n\nVer registro con /reglas",
-                    parse_mode="HTML",
-                )
+            await query.edit_message_text(
+                "ℹ️ <b>Este mecanismo se retiró (13/8).</b>\n"
+                "Ya no se generan reglas a partir de opiniones del Lector sobre notas puntuales. "
+                "Los patrones se miden contra tráfico real en el informe de calidad de los lunes; "
+                "si querés fijar una regla editorial, charlala en sesión.",
+                parse_mode="HTML",
+            )
         except Exception as _age:
-            logger.warning(f"h_agtrule handler: {_age}")
+            logger.warning(f"h_agtrule handler (legacy): {_age}")
         return
 
     # ── Harness — SysAdmin ───────────────────────────────────────────────────
