@@ -7853,6 +7853,34 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Error: {_he2}")
         return
 
+    # ── Harness — Reescritor quirúrgico (F3 autoajuste 13/8) ────────────────────────────────
+    # h_rw_apply:{id} → aplica el patch YA PREPARADO (botón efectivo) · h_rw_skip:{id} → saltear
+    if query.data.startswith("h_rw_apply:") or query.data.startswith("h_rw_skip:"):
+        import sys as _sysrw
+        _sysrw.path.insert(0, "/opt/me-harness")
+        try:
+            rid = int(query.data.split(":", 1)[1])
+            from agents import reescritor as _rw
+            if query.data.startswith("h_rw_apply:"):
+                _res = await asyncio.wait_for(asyncio.to_thread(_rw.aplicar, rid), timeout=90)
+                if _res.get("ok"):
+                    await query.edit_message_text(
+                        f"✅ <b>Reescritura aplicada</b> — {_res.get('titulo','')[:70]}\n"
+                        f"El efecto se mide a +14 días (informe del lunes).", parse_mode="HTML")
+                else:
+                    await query.edit_message_text(
+                        f"⚠️ No se pudo aplicar: {_res.get('motivo','?')}", parse_mode="HTML")
+            else:
+                await asyncio.to_thread(_rw.saltear, rid)
+                await query.edit_message_text("❌ Reescritura salteada.", parse_mode="HTML")
+        except Exception as _rwe:
+            logger.warning(f"h_rw handler: {_rwe}")
+            try:
+                await query.answer("Error aplicando — ver logs", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── Harness — Reglas de agentes (RETIRADO 2026-08-13, decisión de Leo) ──────────────────
     # El loop "recomendación general → ¿convertir en regla?" se eliminó del Lector: generalizar
     # reglas desde opiniones de notas puntuales era mala señal, y las reglas de agente_curador/
