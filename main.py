@@ -7868,15 +7868,60 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"✅ <b>Reescritura aplicada</b> — {_res.get('titulo','')[:70]}\n"
                         f"El efecto se mide a +14 días (informe del lunes).", parse_mode="HTML")
                 else:
-                    await query.edit_message_text(
-                        f"⚠️ No se pudo aplicar: {_res.get('motivo','?')}", parse_mode="HTML")
+                    # NO editar el mensaje: conservar los botones para reintentar (review 13/8)
+                    await query.answer(f"⚠️ No se pudo aplicar: {str(_res.get('motivo','?'))[:170]}",
+                                       show_alert=True)
             else:
                 await asyncio.to_thread(_rw.saltear, rid)
                 await query.edit_message_text("❌ Reescritura salteada.", parse_mode="HTML")
+        except asyncio.TimeoutError:
+            # el thread sigue corriendo: el patch PUEDE haberse aplicado igual (review 13/8)
+            try:
+                await query.answer("⏳ WP tarda en responder; el patch puede haberse aplicado "
+                                   "igual — verificá antes de reintentar.", show_alert=True)
+            except Exception:
+                pass
         except Exception as _rwe:
             logger.warning(f"h_rw handler: {_rwe}")
             try:
                 await query.answer("Error aplicando — ver logs", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    # ── Harness — Briefing nutrición: ↩️ devolver una nota al briefing normal (13/8) ─────────
+    # Registra el ejemplo NEGATIVO (destino='briefing') para que el router aprenda que esa
+    # familia de notas NO se desvía, limpia el destino y reenvía el card del curador.
+    if query.data.startswith("h_nut_rebrief:"):
+        import sys as _sysnb
+        _sysnb.path.insert(0, "/opt/me-harness")
+        try:
+            _jidn = int(query.data.split(":", 1)[1])
+            import broker as _brn
+            from agents import curador as _curn
+            def _volver(_j=_jidn):
+                try:
+                    _brn.add_ruteo_ejemplo_desde_job(_j, "briefing")
+                except Exception as _e_ej:
+                    logger.debug(f"ejemplo negativo: {_e_ej}")
+                _job = _brn.get_job(_j) or {}
+                try:
+                    _st = json.loads(_job.get("content_json") or "{}")
+                    _st.pop("living_note_id", None)
+                    import sqlite3 as _sqn
+                    with _sqn.connect("/opt/me-harness/harness.db") as _cn:
+                        _cn.execute("UPDATE jobs SET content_json=? WHERE id=?",
+                                    (json.dumps(_st, ensure_ascii=False), _j))
+                except Exception:
+                    pass
+                _brn.update_stage(_j, "curado")
+                _curn.run_briefing_single(_j)
+            await asyncio.wait_for(asyncio.to_thread(_volver), timeout=90)
+            await query.answer("↩️ Devuelta al briefing (el router toma nota)", show_alert=False)
+        except Exception as _e_nb:
+            logger.warning(f"h_nut_rebrief: {_e_nb}")
+            try:
+                await query.answer(f"Error: {_e_nb}", show_alert=True)
             except Exception:
                 pass
         return
@@ -10040,20 +10085,28 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "h_cur_living" and arg:
                 job_id = int(arg)
                 try:
+                    # Picker UNIFICADO (13/8): living notes de DATO (id numérico) + las de
+                    # COTIZACIÓN de living_topics (sentinel cot_<asset>, sin ':' porque el
+                    # callback_data se parsea con split(':')).
                     _seen_lv = set(); _opts_lv = []
                     for _ln in _br.get_living_notes():
                         _wp = _ln.get("wp_post_id")
                         if not _wp or _wp in _seen_lv:
                             continue
                         _seen_lv.add(_wp)
-                        _opts_lv.append((_ln["id"], _ln["tema"]))
-                    rows = [[{"text": f"📄 {_t[:44]}", "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
-                            for _lid, _t in _opts_lv[:20]]
+                        _opts_lv.append((_ln["id"], f"📄 {_ln['tema'][:44]}"))
+                    for _tp in _br.get_living_topics():
+                        if not _tp.get("wp_post_id"):
+                            continue
+                        _opts_lv.append((f"cot_{_tp['asset']}", f"📈 {_tp['nombre'][:40]} (cotización)"))
+                    rows = [[{"text": _t, "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
+                            for _lid, _t in _opts_lv[:32]]
                     rows.append([{"text": "➕ Proponer nueva living note (mandá un link)", "callback_data": f"h_cur_propln:{job_id}"}])
                     rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
                     await query.edit_message_text(
                         f"📌 <b>¿A qué living note corresponde esta noticia?</b> — job #{job_id}\n"
-                        f"<i>Elegí la ficha. El agente busca 2 fuentes que ratifiquen el dato y la corrige solo.</i>",
+                        f"<i>📄 DATO: el agente ratifica con 2 fuentes y corrige la ficha. "
+                        f"📈 Cotización: va a la cola de nutrición (causas/dato, ≤15 min).</i>",
                         parse_mode="HTML", reply_markup={"inline_keyboard": rows})
                 except Exception as _e_lv:
                     await query.answer(f"Error: {_e_lv}", show_alert=True)
@@ -10092,8 +10145,31 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML")
 
             elif action == "h_cur_setliving" and len(parts) >= 3:
-                job_id = int(parts[1]); ln_id = int(parts[2])
+                job_id = int(parts[1]); _dest_raw = parts[2]
+                # aprendizaje del ruteo (13/8): toda elección manual queda como ejemplo
+                def _registrar_ejemplo(_jid, _destino):
+                    try:
+                        _br.add_ruteo_ejemplo_desde_job(_jid, _destino)
+                    except Exception as _e_re:
+                        logger.debug(f"ruteo_ejemplo: {_e_re}")
+                if _dest_raw.startswith("cot_"):
+                    # COTIZACIÓN (living_topics): va por la cola nutrir — mismo circuito que el
+                    # desvío automático (process_nutrir la procesa en ≤15 min).
+                    _asset = _dest_raw[4:]
+                    state = _load_state(job_id); state["living_note_id"] = f"cot:{_asset}"
+                    _save_state(job_id, state)
+                    _br.update_stage(job_id, "nutrir")
+                    await asyncio.to_thread(_registrar_ejemplo, job_id, f"cot:{_asset}")
+                    _nom = next((t["nombre"] for t in _br.get_living_topics()
+                                 if t.get("asset") == _asset), _asset)
+                    await query.edit_message_text(
+                        f"🍃 <b>Enviada a nutrición</b> → {_nom} — job #{job_id}\n"
+                        f"<i>Se procesa en ≤15 min (causas/dato). Registré tu elección para que el "
+                        f"router aprenda. Vela en /nutricion.</i>", parse_mode="HTML")
+                    return
+                ln_id = int(_dest_raw)
                 state = _load_state(job_id); state["living_note_id"] = ln_id; _save_state(job_id, state)
+                await asyncio.to_thread(_registrar_ejemplo, job_id, str(ln_id))
                 _fs_txt = ""
                 try:
                     from agents import living_update as _lu0
@@ -13702,6 +13778,20 @@ async def _borrar_cards_briefing(context, chat_id, jids):
         pass
 
 
+async def cmd_nutricion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Briefing NUTRICIÓN (13/8): qué noticias fueron a nutrir living notes — en cola + procesadas
+    24h, con destino/resultado y botón ↩️ para devolver una al briefing (enseña al router)."""
+    msg = await update.message.reply_text("🍃 Generando briefing de nutrición…")
+    import sys as _sys
+    _sys.path.insert(0, "/opt/me-harness")
+    try:
+        from agents import curador as _cur
+        await asyncio.to_thread(_cur.run_briefing_nutricion)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Error en briefing nutrición: {e}")
+
+
 async def cmd_briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Briefing del Curador. `/briefing` o `/briefing manual` → briefing manual (revisar notas).
     `/briefing auto` → menú del briefing AUTOMÁTICO (cantidad de notas + horarios + pausa)."""
@@ -17198,6 +17288,7 @@ def main():
     app.add_handler(CommandHandler("fuentes", cmd_fuentes))
     app.add_handler(CommandHandler("ingesta", cmd_ingesta))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
+    app.add_handler(CommandHandler("nutricion", cmd_nutricion))
     app.add_handler(CommandHandler("ciclaje", cmd_ciclaje))
     app.add_handler(CommandHandler("programadas", cmd_programadas))
     app.add_handler(CommandHandler("eventos", cmd_eventos))
