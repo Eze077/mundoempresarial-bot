@@ -5816,9 +5816,25 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(txt, disable_web_page_preview=True)
         return
 
-    # ── /notamanual: columna de autor pegada como texto ────────────────────────
+    # ── /notamanual: enfoque manual / ajuste del enfoque (flujo estilo ME) ─────
+    if context.user_data.pop("awaiting_nm_enfoque", None):
+        context.user_data["nm_enfoque"] = text_in.strip()
+        context.user_data.pop("nm_capa", None)
+        await _nm_estilo_procesar(update, context)
+        return
+    if context.user_data.pop("awaiting_nm_ajuste", None):
+        _prev = context.user_data.get("nm_enfoque") or ""
+        context.user_data["nm_enfoque"] = (_prev + "\nAJUSTE del editor (prioridad): "
+                                           + text_in.strip()).strip()
+        await _nm_estilo_procesar(update, context)
+        return
+    # ── /notamanual: columna de autor pegada como texto (o LINK de video IG/YT) ─
     if context.user_data.get("awaiting_nota_manual"):
         context.user_data.pop("awaiting_nota_manual")
+        _mv = _NM_VIDLINK_RE.match(text_in or "")
+        if _mv:
+            await _nm_from_video_link(update, context, _mv.group(1))
+            return
         await _process_nota_manual(update, context, text_in)
         return
     # ── Editor: esperando nuevo nombre para renombrar tema ───────────────────
@@ -16473,10 +16489,11 @@ def _format_columna_html(cuerpo: str) -> dict:
     return _cols_det_html(blocks or [cuerpo])
 
 
-def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
+def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "") -> dict:
     """Arma el data listo para publicar. `modo`:
     - 'tal_cual' (recomendado): PRESERVA el texto del autor, solo lo formatea (sin reescribir).
-    - 'estilo_me': lo reescribe al formato del diario (bullets + secciones + resumen pymes)."""
+    - 'estilo_me': lo reescribe al formato del diario (bullets + secciones + resumen pymes).
+      `enfoque`: ángulo pedido por el editor (capa del briefing o escrito a mano + ajustes)."""
     title  = (ex.get("title") or "").strip()
     bajada = (ex.get("bajada") or "").strip()
     autor  = (ex.get("autor") or "").strip()
@@ -16486,6 +16503,9 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
     if modo == "estilo_me":
         instr = (f"Es una COLUMNA DE OPINIÓN firmada por {autor or 'un lector'}. Respetá su tesis y "
                  "postura; estructurá en secciones, agregá bullets y resumen para pymes.")
+        if enfoque:
+            instr += ("\nENFOQUE PEDIDO POR EL EDITOR (obligatorio, manda sobre lo anterior): "
+                      + enfoque)
         fmt = _gpt_format_article(title, cuerpo, source_url="columna-de-autor", kw=kw,
                                   redactor_instr=instr) or {}
         body_html = fmt.get("html") or _fallback
@@ -16524,7 +16544,7 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual") -> dict:
             "source_url": f"columna://{url_slug(title) or 'autor'}"}
 
 
-def _crear_job_nota_manual(d: dict, modo: str) -> int:
+def _crear_job_nota_manual(d: dict, modo: str, hilo: int = 3) -> int:
     """Crea el job de una nota manual en 'curado' (flag es_nota_manual) para mostrarla con el
     MISMO card del curador del briefing (build_card_keyboard). El contenido YA es final
     (tal_cual formatea / estilo_me reescribe en el bot), así que al aprobar va DIRECTO a
@@ -16545,10 +16565,10 @@ def _crear_job_nota_manual(d: dict, modo: str) -> int:
         # Una columna es una nota deliberada y autónoma: nunca se consolida en otra.
         "skip_consolidacion": True, "title_locked": True,
         "es_nota_manual": True, "manual_modo": modo, "manual_submission": True,
-        "pdf_images": d.get("pdf_images", 0), "hilo": 3,
+        "pdf_images": d.get("pdf_images", 0), "hilo": hilo,
     }
     return _br.enqueue("curado", source_url=d["source_url"], title=d["title"],
-                       content=cj, score=8.0, hilo=3, force=True)
+                       content=cj, score=8.0, hilo=hilo, force=True)
 
 
 def _publicar_nota_manual_directo(job_id: int, state: dict) -> str:
@@ -16619,7 +16639,8 @@ def _chunks(s: str, n: int = 3900) -> list:
 
 
 _NM_ESPERAS = ("awaiting_nota_manual_title", "awaiting_nota_manual_bajada",
-               "awaiting_nota_manual_tags", "awaiting_nota_manual_sched")
+               "awaiting_nota_manual_tags", "awaiting_nota_manual_sched",
+               "awaiting_nm_enfoque", "awaiting_nm_ajuste")
 
 
 def _nm_espera(context, flag: str = None):
@@ -16642,12 +16663,14 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_nota_manual"] = True
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Adjuntar texto", callback_data="nm_texto"),
-         InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio")],
+         InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio"),
+         InlineKeyboardButton("🎥 Video", callback_data="nm_video")],
         [InlineKeyboardButton("✖️ Cancelar", callback_data="nm_cancel")]])
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
         "Pegá el <b>texto completo</b> de la columna acá, o usá los botones: "
-        "<b>📄 texto</b> (PDF o .txt plano) · <b>🎤 audio</b> (WhatsApp, Telegram o mp4 — lo transcribo).\n\n"
+        "<b>📄 texto</b> (PDF o .txt plano) · <b>🎤 audio</b> (WhatsApp, Telegram o mp4 — lo "
+        "transcribo) · <b>🎥 video</b> (mp4 de WhatsApp/Telegram o link de Instagram/YouTube).\n\n"
         "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
         "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
         parse_mode="HTML", reply_markup=kb)
@@ -16786,9 +16809,100 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
 
 def _nota_manual_modo_kb() -> dict:
     return {"inline_keyboard": [
-        [{"text": "📝 Tal cual (recomendado)", "callback_data": "nm_modo_talcual"}],
-        [{"text": "✍️ Reescribir estilo ME", "callback_data": "nm_modo_estilome"}],
+        [{"text": "📝 Transcribir tal cual (recomendado)", "callback_data": "nm_modo_talcual"}],
+        [{"text": "✍️ Procesar estilo ME", "callback_data": "nm_modo_estilome"}],
         [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+
+
+_NM_VIDLINK_RE = re.compile(
+    r"^\s*(https?://(?:www\.|m\.)?(?:instagram\.com|youtube\.com|youtu\.be)/\S+)\s*$", re.I)
+
+# Enfoques de redacción por capa del briefing (para «Procesar estilo ME»)
+_NM_ENFOQUES = {
+    1: ("Informarse es respetarse — SERVICIO PRÁCTICO: qué cambia para el dueño de pyme, "
+        "requisitos, montos, fechas y pasos concretos. Tono claro y útil, cero relleno."),
+    2: ("Mundo empresarial — NOTICIA del sector empresario: el hecho, los números, los "
+        "actores y qué significa para el ecosistema pyme."),
+    3: ("La Voz de las pymes — TESTIMONIAL/HUMANO: la historia y la voz del protagonista, "
+        "sus decisiones, aprendizajes y citas en primera persona."),
+    4: ("Comercial — PRESENTACIÓN atractiva y transparente de la empresa/producto: propuesta "
+        "de valor, diferenciales y datos útiles para el lector."),
+}
+_NM_CAPA_LBL = {1: "1️⃣ Informarse", 2: "2️⃣ Mundo emp.", 3: "3️⃣ La Voz", 4: "4️⃣ Comercial"}
+
+
+def _nm_enfoque_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": _NM_CAPA_LBL[1], "callback_data": "nm_enf:1"},
+         {"text": _NM_CAPA_LBL[2], "callback_data": "nm_enf:2"}],
+        [{"text": _NM_CAPA_LBL[3], "callback_data": "nm_enf:3"},
+         {"text": _NM_CAPA_LBL[4], "callback_data": "nm_enf:4"}],
+        [{"text": "✍️ Escribir el enfoque a mano", "callback_data": "nm_enf_manual"}],
+        [{"text": "⬅️ Volver", "callback_data": "nm_enf_back"},
+         {"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+
+
+def _nm_preview_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✅ Aceptar → briefing", "callback_data": "nm_ok"}],
+        [{"text": "🔧 Ajustar el enfoque", "callback_data": "nm_adj"}],
+        [{"text": "⬅️ Volver", "callback_data": "nm_back_enf"},
+         {"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
+
+
+async def _nm_from_video_link(update, context, url: str):
+    """Link de Instagram o YouTube en /notamanual → baja el audio con yt-dlp, transcribe con
+    Whisper y sigue la misma ruta que el texto pegado. YouTube va por WARP (ban de IP del VPS);
+    Instagram va directo con cookies (IG bloquea IPs de datacenter/proxy)."""
+    es_yt = ("youtube.com" in url.lower()) or ("youtu.be" in url.lower())
+    status = await update.effective_message.reply_text(
+        f"📥 Bajando el audio del video de {'YouTube' if es_yt else 'Instagram'}…")
+    if es_yt:
+        texto = await asyncio.to_thread(_whisper_from_url, url, YOUTUBE_PROXY, YOUTUBE_COOKIES)
+    else:
+        texto = await asyncio.to_thread(_whisper_from_url, url, None, INSTAGRAM_COOKIES)
+    if not texto:
+        await status.edit_text("⚠️ No pude bajar/transcribir ese video. Probá con el archivo "
+                               "mp4 directamente, o revisá que el link sea público.")
+        context.user_data["awaiting_nota_manual"] = True   # que pueda reintentar
+        return
+    await status.edit_text(f"✅ Video transcripto ({len(texto.split())} palabras). Procesando la columna…")
+    await _process_nota_manual(update, context, texto, status_msg=status)
+
+
+async def _nm_estilo_procesar(update, context):
+    """Redacta la columna en estilo ME con el enfoque vigente y muestra el PREVIEW con los
+    botones Aceptar / Ajustar enfoque / Volver / Cancelar. Reentrante: cada ajuste re-procesa."""
+    stash = context.user_data.get("nota_manual_ex")
+    if not stash:
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="⚠️ Se perdió la columna. Reiniciá con /notamanual.")
+        return
+    enfoque = context.user_data.get("nm_enfoque") or ""
+    st = await context.bot.send_message(chat_id=update.effective_chat.id,
+                                        text="🧩 Redactando estilo ME con ese enfoque…")
+    d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], "estilo_me", enfoque)
+    d["pdf_images"] = stash.get("pdf_images", 0)
+    context.user_data["nm_d"] = d
+    try:
+        await st.delete()
+    except Exception:
+        pass
+    parts = []
+    if d.get("bullets"):
+        parts.append("📌 Lo que tenés que saber:\n" + "\n".join("• " + b for b in d["bullets"]))
+    parts.append(_html_to_telegram_text(d["content_html"]))
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, parse_mode="HTML",
+        text=f"📄 <b>{d['title']}</b>\n<i>{(d.get('excerpt') or '')[:200]}</i>\n\n(así quedaría la nota)")
+    for chunk in _chunks("\n\n".join(parts), 3900):
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk,
+                                       disable_web_page_preview=True)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, parse_mode="HTML",
+        text=("¿La mando al briefing así?\n<i>Enfoque actual: " +
+              (enfoque[:300] or "sin enfoque específico") + "</i>"),
+        reply_markup=_nm_preview_kb())
 
 
 async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16798,9 +16912,63 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     data = context.user_data.get("nota_manual")
     if act == "cancel":
         _nm_espera(context)
-        context.user_data.pop("nota_manual", None)
-        context.user_data.pop("nota_manual_ex", None)
+        context.user_data.pop("awaiting_nota_manual", None)
+        for _k in ("nota_manual", "nota_manual_ex", "nm_enfoque", "nm_capa", "nm_d"):
+            context.user_data.pop(_k, None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    # ── Flujo de ENFOQUE (estilo ME) ──────────────────────────────────────────
+    if act.startswith("enf:"):          # capa 1-4 del briefing → enfoque de esa categoría
+        _n = int(act.split(":")[1])
+        context.user_data["nm_capa"] = _n
+        context.user_data["nm_enfoque"] = _NM_ENFOQUES.get(_n, "")
+        await q.edit_message_text(f"🎯 Enfoque: {_NM_CAPA_LBL.get(_n)}")
+        await _nm_estilo_procesar(update, context)
+        return
+    if act == "enf_manual":
+        _nm_espera(context, "awaiting_nm_enfoque")
+        await q.edit_message_text(
+            "✍️ Escribí el <b>enfoque de la nota</b> (una o dos frases: ángulo, a quién le "
+            "habla, qué destacar).", parse_mode="HTML")
+        return
+    if act == "enf_back":               # volver al picker Tal cual / Estilo ME
+        _nm_espera(context)
+        await q.edit_message_text("📝 ¿Cómo la proceso?", reply_markup=_nota_manual_modo_kb())
+        return
+    if act == "back_enf":               # volver del preview al menú de enfoque
+        _nm_espera(context)
+        context.user_data.pop("nm_d", None)
+        await q.edit_message_text("🎯 ¿Con qué enfoque la redacto?",
+                                  reply_markup=_nm_enfoque_kb())
+        return
+    if act == "adj":
+        _nm_espera(context, "awaiting_nm_ajuste")
+        await q.edit_message_text(
+            "🔧 Contame el <b>ajuste</b> (ej: «más corto», «enfocalo en el costo laboral», "
+            "«sacá la parte de X») y la vuelvo a redactar.", parse_mode="HTML")
+        return
+    if act == "ok":
+        d = context.user_data.get("nm_d")
+        if not d:
+            await q.edit_message_text("⚠️ Se perdió la nota. Reiniciá con /notamanual.")
+            return
+        _capa = context.user_data.get("nm_capa") or 3
+        await q.edit_message_text("🗂 Dale — la mando al briefing…")
+        try:
+            jid = await asyncio.to_thread(_crear_job_nota_manual, d, "estilo_me", _capa)
+        except Exception as _e_ok:
+            await q.message.reply_text(f"❌ No pude crear la nota: {_e_ok}")
+            return
+        _nm_espera(context)
+        for _k in ("nota_manual", "nota_manual_ex", "nm_enfoque", "nm_capa", "nm_d"):
+            context.user_data.pop(_k, None)
+        import sys as _s_ok; _s_ok.path.insert(0, "/opt/me-harness")
+        from agents import curador as _cur_ok
+        await asyncio.to_thread(_cur_ok.run_briefing_single, jid)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         return
     if act == "texto":
         # Adjuntar texto plano: PDF o archivo .txt (misma ruta de handle_document).
@@ -16812,8 +16980,19 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         except Exception:
             await q.message.reply_text("📄 Mandame el PDF o el .txt ahora.")
         return
-    if act in ("audio", "video"):
-        # Adjuntar audio/video: dejamos el flag de espera; el usuario manda el archivo y lo transcribimos.
+    if act == "video":
+        # Video: archivo mp4/mov (TG/WA, ~20 MB máx) o LINK de Instagram/YouTube.
+        context.user_data["awaiting_nota_manual"] = True
+        try:
+            await q.edit_message_text(
+                "🎥 Dale — mandame el <b>video</b> ahora: archivo <b>mp4/mov</b> de WhatsApp o "
+                "Telegram (hasta ~20 MB), o pegá el <b>link de Instagram o YouTube</b> y lo "
+                "transcribo.", parse_mode="HTML")
+        except Exception:
+            await q.message.reply_text("🎥 Mandame el mp4 o el link de Instagram/YouTube.")
+        return
+    if act == "audio":
+        # Adjuntar audio: dejamos el flag de espera; el usuario manda el archivo y lo transcribimos.
         context.user_data["awaiting_nota_manual"] = True
         try:
             await q.edit_message_text(
@@ -16823,15 +17002,25 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         except Exception:
             await q.message.reply_text("🎤 Mandame el audio (o mp4) ahora y lo transcribo.")
         return
-    # Elección de tratamiento: arma la nota con el modo elegido y la muestra con el MISMO
-    # card del curador del briefing (menú unificado). El cuerpo va como preview arriba.
-    if act in ("modo_talcual", "modo_estilome"):
+    # Estilo ME → primero el ENFOQUE (capa del briefing o escrito a mano), después redacta
+    # y muestra preview iterativo (aceptar / ajustar / volver). Ver _nm_estilo_procesar.
+    if act == "modo_estilome":
+        if not context.user_data.get("nota_manual_ex"):
+            await q.edit_message_text("⚠️ Se perdió la columna. Reiniciá con /notamanual.")
+            return
+        context.user_data.pop("nm_enfoque", None)
+        context.user_data.pop("nm_capa", None)
+        await q.edit_message_text("🎯 ¿Con qué enfoque la redacto?", reply_markup=_nm_enfoque_kb())
+        return
+    # Tal cual: arma la nota y la muestra con el MISMO card del curador del briefing
+    # (menú unificado). El cuerpo va como preview arriba.
+    if act == "modo_talcual":
         stash = context.user_data.get("nota_manual_ex")
         if not stash:
             await q.edit_message_text("⚠️ Se perdió la columna. Reiniciá con /notamanual.")
             return
-        modo = "tal_cual" if act == "modo_talcual" else "estilo_me"
-        etq = "tal cual (tu texto)" if modo == "tal_cual" else "estilo ME (reescrito)"
+        modo = "tal_cual"
+        etq = "tal cual (tu texto)"
         await q.edit_message_text(f"🧩 Armando la nota — {etq}…")
         d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], modo)
         d["pdf_images"] = stash.get("pdf_images", 0)
