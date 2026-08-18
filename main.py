@@ -16645,7 +16645,8 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🎥 Adjuntar video", callback_data="nm_video")]])
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
-        "Pegá el <b>texto completo</b> de la columna, subí el <b>PDF</b>, o mandá un "
+        "Pegá el <b>texto completo</b> de la columna, subí el <b>PDF</b> o un <b>archivo de "
+        "texto</b> (.txt/.md), o mandá un "
         "<b>🎤 audio</b> o <b>🎥 video</b> (nota de voz o video de WhatsApp, m4a, mp4…) y lo <b>transcribo</b>.\n\n"
         "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
         "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
@@ -16699,9 +16700,38 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mime.startswith(("audio/", "video/")) or fn.endswith(_NM_AUDIO_EXT + _NM_VIDEO_EXT):
         await _nm_from_audio(update, context, doc)
         return
+    # Archivo de TEXTO (.txt/.md) → misma ruta que el texto pegado / el PDF
+    if fn.endswith((".txt", ".md")) or mime.startswith("text/"):
+        context.user_data.pop("awaiting_nota_manual", None)
+        msg = await update.message.reply_text("📄 Leyendo el archivo…")
+        try:
+            f = await doc.get_file()
+            raw = bytes(await f.download_as_bytearray())
+        except Exception as e:
+            await msg.edit_text(f"❌ No pude descargar el archivo: {e}")
+            return
+        text = None
+        for _enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):  # Word/Windows exporta cp1252
+            try:
+                text = raw.decode(_enc)
+                break
+            except Exception:
+                continue
+        text = (text or "").strip()
+        if len(text) < 400:
+            await msg.edit_text("⚠️ El archivo tiene muy poco texto (mínimo ~400 caracteres). "
+                                "Revisalo o pegá la columna directamente.")
+            return
+        if len(text) > 60000:
+            await msg.edit_text("⚠️ Archivo muy largo — tomo los primeros 60.000 caracteres…")
+            text = text[:60000]
+        await msg.edit_text("🧩 Procesando la columna…")
+        await _process_nota_manual(update, context, text, status_msg=msg)
+        return
     if not (fn.endswith(".pdf") or (doc.mime_type or "") == "application/pdf"):
         await update.message.reply_text(
-            "Subí un <b>PDF</b>, un <b>audio/video</b> (nota de voz, m4a, mp4…), o pegá el texto de la columna.",
+            "Subí un <b>PDF</b>, un <b>archivo de texto</b> (.txt/.md), un <b>audio/video</b> "
+            "(nota de voz, m4a, mp4…), o pegá el texto de la columna.",
             parse_mode="HTML")
         return
     context.user_data.pop("awaiting_nota_manual", None)
