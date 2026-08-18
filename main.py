@@ -16640,14 +16640,14 @@ async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _nm_espera(context)          # arrancar limpio: nada de flags colgados de una nota anterior
     context.user_data["awaiting_nota_manual"] = True
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio"),
-        InlineKeyboardButton("🎥 Adjuntar video", callback_data="nm_video")]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Adjuntar texto", callback_data="nm_texto"),
+         InlineKeyboardButton("🎤 Adjuntar audio", callback_data="nm_audio")],
+        [InlineKeyboardButton("✖️ Cancelar", callback_data="nm_cancel")]])
     await update.message.reply_text(
         "📝 <b>Nota manual — columna de autor</b>\n\n"
-        "Pegá el <b>texto completo</b> de la columna, subí el <b>PDF</b> o un <b>archivo de "
-        "texto</b> (.txt/.md), o mandá un "
-        "<b>🎤 audio</b> o <b>🎥 video</b> (nota de voz o video de WhatsApp, m4a, mp4…) y lo <b>transcribo</b>.\n\n"
+        "Pegá el <b>texto completo</b> de la columna acá, o usá los botones: "
+        "<b>📄 texto</b> (PDF o .txt plano) · <b>🎤 audio</b> (WhatsApp, Telegram o mp4 — lo transcribo).\n\n"
         "Detecto <b>título, bajada, autor, cuerpo, categoría, etiquetas y hashtags</b> y la "
         "maqueto con el formato y SEO de siempre. No invento ni cambio el contenido.",
         parse_mode="HTML", reply_markup=kb)
@@ -16802,17 +16802,26 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("nota_manual_ex", None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
         return
+    if act == "texto":
+        # Adjuntar texto plano: PDF o archivo .txt (misma ruta de handle_document).
+        context.user_data["awaiting_nota_manual"] = True
+        try:
+            await q.edit_message_text(
+                "📄 Dale — mandame el archivo ahora: <b>PDF</b> o <b>.txt</b> con la columna "
+                "(también podés pegar el texto directamente acá).", parse_mode="HTML")
+        except Exception:
+            await q.message.reply_text("📄 Mandame el PDF o el .txt ahora.")
+        return
     if act in ("audio", "video"):
         # Adjuntar audio/video: dejamos el flag de espera; el usuario manda el archivo y lo transcribimos.
         context.user_data["awaiting_nota_manual"] = True
-        _ico = "🎤" if act == "audio" else "🎥"
-        _ej = ("nota de voz, m4a, mp3, ogg, opus…" if act == "audio"
-               else "video de WhatsApp, mp4, mov… (corto, hasta ~20 MB)")
         try:
             await q.edit_message_text(
-                f"{_ico} Dale — mandame el {act} ahora ({_ej}) y lo paso a texto para la columna.")
+                "🎤 Dale — mandame el audio ahora: <b>nota de voz de WhatsApp o Telegram</b>, "
+                "m4a, mp3, ogg… o un <b>mp4</b> (video corto, hasta ~20 MB) y lo paso a texto "
+                "para la columna.", parse_mode="HTML")
         except Exception:
-            await q.message.reply_text(f"{_ico} Mandame el {act} ahora y lo transcribo.")
+            await q.message.reply_text("🎤 Mandame el audio (o mp4) ahora y lo transcribo.")
         return
     # Elección de tratamiento: arma la nota con el modo elegido y la muestra con el MISMO
     # card del curador del briefing (menú unificado). El cuerpo va como preview arriba.
