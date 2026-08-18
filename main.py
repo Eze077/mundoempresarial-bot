@@ -7342,9 +7342,20 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res = await asyncio.wait_for(asyncio.to_thread(_apply_ln), timeout=240)
                 footer = f"\n\n✅ <b>{'Borrador' if modo=='borrador' else 'Esqueleto'} creado</b> — {res}"
             elif actl == "h_gsc_lnref":
+                # Wire 18/8: el botón dispara el motor periodista (antes era un placeholder).
+                # pl[1]=ln_id, pl[2]=job_id de la crónica nueva.
                 nid = int(pl[2]) if len(pl) > 2 else 0
-                await query.answer("Refrescar: revisá la nota y sumá el dato nuevo.", show_alert=True)
-                footer = f"\n\n🔄 Revisá la living note para sumar la crónica nueva (#{nid})."
+                await query.answer("🔄 Refrescando: extraigo el dato y busco ratificación…",
+                                   show_alert=False)
+                def _ref_ln():
+                    import living_update as _lu
+                    return _lu.evaluar_y_corregir(pidl, nid)
+                resr = await asyncio.wait_for(asyncio.to_thread(_ref_ln), timeout=280)
+                if isinstance(resr, dict):
+                    _det = resr.get("detalle") or resr.get("motivo") or str(resr)
+                    footer = ("\n\n🔄 " + ("✅ " if resr.get("ok") else "⚠️ ") + str(_det)[:280])
+                else:
+                    footer = f"\n\n🔄 {str(resr)[:280]}"
             else:
                 import broker as _bkl
                 _bkl.set_ln_prop_status(pidl, "dismissed")
