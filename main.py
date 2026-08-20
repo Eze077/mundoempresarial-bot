@@ -15806,7 +15806,33 @@ def _chequeo_rapido() -> str:
     if (st.get("email_health") or {}).get("riesgo"):
         lineas.append("⚠️ <b>Newsletter</b>: una campaña supera el cupo por hora — puede fallar el excedente"); alertas += 1
 
-    # 6. Servidor: RAM + que el harness esté corriendo
+    # 6. OpenAI: créditos/cuota. Es el sensor que faltaba — el 20/8 la cuenta se quedó SIN
+    # CRÉDITOS y el sistema seguía "verde" mientras el redactor descartaba notas, no había
+    # dedup ni transcripciones. Una llamada mínima (1 token) dice la verdad en 3 segundos.
+    try:
+        import requests as _rq
+        _r = _rq.post("https://api.openai.com/v1/chat/completions",
+                      headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                      json={"model": "gpt-4o-mini", "max_tokens": 1,
+                            "messages": [{"role": "user", "content": "ok"}]}, timeout=12)
+        if _r.status_code == 200:
+            lineas.append("✅ OpenAI: responde (créditos OK)")
+        else:
+            _err = ""
+            try:
+                _err = (_r.json().get("error") or {}).get("code") or (_r.json().get("error") or {}).get("message", "")
+            except Exception:
+                _err = _r.text[:60]
+            if "credit" in str(_err).lower() or "quota" in str(_err).lower():
+                lineas.append("🔴 <b>OpenAI SIN CRÉDITOS</b> — no se redacta, no hay dedup ni "
+                              "transcripciones. Cargá saldo en platform.openai.com → billing")
+            else:
+                lineas.append(f"🔴 <b>OpenAI no responde</b> (HTTP {_r.status_code}: {str(_err)[:50]})")
+            alertas += 1
+    except Exception as _e_oai:
+        lineas.append(f"⚠️ OpenAI: no pude chequear ({str(_e_oai)[:45]})"); alertas += 1
+
+    # 7. Servidor: RAM + que el harness esté corriendo
     ram = None
     try:
         m = {}
