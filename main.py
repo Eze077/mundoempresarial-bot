@@ -5410,6 +5410,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── /input_evento: texto de una tanda EN VIVO ────────────────────────────────
+    if context.user_data.get("input_evento") is not None:
+        await _iev_add_text(update, context, text_in)
+        return
+
     # ── Nota desde tweet: capturar la directiva (el ángulo) ──────────────────────
     if context.user_data.get("awaiting_tweet_directiva"):
         context.user_data.pop("awaiting_tweet_directiva", None)
@@ -12893,6 +12898,11 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Elegí redes y acción:", reply_markup=_build_enc_kb(fp))
         return
 
+    # ── /input_evento: foto de una tanda EN VIVO (al inbox, con pie) ─────────
+    if context.user_data.get("input_evento") is not None:
+        await _iev_foto(update, context)
+        return
+
     # ── /evento: foto del evento (va a la portada) ───────────────────────────
     _ev = context.user_data.get("evento")
     if _ev is not None:
@@ -17267,6 +17277,9 @@ async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get("awaiting_nota_manual") and media:
         await _nm_from_audio(update, context, media)
         return
+    if context.user_data.get("input_evento") is not None and media:
+        await _iev_media(update, context, media)
+        return
     ev = context.user_data.get("evento")
     if ev is None:
         return
@@ -17481,6 +17494,145 @@ async def handle_evento_button(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# /input_evento — tandas de material para la crónica EN VIVO que arma Claude
+# (20/8/2026). A diferencia de /evento, acá NO se redacta nada: cada tanda
+# (textos + audios transcriptos + fotos con pie) se guarda como JSON en el VPS
+# y Claude la integra a la nota en vivo cuando Leo se lo pide por remote control.
+# ══════════════════════════════════════════════════════════════════════════════
+
+IEV_INBOX = "/tmp/envivo/inbox"
+
+
+def _iev_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✅ Procesar tanda", "callback_data": "iev_process"}],
+        [{"text": "✖️ Cerrar ventana", "callback_data": "iev_cancel"}]]}
+
+
+def _iev_resumen(s: dict) -> str:
+    return (f"📦 <b>Tanda en curso:</b> {len(s['textos'])} texto(s) · "
+            f"{len(s['audios'])} audio(s) · {len(s['fotos'])} foto(s)\n\n"
+            "Seguí mandando material, o tocá <b>✅ Procesar tanda</b> para dejársela lista a Claude.")
+
+
+async def cmd_input_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if BOT_PAUSED:
+        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+        return
+    import os as _os
+    _os.makedirs(IEV_INBOX + "/fotos", exist_ok=True)
+    context.user_data["input_evento"] = {"textos": [], "audios": [], "fotos": []}
+    await update.message.reply_text(
+        "🔴 <b>Ventana de material EN VIVO abierta.</b>\n\n"
+        "Mandame <b>texto</b>, <b>audios/voz</b> (el epígrafe = quién habla) y "
+        "<b>fotos con pie</b>. Video corto también va (lo transcribo).\n"
+        "Cuando la tanda esté completa, tocá <b>✅ Procesar tanda</b> y después "
+        "pedile a Claude por remote control que la integre a la crónica.\n"
+        "La ventana queda abierta para la tanda siguiente.",
+        parse_mode="HTML", reply_markup=_iev_kb())
+
+
+async def _iev_add_text(update, context, text_in: str):
+    s = context.user_data.get("input_evento")
+    if s is None:
+        return
+    s["textos"].append(text_in)
+    await update.message.reply_text(_iev_resumen(s), parse_mode="HTML", reply_markup=_iev_kb())
+
+
+async def _iev_media(update, context, media):
+    """Audio/voz/video de una tanda EN VIVO → Whisper → transcript con orador."""
+    s = context.user_data.get("input_evento")
+    m = update.message
+    status = await m.reply_text("🎙️ Bajando audio…")
+    import os as _os, tempfile as _tmp
+    path = None
+    try:
+        f = await media.get_file(read_timeout=90, connect_timeout=30)
+        base = getattr(media, "file_name", None) or f"{media.file_unique_id}.ogg"
+        ext = _os.path.splitext(base)[1].lower() or ".ogg"
+        path = _os.path.join(_tmp.gettempdir(), f"iev_{media.file_unique_id}{ext}")
+        await f.download_to_drive(path)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ No pude bajar el audio ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB.")
+        return
+    await status.edit_text("🧠 Transcribiendo…")
+    texto = await asyncio.to_thread(_whisper_from_file, path)
+    try:
+        if path:
+            _os.remove(path)
+    except Exception:
+        pass
+    if not texto:
+        await status.edit_text("⚠️ No pude transcribir el audio. Probá reenviarlo.")
+        return
+    orador = (m.caption or "").strip()
+    s["audios"].append({"orador": orador, "texto": texto})
+    quien = f"«{orador}»" if orador else "sin orador (decime quién habla si querés cita atribuida)"
+    await status.edit_text(f"✅ Audio transcripto ({len(texto.split())} palabras) — {quien}.")
+    await m.reply_text(_iev_resumen(s), parse_mode="HTML", reply_markup=_iev_kb())
+
+
+async def _iev_foto(update, context):
+    """Foto de una tanda EN VIVO → se guarda en el inbox del VPS con su pie."""
+    s = context.user_data.get("input_evento")
+    m = update.message
+    msg = await m.reply_text("📷 Guardando foto…")
+    import os as _os
+    try:
+        photo = m.photo[-1]
+        f = await photo.get_file(read_timeout=60, connect_timeout=20)
+        _os.makedirs(IEV_INBOX + "/fotos", exist_ok=True)
+        ruta = f"{IEV_INBOX}/fotos/{photo.file_unique_id}.jpg"
+        await f.download_to_drive(ruta)
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude guardar la foto: {e}")
+        return
+    pie = (m.caption or "").strip()
+    s["fotos"].append({"ruta": ruta, "pie": pie})
+    await msg.edit_text("✅ Foto guardada" + (f" — «{pie[:80]}»" if pie else " (sin pie)") + ".")
+    await m.reply_text(_iev_resumen(s), parse_mode="HTML", reply_markup=_iev_kb())
+
+
+async def handle_iev_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    act = q.data[len("iev_"):]
+    s = context.user_data.get("input_evento")
+    if act == "cancel":
+        context.user_data.pop("input_evento", None)
+        await q.edit_message_text("✖️ Ventana EN VIVO cerrada.")
+        return
+    if s is None:
+        await q.edit_message_text("⚠️ No hay ventana abierta. Reabrí con /input_evento.")
+        return
+    if act == "process":
+        if not (s["textos"] or s["audios"] or s["fotos"]):
+            await q.edit_message_text(
+                "⚠️ La tanda está vacía — mandá algo primero.", reply_markup=_iev_kb())
+            return
+        import glob as _gl, os as _os, re as _re
+        from datetime import datetime as _dt
+        _os.makedirs(IEV_INBOX, exist_ok=True)
+        previas = [int(m.group(1)) for p in _gl.glob(f"{IEV_INBOX}/tanda_*.json")
+                   if (m := _re.search(r"tanda_(\d+)\.json$", p))]
+        n = max(previas or [0]) + 1
+        tanda = {"n": n, "hora": _dt.now().strftime("%H:%M"), **s}
+        with open(f"{IEV_INBOX}/tanda_{n}.json", "w", encoding="utf-8") as fh:
+            json.dump(tanda, fh, ensure_ascii=False)
+        # la ventana queda abierta con buffers limpios para la próxima tanda
+        context.user_data["input_evento"] = {"textos": [], "audios": [], "fotos": []}
+        await q.edit_message_text(
+            f"📦 <b>Tanda {n} lista</b> ({len(s['textos'])} texto(s) · {len(s['audios'])} audio(s) · "
+            f"{len(s['fotos'])} foto(s)).\n\n"
+            f"Decile a Claude por remote control: <b>«integrá la tanda {n}»</b>.\n"
+            "La ventana sigue abierta para la próxima tanda.",
+            parse_mode="HTML")
+        return
+
+
 REDACCION_BLOCKED_FILE = "/opt/redaccion-app/blocked.json"
 
 async def cmd_desbloquear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17575,6 +17727,7 @@ def main():
     app.add_handler(CommandHandler("rutina", cmd_rutina))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CommandHandler("evento", cmd_evento))
+    app.add_handler(CommandHandler("input_evento", cmd_input_evento))
     app.add_handler(CommandHandler("campania", cmd_campania))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
@@ -17591,6 +17744,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))
+    app.add_handler(CallbackQueryHandler(handle_iev_button, pattern="^iev_"))
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
     app.add_handler(CallbackQueryHandler(handle_button))
