@@ -12,3 +12,34 @@ __pycache__/
 .deepseek_key
 *.key
 claves.txt
+
+# ── Sincronía VPS ⇄ GitHub (regla de Leo 21/8) ────────────────────────────────
+# Todo lo que quede fuera de git tiene que estar acá, para que `git status` en el
+# VPS diga "limpio" de verdad y una divergencia real salte a la vista.
+venv/
+*.pre_*
+*.predeploy
+
+# Secretos / credenciales: se aprovisionan a mano en el VPS, NUNCA a git
+ga4-sa.json
+*-sa.json
+*_cookies.txt
+youtube_cookies.txt
+instagram_cookies.txt
+
+# Estado de runtime (lo genera el bot, cambia solo, no es código)
+*_state.json
+cotizaciones_config.json
+ht_feedback.json
+ht_freq.json
+ht_mapping.json
+
+# Scripts de una sola vez (no los llama nadie; si uno se vuelve permanente, commitearlo)
+update_*.py
+reporte_semanal.py
+
+# Pegotes de shell mal pegados en el server (nombres tipo "sh: connect to host…")
+*root@*
+*connect to host*
+*delta *
+sword:
