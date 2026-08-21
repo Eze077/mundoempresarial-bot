@@ -10142,37 +10142,63 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif action == "h_cur_living" and arg:
                 job_id = int(parts[1])
-                # Paginado (20/8): el tope fijo [:32] escondía las últimas entradas
-                # (42 candidatas: las 12 cotizaciones quedaban casi todas afuera).
-                _pag_lv = int(parts[2]) if len(parts) >= 3 else 0
+                # Picker en 2 niveles (21/8, pedido de Leo): primero GRUPOS temáticos, después
+                # las notas del grupo paginadas. Antes: lista plana con tope [:32] que escondía
+                # las últimas entradas (42 candidatas: las cotizaciones quedaban casi todas afuera).
+                _grp_lv = parts[2] if len(parts) >= 3 else ""
+                _pag_lv = int(parts[3]) if len(parts) >= 4 else 0
                 try:
-                    # Picker UNIFICADO (13/8): living notes de DATO (id numérico) + las de
-                    # COTIZACIÓN de living_topics (sentinel cot_<asset>, sin ':' porque el
-                    # callback_data se parsea con split(':')).
-                    _seen_lv = set(); _opts_lv = []
+                    def _grupo_ln(_tema):
+                        _t = _tema.lower()
+                        if any(k in _t for k in ("escala", "salari", "sueldo", "recibo", "smvm")):
+                            return "esc"
+                        if any(k in _t for k in ("monotribut", "autónom", "autonom", "arca", "afip",
+                                                 "ganancias", "clave fiscal", "factura", "recategor",
+                                                 "plan de pagos", "obra social", "vencimiento")):
+                            return "arca"
+                        if any(k in _t for k in ("plazo fijo", "crédito", "credito", "préstamo",
+                                                 "prestamo", "cheque", "tasa")):
+                            return "fin"
+                        return "otr"
+                    # Living notes de DATO (id numérico) + COTIZACIÓN de living_topics
+                    # (sentinel cot_<asset>, sin ':' porque el callback_data se parsea con split(':')).
+                    _grupos_lv = {"esc": [], "arca": [], "fin": [], "cot": [], "otr": []}
+                    _seen_lv = set()
                     for _ln in _br.get_living_notes():
                         _wp = _ln.get("wp_post_id")
                         if not _wp or _wp in _seen_lv:
                             continue
                         _seen_lv.add(_wp)
-                        _opts_lv.append((_ln["id"], f"📄 {_ln['tema'][:44]}"))
+                        _grupos_lv[_grupo_ln(_ln["tema"])].append((_ln["id"], f"📄 {_ln['tema'][:44]}"))
                     for _tp in _br.get_living_topics():
                         if not _tp.get("wp_post_id"):
                             continue
-                        _opts_lv.append((f"cot_{_tp['asset']}", f"📈 {_tp['nombre'][:40]} (cotización)"))
-                    _PSZ_LV = 14
-                    _tot_lv = max(1, (len(_opts_lv) + _PSZ_LV - 1) // _PSZ_LV)
-                    _pag_lv = max(0, min(_pag_lv, _tot_lv - 1))
-                    rows = [[{"text": _t, "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
-                            for _lid, _t in _opts_lv[_pag_lv * _PSZ_LV:(_pag_lv + 1) * _PSZ_LV]]
-                    if _tot_lv > 1:
-                        _nav = []
-                        if _pag_lv > 0:
-                            _nav.append({"text": "◀", "callback_data": f"h_cur_living:{job_id}:{_pag_lv - 1}"})
-                        _nav.append({"text": f"{_pag_lv + 1}/{_tot_lv}", "callback_data": f"h_cur_living:{job_id}:{_pag_lv}"})
-                        if _pag_lv < _tot_lv - 1:
-                            _nav.append({"text": "▶", "callback_data": f"h_cur_living:{job_id}:{_pag_lv + 1}"})
-                        rows.append(_nav)
+                        _grupos_lv["cot"].append((f"cot_{_tp['asset']}", f"📈 {_tp['nombre'][:40]}"))
+                    _META_LV = [("esc", "💼 Escalas salariales"), ("arca", "🧾 ARCA e impuestos"),
+                                ("fin", "💳 Finanzas y créditos"), ("cot", "📈 Cotizaciones"),
+                                ("otr", "🗂 Otras")]
+                    if not _grp_lv or _grp_lv not in _grupos_lv:
+                        # Nivel 1: menú de grupos con conteo
+                        rows = [[{"text": f"{_lbl} ({len(_grupos_lv[_k])})",
+                                  "callback_data": f"h_cur_living:{job_id}:{_k}:0"}]
+                                for _k, _lbl in _META_LV if _grupos_lv[_k]]
+                    else:
+                        # Nivel 2: notas del grupo, paginadas
+                        _opts_lv = _grupos_lv[_grp_lv]
+                        _PSZ_LV = 14
+                        _tot_lv = max(1, (len(_opts_lv) + _PSZ_LV - 1) // _PSZ_LV)
+                        _pag_lv = max(0, min(_pag_lv, _tot_lv - 1))
+                        rows = [[{"text": _t, "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
+                                for _lid, _t in _opts_lv[_pag_lv * _PSZ_LV:(_pag_lv + 1) * _PSZ_LV]]
+                        if _tot_lv > 1:
+                            _nav = []
+                            if _pag_lv > 0:
+                                _nav.append({"text": "◀", "callback_data": f"h_cur_living:{job_id}:{_grp_lv}:{_pag_lv - 1}"})
+                            _nav.append({"text": f"{_pag_lv + 1}/{_tot_lv}", "callback_data": f"h_cur_living:{job_id}:{_grp_lv}:{_pag_lv}"})
+                            if _pag_lv < _tot_lv - 1:
+                                _nav.append({"text": "▶", "callback_data": f"h_cur_living:{job_id}:{_grp_lv}:{_pag_lv + 1}"})
+                            rows.append(_nav)
+                        rows.append([{"text": "↩ Grupos", "callback_data": f"h_cur_living:{job_id}"}])
                     rows.append([{"text": "➕ Proponer nueva living note (mandá un link)", "callback_data": f"h_cur_propln:{job_id}"}])
                     rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
                     await query.edit_message_text(
