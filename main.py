@@ -5410,6 +5410,32 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _evento_add_text(update, context, text_in)
         return
 
+    # ── /vivo: capturar campos del panel de preparación (título, placa, enfoque, links) ──
+    _vvc = next((c for c in ("titulo", "placa", "enfoque", "links")
+                 if context.user_data.get(f"awaiting_vv_{c}")), None)
+    if _vvc:
+        context.user_data.pop(f"awaiting_vv_{_vvc}", None)
+        await _vv_capturar_texto(update, context, _vvc, text_in)
+        return
+
+    # ── /vivo: ajuste puntual sobre un bloque redactado en /input_evento ─────────
+    if context.user_data.get("awaiting_vvb_adj"):
+        context.user_data.pop("awaiting_vvb_adj", None)
+        await _vvb_ajustar(update, context, text_in)
+        return
+
+    # ── /vivo mail: ajuste puntual sobre la propuesta de newsletter ──────────────
+    if context.user_data.get("awaiting_vv_mail_adj"):
+        context.user_data.pop("awaiting_vv_mail_adj", None)
+        await _vv_mail_ajustar(update, context, text_in)
+        return
+
+    # ── /vivo difundir: nuevo texto de la re-difusión ─────────────────────────────
+    if context.user_data.get("awaiting_vv_dif_txt"):
+        context.user_data.pop("awaiting_vv_dif_txt", None)
+        await _vv_dif_texto_capturar(update, context, text_in)
+        return
+
     # ── /input_evento: texto de una tanda EN VIVO ────────────────────────────────
     if context.user_data.get("input_evento") is not None:
         await _iev_add_text(update, context, text_in)
@@ -12876,6 +12902,12 @@ async def _handle_edit_photo_bytes(img_bytes: bytes, ctype: str, post: dict) -> 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja foto enviada por Telegram durante edición o flujo sin_imagen."""
 
+    # ── /vivo: foto de fondo para la placa de la cobertura ───────────────────
+    if context.user_data.get("awaiting_vv_foto"):
+        context.user_data.pop("awaiting_vv_foto", None)
+        await _vv_capturar_foto(update, context)
+        return
+
     # ── /encuesta: foto manual de la portada ─────────────────────────────────
     if context.user_data.get("awaiting_enc_foto"):
         context.user_data.pop("awaiting_enc_foto")
@@ -17624,12 +17656,1068 @@ async def handle_iev_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             json.dump(tanda, fh, ensure_ascii=False)
         # la ventana queda abierta con buffers limpios para la próxima tanda
         context.user_data["input_evento"] = {"textos": [], "audios": [], "fotos": []}
-        await q.edit_message_text(
-            f"📦 <b>Tanda {n} lista</b> ({len(s['textos'])} texto(s) · {len(s['audios'])} audio(s) · "
-            f"{len(s['fotos'])} foto(s)).\n\n"
-            f"Decile a Claude por remote control: <b>«integrá la tanda {n}»</b>.\n"
-            "La ventana sigue abierta para la próxima tanda.",
-            parse_mode="HTML")
+
+        # ── Hook /vivo: si hay una cobertura EN VIVO activa, Claude no interviene —
+        # el bloque se redacta y se propone solo (20/8/2026). Sin estado (o harness caído,
+        # o cobertura ya cerrada), comportamiento viejo intacto.
+        try:
+            import sys as _svh
+            _svh.path.insert(0, "/opt/me-harness")
+            from agents import vivo as _vivoh
+            estado_h = await asyncio.to_thread(_vivoh.cargar_estado)
+        except Exception:
+            estado_h = None
+        if estado_h is not None and estado_h.get("cerrada"):
+            estado_h = None
+        if estado_h is None:
+            await q.edit_message_text(
+                f"📦 <b>Tanda {n} lista</b> ({len(s['textos'])} texto(s) · {len(s['audios'])} audio(s) · "
+                f"{len(s['fotos'])} foto(s)).\n\n"
+                f"Decile a Claude por remote control: <b>«integrá la tanda {n}»</b>.\n"
+                "La ventana sigue abierta para la próxima tanda.",
+                parse_mode="HTML")
+            return
+        await q.edit_message_text(f"📦 Tanda {n} lista. 🖊 Redactando el bloque…")
+        contexto_h = {
+            "enfoque": estado_h.get("enfoque") or "",
+            "resumen_contexto": estado_h.get("resumen_contexto") or "",
+            "titulo_nota": estado_h.get("titulo_nota") or "",
+            "bloques_previos": context.user_data.get("vv_bloques_previos") or [],
+        }
+        try:
+            from agents import vivo_prompts as _vph
+            bloque_h = await asyncio.to_thread(_vph.redactar_bloque, tanda, contexto_h)
+        except Exception as e:
+            await q.message.reply_text(
+                f"⚠️ No pude redactar el bloque de la tanda {n} ({e}). Queda guardada para integrarla manual.")
+            return
+        context.user_data["vv_bloque"] = {
+            "tanda": tanda, "html": bloque_h.get("html", ""), "tweet": bloque_h.get("tweet", ""),
+            "resumen": bloque_h.get("resumen", ""),
+            "al_final": False, "con_tweet": bool(bloque_h.get("tweet")),
+        }
+        await _vvb_mostrar_preview(update, context, q, bloque_h)
+        return
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /vivo — panel de cobertura EN VIVO: prepara la nota + placas, arranca la
+# cobertura, integra los bloques que llegan por /input_evento (redactados solos
+# por el harness), y cierra + difunde + newsletter al final (20/8/2026).
+# Todo lo pesado (scrape, GPT, placas, WP, redes) vive en agents/vivo(.py|_prompts.py)
+# en el harness; acá solo arma el panel y llama con asyncio.to_thread.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_VV_CANAL_LABEL = {
+    "twitter": "🐦 Twitter", "telegram": "📣 Telegram", "facebook": "📘 Facebook",
+    "ig_feed": "📷 IG Feed", "ig_story": "📱 IG Story", "linkedin": "💼 LinkedIn",
+}
+_VV_CANAL_ORDEN = ["twitter", "telegram", "facebook", "ig_feed", "ig_story", "linkedin"]
+
+
+def _vv_canales_default() -> dict:
+    return {c: True for c in _VV_CANAL_ORDEN}
+
+
+def _vv_canales_kb(canales: dict) -> dict:
+    rows, row = [], []
+    for c in _VV_CANAL_ORDEN:
+        icon = "✅" if canales.get(c) else "❌"
+        row.append({"text": f"{icon} {_VV_CANAL_LABEL[c]}", "callback_data": f"vv_ch:{c}"})
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "⬅️ Volver", "callback_data": "vv_ch_back"}])
+    return {"inline_keyboard": rows}
+
+
+def _vv_canales_activo(context) -> dict | None:
+    """Cuál de los 3 flujos (arranque / cierre / difusión) tiene el panel de canales abierto ahora."""
+    if context.user_data.get("vv_cierre") is not None:
+        return context.user_data["vv_cierre"]["canales"]
+    if context.user_data.get("vv_dif") is not None:
+        return context.user_data["vv_dif"]["canales"]
+    cfg = context.user_data.get("vivo_cfg")
+    if cfg is not None:
+        return cfg["canales"]
+    return None
+
+
+async def _vv_edit(q, text: str, parse_mode: str = None, reply_markup=None):
+    """edit_message_caption si el mensaje es una foto (preview de placa/bloque), si no edit_message_text."""
+    kwargs = {}
+    if reply_markup is not None:
+        kwargs["reply_markup"] = reply_markup
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    if q.message.photo:
+        await q.edit_message_caption(caption=text, **kwargs)
+    else:
+        await q.edit_message_text(text, **kwargs)
+
+
+# ── Panel principal de preparación (/vivo <nombre>) ─────────────────────────────
+_VV_ESPERAS = ("awaiting_vv_titulo", "awaiting_vv_placa", "awaiting_vv_foto",
+               "awaiting_vv_enfoque", "awaiting_vv_links")
+
+
+def _vv_espera(context, flag: str = None):
+    for f in _VV_ESPERAS:
+        context.user_data.pop(f, None)
+    if flag:
+        context.user_data[flag] = True
+
+
+def _vv_panel_text(cfg: dict) -> str:
+    import html as _h
+    def e(s): return _h.escape(str(s)) if s else "—"
+    canales_on = [_VV_CANAL_LABEL[c] for c in _VV_CANAL_ORDEN if cfg["canales"].get(c)]
+    return (
+        f"🔴 <b>Preparación EN VIVO:</b> {e(cfg['nombre'])}\n\n"
+        f"📰 <b>Título nota:</b> {e(cfg.get('titulo_nota'))}\n"
+        f"🪧 <b>Placa:</b> {e(cfg.get('titulo_placa'))} / {e(cfg.get('bajada'))} / {e(cfg.get('linea_fecha'))}\n"
+        f"🖼 <b>Foto de placa:</b> {'cargada ✅' if cfg.get('foto') else '—'}\n"
+        f"🎯 <b>Enfoque:</b> {e(cfg.get('enfoque'))}\n"
+        f"🔗 <b>Links de contexto:</b> {len(cfg.get('links') or [])}\n"
+        f"📡 <b>Canales:</b> {', '.join(canales_on) or '—'}\n\n"
+        "Completá lo que quieras y tocá <b>👁 Preview</b> antes de arrancar.")
+
+
+def _vv_kb(cfg: dict) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "📰 Título nota", "callback_data": "vv_titulo"},
+         {"text": "🪧 Texto de placa", "callback_data": "vv_placa"}],
+        [{"text": "🖼 Foto de placa", "callback_data": "vv_foto"},
+         {"text": "🎯 Enfoque", "callback_data": "vv_enfoque"}],
+        [{"text": "🔗 Links de contexto", "callback_data": "vv_links"},
+         {"text": "📡 Canales", "callback_data": "vv_canales"}],
+        [{"text": "👁 Preview", "callback_data": "vv_preview"}],
+        [{"text": "✅ Arrancar", "callback_data": "vv_arrancar"},
+         {"text": "✖️ Cancelar", "callback_data": "vv_cancel"}]]}
+
+
+async def cmd_vivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if BOT_PAUSED:
+        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+        return
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    if sub == "estado":
+        await _vv_cmd_estado(update, context)
+        return
+    if sub == "cerrar":
+        await _vv_cmd_cerrar(update, context)
+        return
+    if sub == "difundir":
+        await _vv_cmd_difundir(update, context)
+        return
+    if sub == "mail":
+        await _vv_cmd_mail(update, context)
+        return
+    nombre = " ".join(args).strip() or "Cobertura en vivo"
+    cfg = {
+        "nombre": nombre, "titulo_nota": None, "titulo_placa": None, "bajada": None,
+        "linea_fecha": None, "foto": None, "enfoque": "", "links": [],
+        "resumen_contexto": "", "canales": _vv_canales_default(),
+    }
+    context.user_data["vivo_cfg"] = cfg
+    # paneles viejos afuera: si quedó un cierre/difusión colgado, se llevaría los toggles de canales
+    context.user_data.pop("vv_cierre", None)
+    context.user_data.pop("vv_dif", None)
+    _vv_espera(context)
+    await update.message.reply_text(
+        _vv_panel_text(cfg), parse_mode="HTML", reply_markup=_vv_kb(cfg))
+
+
+async def _vv_cmd_estado(update, context):
+    import sys as _sve
+    _sve.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivoe
+    estado = await asyncio.to_thread(_vivoe.cargar_estado)
+    if not estado:
+        await update.message.reply_text(
+            "No hay ninguna cobertura EN VIVO activa. Abrí una con /vivo <nombre>.")
+        return
+    n_fotos = len(estado.get("fotos_publicadas") or [])
+    cerrada = estado.get("cerrada")
+    estado_txt = f"🟢 cerrada ({cerrada})" if cerrada else "🔴 EN VIVO"
+    await update.message.reply_text(
+        f"{estado_txt} <b>{estado.get('nombre', '?')}</b>\n\n"
+        f"📰 {estado.get('titulo_nota', '?')}\n"
+        f"🔗 {estado.get('nota_url', '—')}\n"
+        f"🎯 {estado.get('enfoque') or '—'}\n"
+        f"🖼 {n_fotos} foto(s) publicada(s)\n"
+        f"𝕏 último tweet: {estado.get('tweet_last') or estado.get('tweet_root') or '—'}",
+        parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def _vv_capturar_texto(update, context, campo: str, text_in: str):
+    """Captura el texto tipeado por Leo para un campo del panel /vivo y redibuja el resumen."""
+    cfg = context.user_data.get("vivo_cfg")
+    if cfg is None:
+        await update.message.reply_text("⚠️ Se perdió el panel. Abrí de nuevo con /vivo <nombre>.")
+        return
+    if campo == "titulo":
+        cfg["titulo_nota"] = text_in.strip()
+    elif campo == "placa":
+        lineas = [l.strip() for l in text_in.split("\n") if l.strip()]
+        if lineas:
+            cfg["titulo_placa"] = lineas[0]
+        if len(lineas) >= 2:
+            cfg["bajada"] = lineas[1]
+        if len(lineas) >= 3:
+            cfg["linea_fecha"] = lineas[2]
+        if len(lineas) < 3:
+            await update.message.reply_text(
+                f"⚠️ Recibí {len(lineas)} línea(s) de 3 — cargué lo que mandaste, "
+                "tocá 🪧 de nuevo para completar el resto.")
+    elif campo == "enfoque":
+        cfg["enfoque"] = text_in.strip()
+    elif campo == "links":
+        urls = re.findall(r'https?://\S+', text_in)
+        if not urls:
+            await update.message.reply_text("⚠️ No encontré ningún link ahí. Probá de nuevo.")
+            return
+        nuevos = [u for u in urls if u not in cfg["links"]]
+        cfg["links"].extend(nuevos)
+        await update.message.reply_text(f"🔗 Sumé {len(nuevos)} link(s) — total {len(cfg['links'])}.")
+    await update.message.reply_text(_vv_panel_text(cfg), parse_mode="HTML", reply_markup=_vv_kb(cfg))
+
+
+async def _vv_capturar_foto(update, context):
+    cfg = context.user_data.get("vivo_cfg")
+    if cfg is None:
+        await update.message.reply_text("⚠️ Se perdió el panel. Abrí de nuevo con /vivo <nombre>.")
+        return
+    msg = await update.message.reply_text("📷 Guardando foto…")
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file(read_timeout=30, connect_timeout=15)
+        dl = await asyncio.to_thread(lambda: requests.get(file.file_path, timeout=30))
+        cfg["foto"] = dl.content
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude guardar la foto: {e}")
+        return
+    await msg.edit_text("✅ Foto cargada.")
+    await update.message.reply_text(_vv_panel_text(cfg), parse_mode="HTML", reply_markup=_vv_kb(cfg))
+
+
+async def _vv_preview(update, context, q):
+    cfg = context.user_data.get("vivo_cfg")
+    target = q.message if q else update.message
+    if cfg is None:
+        await target.reply_text("⚠️ No hay panel activo. Abrí con /vivo <nombre>.")
+        return
+    status = await target.reply_text("👁 Generando preview…")
+    import sys as _svp
+    _svp.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivop, vivo_prompts as _vpp
+
+    def _work():
+        resumen = ""
+        if cfg.get("links"):
+            try:
+                paginas = _vivop.scrape_contexto(cfg["links"])
+            except Exception:
+                paginas = []
+            if paginas:
+                resumen = _vpp.resumir_links(paginas)
+        placas = _vivop.generar_placas(
+            cfg.get("titulo_placa") or cfg.get("titulo_nota") or cfg["nombre"],
+            cfg.get("bajada") or "", cfg.get("linea_fecha") or "", cfg.get("foto"))
+        return resumen, placas
+
+    try:
+        resumen, placas = await asyncio.to_thread(_work)
+    except Exception as e:
+        await status.edit_text(f"❌ Error generando el preview: {e}")
+        return
+    if resumen:
+        cfg["resumen_contexto"] = resumen
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    canales_on = [_VV_CANAL_LABEL[c] for c in _VV_CANAL_ORDEN if cfg["canales"].get(c)]
+    bio = io.BytesIO(placas["feed"])
+    bio.name = "placa_preview.jpg"
+    caption = (
+        f"👁 <b>Preview — {cfg['nombre']}</b>\n\n"
+        f"📰 {cfg.get('titulo_nota') or '(sin título de nota)'}\n"
+        f"🎯 {cfg.get('enfoque') or '—'}\n"
+        f"🔗 {len(cfg.get('links') or [])} link(s) de contexto\n"
+        f"📡 {', '.join(canales_on) or '—'}\n\n"
+        "Si está todo OK, tocá ✅ Arrancar. Si no, ✏️ seguí editando.")[:1000]
+    await target.reply_photo(
+        photo=bio, caption=caption, parse_mode="HTML",
+        reply_markup={"inline_keyboard": [
+            [{"text": "✅ Arrancar", "callback_data": "vv_arrancar"},
+             {"text": "✏️ Seguir editando", "callback_data": "vv_back"}]]})
+
+
+async def _vv_arrancar(update, context, q):
+    cfg = context.user_data.get("vivo_cfg")
+    target = q.message if q else update.message
+    if cfg is None:
+        await target.reply_text("⚠️ Se perdió el panel. Abrí de nuevo con /vivo <nombre>.")
+        return
+    await _vv_edit(q, "🔴 Arrancando la cobertura EN VIVO…")
+    import sys as _sva
+    _sva.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivoa, vivo_prompts as _vpa
+    resumen = cfg.get("resumen_contexto") or ""
+    if not resumen and cfg.get("links"):
+        # Leo arrancó sin pasar por el preview → el resumen de contexto se arma acá
+        def _ctx():
+            try:
+                paginas = _vivoa.scrape_contexto(cfg["links"])
+                return _vpa.resumir_links(paginas) if paginas else ""
+            except Exception:
+                return ""
+        resumen = await asyncio.to_thread(_ctx)
+        cfg["resumen_contexto"] = resumen
+    intro_html = f'<p style="color:#243;line-height:1.6;">{resumen}</p>' if resumen else ""
+    arr = {
+        "nombre": cfg["nombre"],
+        "titulo_nota": cfg.get("titulo_nota") or cfg["nombre"],
+        "titulo_placa": cfg.get("titulo_placa") or cfg.get("titulo_nota") or cfg["nombre"],
+        "bajada": cfg.get("bajada") or "",
+        "linea_fecha": cfg.get("linea_fecha") or "",
+        "foto_bytes": cfg.get("foto"),
+        "contexto_intro_html": intro_html,
+        "enfoque": cfg.get("enfoque") or "",
+        "resumen_contexto": resumen,
+        "canales": cfg["canales"],
+        "cta": None,
+    }
+    try:
+        estado = await asyncio.to_thread(_vivoa.arrancar, arr)
+    except Exception as e:
+        estado = {"ok": False, "error": str(e)}
+    if not (isinstance(estado, dict) and estado.get("nota_id")):
+        # arrancar NO levanta: devuelve {"ok": False, "error"} — el panel se conserva para reintentar
+        err = (estado or {}).get("error") if isinstance(estado, dict) else str(estado)
+        await target.reply_text(
+            f"❌ No arrancó la cobertura: {err}\nEl panel sigue activo — corregí y reintentá.",
+            reply_markup=_vv_kb(cfg))
+        return
+    context.user_data.pop("vivo_cfg", None)
+    context.user_data.pop("vv_bloques_previos", None)
+    _vv_espera(context)
+    await target.reply_text(
+        f"🔴 <b>Cobertura EN VIVO arrancada.</b>\n\n"
+        f"📰 {estado.get('titulo_nota', '?')}\n"
+        f"🔗 {estado.get('nota_url', '')}\n\n"
+        "Ahora abrí /input_evento para mandar tandas de material — se redactan e integran solas.",
+        parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ── Bloques redactados solos durante /input_evento (cobertura activa) ──────────
+def _vvb_kb(b: dict) -> dict:
+    pos_label = "⬆️ Arriba" if not b["al_final"] else "⬇️ Al final"
+    tw_label = "𝕏 hilo ✅" if b["con_tweet"] else "𝕏 hilo ❌"
+    return {"inline_keyboard": [
+        [{"text": "✅ Publicar", "callback_data": "vvb_pub"},
+         {"text": "✏️ Ajustar", "callback_data": "vvb_adj"}],
+        [{"text": pos_label, "callback_data": "vvb_pos"},
+         {"text": tw_label, "callback_data": "vvb_tw"}],
+        [{"text": "🗑 Descartar", "callback_data": "vvb_del"}]]}
+
+
+async def _vvb_mostrar_preview(update, context, q, bloque: dict):
+    """Manda el preview de un bloque recién redactado (o reescrito) con los botones de acción."""
+    b = context.user_data.get("vv_bloque")
+    if b is None:
+        return
+    import html as _h
+    texto_plano = re.sub(r"<[^>]+>", " ", b["html"] or "").strip()
+    texto_plano = _h.escape(re.sub(r"\s+", " ", texto_plano))
+    partes = [f"🖊 <b>Bloque tanda {b['tanda']['n']} ({b['tanda']['hora']})</b>\n\n{texto_plano[:900]}"]
+    if b.get("tweet"):
+        partes.append(f"\n\n𝕏 <i>Tweet:</i> {_h.escape(b['tweet'])}")
+    if bloque.get("descartes"):
+        partes.append("\n\n🗑 <i>Descartado:</i> " + _h.escape("; ".join(bloque["descartes"])[:300]))
+    if bloque.get("fallback"):
+        partes.append("\n\n⚠️ <i>Redacción de emergencia (OpenAI no respondió) — revisá antes de publicar.</i>")
+    txt = "".join(partes)[:4000]
+    target = q.message if q else update.message
+    await target.reply_text(txt, parse_mode="HTML", reply_markup=_vvb_kb(b))
+
+
+def _vvb_archivar_tanda(n):
+    import os as _osx
+    _osx.makedirs(f"{IEV_INBOX}/procesadas", exist_ok=True)
+    try:
+        _osx.replace(f"{IEV_INBOX}/tanda_{n}.json", f"{IEV_INBOX}/procesadas/tanda_{n}.json")
+    except Exception:
+        pass
+
+
+async def _vvb_ajustar(update, context, text_in: str):
+    b = context.user_data.get("vv_bloque")
+    if b is None:
+        await update.message.reply_text("⚠️ Se perdió el bloque. Volvé a integrar la tanda desde /input_evento.")
+        return
+    import sys as _sva2
+    _sva2.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivoa2, vivo_prompts as _vpa2
+    estado = await asyncio.to_thread(_vivoa2.cargar_estado) or {}
+    contexto = {
+        "enfoque": (estado.get("enfoque") or "") + f"\nCorrección puntual de Leo para este bloque: {text_in.strip()}",
+        "resumen_contexto": estado.get("resumen_contexto") or "",
+        "titulo_nota": estado.get("titulo_nota") or "",
+        "bloques_previos": context.user_data.get("vv_bloques_previos") or [],
+    }
+    msg = await update.message.reply_text("🖊 Reescribiendo el bloque…")
+    try:
+        bloque = await asyncio.to_thread(_vpa2.redactar_bloque, b["tanda"], contexto)
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude reescribir: {e}")
+        return
+    b["html"] = bloque.get("html", "")
+    b["tweet"] = bloque.get("tweet", "")
+    b["resumen"] = bloque.get("resumen") or b.get("resumen", "")
+    if not b["tweet"]:
+        b["con_tweet"] = False
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await _vvb_mostrar_preview(update, context, None, bloque)
+
+
+async def _vvb_publicar(update, context, q, b: dict):
+    await _vv_edit(q, "📤 Publicando bloque…")
+    import sys as _svp2
+    _svp2.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivop2
+    tweet = b["tweet"] if b.get("con_tweet") else None
+    try:
+        res = await asyncio.to_thread(
+            _vivop2.integrar_bloque, b["html"], b["tanda"].get("fotos") or [], tweet, b["al_final"])
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    if not (isinstance(res, dict) and res.get("ok")):
+        err = (res or {}).get("error") if isinstance(res, dict) else str(res)
+        await q.message.reply_text(
+            f"❌ No pude integrar el bloque: {err}\nEl bloque sigue acá — reintentá o descartalo.",
+            reply_markup=_vvb_kb(b))
+        return
+    _vvb_archivar_tanda(b["tanda"]["n"])
+    # memoria para el redactor: el RESUMEN del bloque (no el HTML crudo, que truncado es puro CSS)
+    memoria = b.get("resumen") or re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", b["html"] or "")).strip()[:300]
+    context.user_data.setdefault("vv_bloques_previos", []).append(memoria)
+    context.user_data.pop("vv_bloque", None)
+    await q.message.reply_text(
+        f"✅ Bloque de la tanda {b['tanda']['n']} publicado" + (" con hilo en 𝕏." if tweet else "."),
+        parse_mode="HTML")
+
+
+async def _handle_vvb_button(update, context, q, data: str):
+    act = data[len("vvb_"):]
+    if act == "adj":
+        context.user_data["awaiting_vvb_adj"] = True
+        await q.message.reply_text("✏️ Escribí el ajuste puntual para este bloque (qué cambiar).")
+        return
+    b = context.user_data.get("vv_bloque")
+    if b is None:
+        await _vv_edit(q, "⚠️ Se perdió el bloque. Volvé a integrar la tanda desde /input_evento.")
+        return
+    if act == "pos":
+        b["al_final"] = not b["al_final"]
+        await q.edit_message_reply_markup(reply_markup=_vvb_kb(b))
+        return
+    if act == "tw":
+        b["con_tweet"] = not b["con_tweet"]
+        await q.edit_message_reply_markup(reply_markup=_vvb_kb(b))
+        return
+    if act == "del":
+        _vvb_archivar_tanda(b["tanda"]["n"])
+        context.user_data.pop("vv_bloque", None)
+        await _vv_edit(q, "🗑 Bloque descartado.")
+        return
+    if act == "pub":
+        await _vvb_publicar(update, context, q, b)
+        return
+
+
+# ── /vivo cerrar — bloque de cierre + portada + difusión ────────────────────────
+async def _vv_cmd_cerrar(update, context):
+    import sys as _svc
+    _svc.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivoc, vivo_prompts as _vpc
+    estado = await asyncio.to_thread(_vivoc.cargar_estado)
+    if not estado:
+        await update.message.reply_text("No hay ninguna cobertura EN VIVO activa para cerrar.")
+        return
+    if estado.get("cerrada"):
+        await update.message.reply_text(f"Esta cobertura ya está cerrada ({estado['cerrada']}).")
+        return
+    msg = await update.message.reply_text("🖊 Redactando el cierre…")
+    contexto = {
+        "enfoque": estado.get("enfoque") or "",
+        "resumen_contexto": estado.get("resumen_contexto") or "",
+        "titulo_nota": estado.get("titulo_nota") or "",
+        "bloques_previos": context.user_data.get("vv_bloques_previos") or [],
+    }
+    try:
+        prop = await asyncio.to_thread(_vpc.proponer_cierre, contexto)
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude proponer el cierre: {e}")
+        return
+    fotos = (estado.get("fotos_publicadas") or [])[-6:]
+    cierre = {
+        "titulo_pasado": prop.get("titulo_pasado") or estado.get("titulo_nota") or "",
+        "bloque_html": prop.get("bloque_html", ""), "tweet_cierre": prop.get("tweet_cierre", ""),
+        "copys": prop.get("copys") or {},
+        "portada_media_id": (fotos[-1]["id"] if fotos else None),
+        "canales": _vv_canales_default(), "_fotos": fotos,
+        "_fallback": bool(prop.get("fallback")),
+    }
+    context.user_data["vv_cierre"] = cierre
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await update.message.reply_text(
+        _vv_cierre_texto(cierre), parse_mode="HTML", reply_markup=_vv_cierre_kb(cierre))
+
+
+def _vv_cierre_texto(c: dict) -> str:
+    import html as _h
+    texto_plano = _h.escape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c["bloque_html"] or "")).strip())
+    canales_on = [_VV_CANAL_LABEL[k] for k in _VV_CANAL_ORDEN if c["canales"].get(k)]
+    port = c.get("portada_media_id")
+    aviso = ("\n⚠️ <i>Redacción de emergencia (OpenAI no respondió) — revisá antes de cerrar.</i>\n"
+             if c.get("_fallback") else "")
+    return (
+        "🏁 <b>Cierre de cobertura</b>\n\n"
+        f"📰 Título (pasado): {_h.escape(c['titulo_pasado'])}\n\n"
+        f"{texto_plano[:700]}\n\n"
+        f"𝕏 Tweet cierre: {_h.escape(c['tweet_cierre'])}\n{aviso}\n"
+        f"🖼 Portada: {'#' + str(port) if port else 'elegí una abajo'}\n"
+        f"📡 Canales: {', '.join(canales_on) or '—'}\n\n"
+        "Elegí portada y canales, y tocá ✅ Cerrar y difundir.")
+
+
+def _vv_cierre_kb(c: dict) -> dict:
+    rows, row = [], []
+    for f in c.get("_fotos") or []:
+        icon = "🔘" if f["id"] == c.get("portada_media_id") else "⚪"
+        row.append({"text": f"{icon} #{f['id']}", "callback_data": f"vv_port:{f['id']}"})
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "📡 Canales", "callback_data": "vv_canales"}])
+    rows.append([{"text": "✅ Cerrar y difundir", "callback_data": "vv_cierre_go"},
+                 {"text": "✖️ Cancelar", "callback_data": "vv_cierre_cancel"}])
+    return {"inline_keyboard": rows}
+
+
+async def _vv_cierre_go(update, context, q):
+    c = context.user_data.get("vv_cierre")
+    if c is None:
+        await q.edit_message_text("⚠️ Se perdió el panel de cierre.")
+        return
+    await q.edit_message_text("🏁 Cerrando la cobertura y difundiendo…")
+    import sys as _svcg
+    _svcg.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivocg
+    cierre_cfg = {
+        "bloque_html": c["bloque_html"], "titulo_pasado": c["titulo_pasado"],
+        "portada_media_id": c.get("portada_media_id"), "tweet_cierre": c["tweet_cierre"],
+        "copys": c["copys"], "canales": c["canales"],
+    }
+    try:
+        res = await asyncio.to_thread(_vivocg.cerrar, cierre_cfg)
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    if not (isinstance(res, dict) and res.get("ok")):
+        # cerrar NO levanta: devuelve {"ok": False, "error"} — el panel se conserva para reintentar
+        err = (res or {}).get("error") if isinstance(res, dict) else str(res)
+        await q.message.reply_text(
+            f"❌ No pude cerrar la cobertura: {err}\nEl panel sigue activo — reintentá.",
+            reply_markup=_vv_cierre_kb(c))
+        return
+    context.user_data.pop("vv_cierre", None)
+    context.user_data.pop("vv_bloques_previos", None)
+    await q.message.reply_text(
+        f"✅ <b>Cobertura cerrada y difundida.</b>\n🔗 {res.get('nota_url', '')}",
+        parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ── /vivo mail — newsletter del cierre ───────────────────────────────────────────
+async def _vv_cmd_mail(update, context):
+    import sys as _svm
+    _svm.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivom, vivo_prompts as _vpm
+    estado = await asyncio.to_thread(_vivom.cargar_estado)
+    if not estado:
+        await update.message.reply_text("No hay ninguna cobertura EN VIVO activa.")
+        return
+    msg = await update.message.reply_text("✉️ Armando la propuesta de newsletter…")
+    contexto = {
+        "enfoque": estado.get("enfoque") or "",
+        "resumen_contexto": estado.get("resumen_contexto") or "",
+        "titulo_nota": estado.get("titulo_nota") or "",
+        "bloques_previos": context.user_data.get("vv_bloques_previos") or [],
+    }
+    try:
+        prop = await asyncio.to_thread(_vpm.proponer_mail, contexto)
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude armar la propuesta: {e}")
+        return
+    mail = {
+        "estado": estado, "subject": prop.get("subject", ""), "pre_header": prop.get("pre_header", ""),
+        "hero_title": prop.get("hero_title", ""), "hero_quote": prop.get("hero_quote", ""),
+        "contexto_parrafos": prop.get("contexto_parrafos") or [],
+        "segmento": None, "segmento_label": "Toda la base", "campaign_id": None,
+        "fallback": bool(prop.get("fallback")),
+    }
+    context.user_data["vv_mail"] = mail
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await update.message.reply_text(_vv_mail_texto(mail), parse_mode="HTML", reply_markup=_vv_mail_kb())
+
+
+def _vv_mail_texto(m: dict) -> str:
+    import html as _h
+    parrafos = "\n\n".join(m.get("contexto_parrafos") or [])  # trae <b> válido para Telegram
+    aviso = ("\n⚠️ <i>Propuesta de emergencia (OpenAI no respondió) — revisá antes de enviar.</i>\n"
+             if m.get("fallback") else "")
+    return (
+        f"✉️ <b>Newsletter — {_h.escape(m['estado'].get('nombre', '?'))}</b>\n\n"
+        f"<b>Asunto:</b> {_h.escape(m['subject'])}\n"
+        f"<b>Pre-header:</b> {_h.escape(m['pre_header'])}\n\n"
+        f"<b>{_h.escape(m['hero_title'])}</b>\n<i>{_h.escape(m['hero_quote'])}</i>\n\n"
+        f"{parrafos[:600]}\n{aviso}\n"
+        f"👥 Destinatarios: {_h.escape(m['segmento_label'])}\n\n"
+        "Elegí destinatarios y confirmá el envío (+3 min).")
+
+
+def _vv_mail_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "👥 Toda la base", "callback_data": "vv_mail_all"},
+         {"text": "🏷 Por tag", "callback_data": "vv_mail_tag"}],
+        [{"text": "✏️ Ajustar", "callback_data": "vv_mail_adj"}],
+        [{"text": "✅ Enviar ahora (+3 min)", "callback_data": "vv_mail_send"},
+         {"text": "✖️ Cancelar", "callback_data": "vv_mail_cancel"}]]}
+
+
+def _vv_mail_tags_kb(tags: list, pg: int = 0) -> dict:
+    per = 8
+    start = pg * per
+    chunk = tags[start:start + per]
+    rows = [[{"text": (t.get("title") or f"tag {t.get('id')}")[:40], "callback_data": f"vv_mail_tag:{start + i}"}]
+            for i, t in enumerate(chunk)]
+    nav = []
+    if pg > 0:
+        nav.append({"text": "⬅️", "callback_data": f"vv_mail_pg:{pg - 1}"})
+    if start + per < len(tags):
+        nav.append({"text": "➡️", "callback_data": f"vv_mail_pg:{pg + 1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "⬅️ Volver", "callback_data": "vv_mail_back"}])
+    return {"inline_keyboard": rows}
+
+
+async def _vv_mail_tags_mostrar(update, context, q):
+    m = context.user_data.get("vv_mail")
+    if m is None:
+        await q.edit_message_text("⚠️ Se perdió la propuesta.")
+        return
+    await q.edit_message_text("🏷 Cargando tags…")
+    import sys as _svtg
+    _svtg.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivotg
+    try:
+        tags = await asyncio.to_thread(_vivotg.listar_tags_fluentcrm)
+    except Exception as e:
+        await q.edit_message_text(f"❌ No pude leer los tags: {e}")
+        return
+    context.user_data["vv_mail_tags"] = tags
+    if not tags:
+        await q.edit_message_text("No hay tags en FluentCRM.", reply_markup=_vv_mail_kb())
+        return
+    await q.edit_message_text("🏷 Elegí un tag:", reply_markup=_vv_mail_tags_kb(tags, 0))
+
+
+async def _vv_mail_ajustar(update, context, text_in: str):
+    m = context.user_data.get("vv_mail")
+    if m is None:
+        await update.message.reply_text("⚠️ Se perdió la propuesta. Reabrí con «/vivo mail».")
+        return
+    import sys as _svma
+    _svma.path.insert(0, "/opt/me-harness")
+    from agents import vivo_prompts as _vpma
+    contexto = {
+        "enfoque": (m["estado"].get("enfoque") or "") + f"\nAjuste de Leo: {text_in.strip()}",
+        "resumen_contexto": m["estado"].get("resumen_contexto") or "",
+        "titulo_nota": m["estado"].get("titulo_nota") or "",
+        "bloques_previos": context.user_data.get("vv_bloques_previos") or [],
+    }
+    msg = await update.message.reply_text("✉️ Reescribiendo…")
+    try:
+        prop = await asyncio.to_thread(_vpma.proponer_mail, contexto)
+    except Exception as e:
+        await msg.edit_text(f"❌ No pude reescribir: {e}")
+        return
+    m.update(subject=prop.get("subject", ""), pre_header=prop.get("pre_header", ""),
+              hero_title=prop.get("hero_title", ""), hero_quote=prop.get("hero_quote", ""),
+              contexto_parrafos=prop.get("contexto_parrafos") or [])
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await update.message.reply_text(_vv_mail_texto(m), parse_mode="HTML", reply_markup=_vv_mail_kb())
+
+
+async def _vv_mail_send(update, context, q):
+    m = context.user_data.get("vv_mail")
+    if m is None:
+        await q.edit_message_text("⚠️ Se perdió la propuesta.")
+        return
+    await q.edit_message_text("✉️ Programando el envío…")
+    import sys as _svsn
+    _svsn.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivosn
+    from datetime import datetime as _dtsn, timedelta as _tdsn, timezone as _tzsn
+    # hora AR = UTC-3 (patrón _boletin_enviar_ahora; datetime.now() naive del VPS va en UTC)
+    cuando = (_dtsn.now(_tzsn.utc) - _tdsn(hours=3) + _tdsn(minutes=3)).strftime("%Y-%m-%d %H:%M:%S")
+    prop = {"subject": m["subject"], "pre_header": m["pre_header"], "hero_title": m["hero_title"],
+            "hero_quote": m["hero_quote"], "contexto_parrafos": m["contexto_parrafos"]}
+    try:
+        res = await asyncio.to_thread(_vivosn.mail_crear_y_programar, prop, m["segmento"], cuando)
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    m["campaign_id"] = res.get("campaign_id")  # se guarda igual: ✖️ Cancelar borra el draft huérfano
+    if not res.get("ok"):
+        await q.message.reply_text(
+            f"❌ No pude programar el envío: {res.get('error')}", reply_markup=_vv_mail_kb())
+        return
+    await q.message.reply_text(
+        f"✅ Newsletter programado para las {cuando} (ARG) a {res.get('recipients', '?')} "
+        f"destinatario(s) — {m['segmento_label']}.", parse_mode="HTML")
+
+
+async def _vv_mail_cancel(update, context, q):
+    m = context.user_data.pop("vv_mail", None)
+    context.user_data.pop("vv_mail_tags", None)
+    if m and m.get("campaign_id"):
+        import sys as _svmc
+        _svmc.path.insert(0, "/opt/me-harness")
+        from agents import vivo as _vivomc
+        try:
+            await asyncio.to_thread(_vivomc.mail_cancelar, m["campaign_id"])
+        except Exception:
+            pass
+    await q.edit_message_text("✖️ Newsletter cancelado.")
+
+
+# ── /vivo difundir — re-difusión genérica (foto o placa + copy editable) ────────
+async def _vv_cmd_difundir(update, context):
+    import sys as _svd
+    _svd.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivod
+    estado = await asyncio.to_thread(_vivod.cargar_estado)
+    if not estado:
+        await update.message.reply_text("No hay ninguna cobertura EN VIVO activa.")
+        return
+    fotos = (estado.get("fotos_publicadas") or [])[-6:]
+    dif = {
+        "estado": estado, "imagen_media_id": (fotos[-1]["id"] if fotos else None),
+        "usar_placa": not fotos,
+        "texto": estado.get("resumen_contexto") or estado.get("titulo_nota") or "",
+        "canales": _vv_canales_default(), "_fotos": fotos,
+    }
+    context.user_data["vv_dif"] = dif
+    await update.message.reply_text(_vv_dif_texto(dif), parse_mode="HTML", reply_markup=_vv_dif_kb(dif))
+
+
+def _vv_dif_texto(d: dict) -> str:
+    import html as _h
+    canales_on = [_VV_CANAL_LABEL[k] for k in _VV_CANAL_ORDEN if d["canales"].get(k)]
+    img = "placa" if d.get("usar_placa") else f"foto #{d.get('imagen_media_id')}"
+    return (
+        f"🚀 <b>Re-difusión — {_h.escape(d['estado'].get('nombre', '?'))}</b>\n\n"
+        f"🖼 Imagen: {img}\n\n"
+        f"{_h.escape((d.get('texto') or '')[:500])}\n\n"
+        f"📡 Canales: {', '.join(canales_on) or '—'}\n\n"
+        "Elegí imagen, editá el texto si querés, y tocá 🚀 Difundir.")
+
+
+def _vv_dif_kb(d: dict) -> dict:
+    rows, row = [], []
+    for f in d.get("_fotos") or []:
+        icon = "🔘" if (not d.get("usar_placa") and f["id"] == d.get("imagen_media_id")) else "⚪"
+        row.append({"text": f"{icon} #{f['id']}", "callback_data": f"vv_dif_pic:{f['id']}"})
+        if len(row) == 3:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    icon_placa = "🔘" if d.get("usar_placa") else "⚪"
+    rows.append([{"text": f"{icon_placa} Usar placa", "callback_data": "vv_dif_placa"}])
+    rows.append([{"text": "✏️ Editar texto", "callback_data": "vv_dif_txt"},
+                 {"text": "📡 Canales", "callback_data": "vv_canales"}])
+    rows.append([{"text": "🚀 Difundir", "callback_data": "vv_dif_go"},
+                 {"text": "✖️ Cancelar", "callback_data": "vv_dif_cancel"}])
+    return {"inline_keyboard": rows}
+
+
+async def _vv_dif_texto_capturar(update, context, text_in: str):
+    d = context.user_data.get("vv_dif")
+    if d is None:
+        await update.message.reply_text("⚠️ Se perdió el panel. Reabrí con «/vivo difundir».")
+        return
+    d["texto"] = text_in.strip()
+    await update.message.reply_text(_vv_dif_texto(d), parse_mode="HTML", reply_markup=_vv_dif_kb(d))
+
+
+async def _vv_dif_go(update, context, q):
+    d = context.user_data.get("vv_dif")
+    if d is None:
+        await q.edit_message_text("⚠️ Se perdió el panel.")
+        return
+    await q.edit_message_text("🚀 Difundiendo…")
+    import sys as _svdg2
+    _svdg2.path.insert(0, "/opt/me-harness")
+    from agents import vivo as _vivodg2
+    estado = d["estado"]
+
+    def _work():
+        img_bytes = None
+        try:
+            if d.get("usar_placa"):
+                # medias = {"feed": {"id","url"}, "story": {...}, "wide": {...}}
+                medias = estado.get("medias") or {}
+                surl = (medias.get("feed") or {}).get("url") or (medias.get("wide") or {}).get("url")
+                if isinstance(surl, str) and surl.startswith("http"):
+                    r = requests.get(surl, timeout=20)
+                    if r.ok:
+                        img_bytes = r.content
+            else:
+                foto = next((f for f in (d.get("_fotos") or [])
+                            if f.get("id") == d.get("imagen_media_id")), None)
+                if foto and foto.get("url"):
+                    r = requests.get(foto["url"], timeout=20)
+                    if r.ok:
+                        img_bytes = r.content
+        except Exception:
+            img_bytes = None
+        texto = d.get("texto") or ""
+        # twitter incluido para que el toggle 🐦 tenga efecto (sin URL en el texto → gratis)
+        copys = {"twitter": texto, "telegram": texto, "facebook": texto,
+                 "linkedin": texto, "ig_caption": texto}
+        return _vivodg2.difundir(copys, img_bytes, d["canales"], estado.get("nota_url", ""))
+
+    try:
+        res = await asyncio.to_thread(_work)
+    except Exception as e:
+        res = {"error": str(e)}
+    if isinstance(res, dict) and res.get("error"):
+        await q.message.reply_text(
+            f"⚠️ La difusión terminó con error: {res['error']}\nEl panel sigue activo — reintentá.",
+            reply_markup=_vv_dif_kb(d))
+        return
+    context.user_data.pop("vv_dif", None)
+    fallas = [k for k, v in (res or {}).items()
+              if isinstance(v, dict) and not (v.get("ok") or v.get("id"))]
+    extra = ("\n⚠️ Fallaron: " + ", ".join(fallas)) if fallas else ""
+    await q.message.reply_text("✅ Re-difusión enviada." + extra)
+
+
+# ── Dispatcher único de todos los botones del ecosistema /vivo ("^vv") ──────────
+async def handle_vv_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+
+    if data.startswith("vvb_"):
+        await _handle_vvb_button(update, context, q, data)
+        return
+
+    if data.startswith("vv_ch:"):
+        canales = _vv_canales_activo(context)
+        if canales is None:
+            await q.edit_message_text("⚠️ Se perdió el panel.")
+            return
+        canal = data.split(":", 1)[1]
+        if canal in canales:
+            canales[canal] = not canales[canal]
+        await q.edit_message_text("📡 Tocá para activar/desactivar cada canal:",
+                                  reply_markup=_vv_canales_kb(canales))
+        return
+
+    if data == "vv_canales":
+        canales = _vv_canales_activo(context)
+        if canales is None:
+            await q.edit_message_text("⚠️ No hay ningún panel activo.")
+            return
+        await q.edit_message_text("📡 Tocá para activar/desactivar cada canal:",
+                                  reply_markup=_vv_canales_kb(canales))
+        return
+
+    if data == "vv_ch_back":
+        if context.user_data.get("vv_cierre") is not None:
+            c = context.user_data["vv_cierre"]
+            await q.edit_message_text(_vv_cierre_texto(c), parse_mode="HTML", reply_markup=_vv_cierre_kb(c))
+        elif context.user_data.get("vv_dif") is not None:
+            d = context.user_data["vv_dif"]
+            await q.edit_message_text(_vv_dif_texto(d), parse_mode="HTML", reply_markup=_vv_dif_kb(d))
+        else:
+            cfg = context.user_data.get("vivo_cfg")
+            if cfg is not None:
+                await q.edit_message_text(_vv_panel_text(cfg), parse_mode="HTML", reply_markup=_vv_kb(cfg))
+        return
+
+    # Panel principal de preparación
+    if data == "vv_titulo":
+        _vv_espera(context, "awaiting_vv_titulo")
+        await q.message.reply_text("📰 Escribí el TÍTULO de la nota.")
+        return
+    if data == "vv_placa":
+        _vv_espera(context, "awaiting_vv_placa")
+        await q.message.reply_text(
+            "🪧 Mandame 3 líneas (una por renglón):\n1) Título de placa\n2) Bajada\n3) Fecha y lugar")
+        return
+    if data == "vv_foto":
+        _vv_espera(context, "awaiting_vv_foto")
+        await q.message.reply_text("🖼 Mandame la FOTO de fondo para la placa.")
+        return
+    if data == "vv_enfoque":
+        _vv_espera(context, "awaiting_vv_enfoque")
+        await q.message.reply_text("🎯 Escribí el ENFOQUE editorial de la cobertura.")
+        return
+    if data == "vv_links":
+        _vv_espera(context, "awaiting_vv_links")
+        await q.message.reply_text(
+            "🔗 Mandame uno o más links de contexto (podés poner varios en el mismo mensaje).")
+        return
+    if data == "vv_preview":
+        await _vv_preview(update, context, q)
+        return
+    if data == "vv_arrancar":
+        await _vv_arrancar(update, context, q)
+        return
+    if data == "vv_cancel":
+        context.user_data.pop("vivo_cfg", None)
+        _vv_espera(context)
+        await _vv_edit(q, "✖️ Preparación EN VIVO cancelada.")
+        return
+    if data == "vv_back":
+        cfg = context.user_data.get("vivo_cfg")
+        if cfg is not None:
+            await q.message.reply_text(_vv_panel_text(cfg), parse_mode="HTML", reply_markup=_vv_kb(cfg))
+        else:
+            await q.message.reply_text("⚠️ Se perdió el panel. Abrí de nuevo con /vivo <nombre>.")
+        return
+
+    # Cierre de cobertura
+    if data.startswith("vv_port:"):
+        c = context.user_data.get("vv_cierre")
+        if c is None:
+            await q.edit_message_text("⚠️ Se perdió el panel de cierre.")
+            return
+        mid = data.split(":", 1)[1]
+        try:
+            c["portada_media_id"] = int(mid)
+        except ValueError:
+            c["portada_media_id"] = mid
+        await q.edit_message_text(_vv_cierre_texto(c), parse_mode="HTML", reply_markup=_vv_cierre_kb(c))
+        return
+    if data == "vv_cierre_cancel":
+        context.user_data.pop("vv_cierre", None)
+        await q.edit_message_text("✖️ Cierre cancelado (la cobertura sigue abierta).")
+        return
+    if data == "vv_cierre_go":
+        await _vv_cierre_go(update, context, q)
+        return
+
+    # Newsletter de cierre
+    if data == "vv_mail_all":
+        m = context.user_data.get("vv_mail")
+        if m is None:
+            await q.edit_message_text("⚠️ Se perdió la propuesta.")
+            return
+        m["segmento"] = None
+        m["segmento_label"] = "Toda la base"
+        await q.edit_message_text(_vv_mail_texto(m), parse_mode="HTML", reply_markup=_vv_mail_kb())
+        return
+    if data == "vv_mail_tag":
+        await _vv_mail_tags_mostrar(update, context, q)
+        return
+    if data.startswith("vv_mail_pg:"):
+        pg = int(data.split(":", 1)[1])
+        tags = context.user_data.get("vv_mail_tags") or []
+        await q.edit_message_text("🏷 Elegí un tag:", reply_markup=_vv_mail_tags_kb(tags, pg))
+        return
+    if data.startswith("vv_mail_tag:"):
+        idx = int(data.split(":", 1)[1])
+        tags = context.user_data.get("vv_mail_tags") or []
+        m = context.user_data.get("vv_mail")
+        if m is None or idx >= len(tags):
+            await q.edit_message_text("⚠️ Se perdió la propuesta.")
+            return
+        tag = tags[idx]
+        # formato de segmento de FluentCRM (el mismo de newsletter._segment_for_publico)
+        m["segmento"] = [{"list": "all", "tag": tag["id"]}]
+        m["segmento_label"] = f"Tag: {tag.get('title') or tag['id']}"
+        await q.edit_message_text(_vv_mail_texto(m), parse_mode="HTML", reply_markup=_vv_mail_kb())
+        return
+    if data == "vv_mail_back":
+        m = context.user_data.get("vv_mail")
+        if m is None:
+            await q.edit_message_text("⚠️ Se perdió la propuesta.")
+            return
+        await q.edit_message_text(_vv_mail_texto(m), parse_mode="HTML", reply_markup=_vv_mail_kb())
+        return
+    if data == "vv_mail_adj":
+        context.user_data["awaiting_vv_mail_adj"] = True
+        await q.message.reply_text("✏️ Escribí el ajuste para el newsletter (qué cambiar).")
+        return
+    if data == "vv_mail_send":
+        await _vv_mail_send(update, context, q)
+        return
+    if data == "vv_mail_cancel":
+        await _vv_mail_cancel(update, context, q)
+        return
+
+    # Re-difusión
+    if data.startswith("vv_dif_pic:"):
+        d = context.user_data.get("vv_dif")
+        if d is None:
+            await q.edit_message_text("⚠️ Se perdió el panel.")
+            return
+        mid = data.split(":", 1)[1]
+        try:
+            d["imagen_media_id"] = int(mid)
+        except ValueError:
+            d["imagen_media_id"] = mid
+        d["usar_placa"] = False
+        await q.edit_message_text(_vv_dif_texto(d), parse_mode="HTML", reply_markup=_vv_dif_kb(d))
+        return
+    if data == "vv_dif_placa":
+        d = context.user_data.get("vv_dif")
+        if d is None:
+            await q.edit_message_text("⚠️ Se perdió el panel.")
+            return
+        d["usar_placa"] = True
+        await q.edit_message_text(_vv_dif_texto(d), parse_mode="HTML", reply_markup=_vv_dif_kb(d))
+        return
+    if data == "vv_dif_txt":
+        context.user_data["awaiting_vv_dif_txt"] = True
+        await q.message.reply_text("✏️ Mandame el texto nuevo para la difusión.")
+        return
+    if data == "vv_dif_cancel":
+        context.user_data.pop("vv_dif", None)
+        await q.edit_message_text("✖️ Difusión cancelada.")
+        return
+    if data == "vv_dif_go":
+        await _vv_dif_go(update, context, q)
         return
 
 
@@ -17728,6 +18816,7 @@ def main():
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CommandHandler("evento", cmd_evento))
     app.add_handler(CommandHandler("input_evento", cmd_input_evento))
+    app.add_handler(CommandHandler("vivo", cmd_vivo))
     app.add_handler(CommandHandler("campania", cmd_campania))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
@@ -17745,6 +18834,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))
     app.add_handler(CallbackQueryHandler(handle_iev_button, pattern="^iev_"))
+    app.add_handler(CallbackQueryHandler(handle_vv_button, pattern="^vv"))
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
     app.add_handler(CallbackQueryHandler(handle_button))
