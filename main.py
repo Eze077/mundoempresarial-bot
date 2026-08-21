@@ -10141,7 +10141,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
             elif action == "h_cur_living" and arg:
-                job_id = int(arg)
+                job_id = int(parts[1])
+                # Paginado (20/8): el tope fijo [:32] escondía las últimas entradas
+                # (42 candidatas: las 12 cotizaciones quedaban casi todas afuera).
+                _pag_lv = int(parts[2]) if len(parts) >= 3 else 0
                 try:
                     # Picker UNIFICADO (13/8): living notes de DATO (id numérico) + las de
                     # COTIZACIÓN de living_topics (sentinel cot_<asset>, sin ':' porque el
@@ -10157,8 +10160,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if not _tp.get("wp_post_id"):
                             continue
                         _opts_lv.append((f"cot_{_tp['asset']}", f"📈 {_tp['nombre'][:40]} (cotización)"))
+                    _PSZ_LV = 14
+                    _tot_lv = max(1, (len(_opts_lv) + _PSZ_LV - 1) // _PSZ_LV)
+                    _pag_lv = max(0, min(_pag_lv, _tot_lv - 1))
                     rows = [[{"text": _t, "callback_data": f"h_cur_setliving:{job_id}:{_lid}"}]
-                            for _lid, _t in _opts_lv[:32]]
+                            for _lid, _t in _opts_lv[_pag_lv * _PSZ_LV:(_pag_lv + 1) * _PSZ_LV]]
+                    if _tot_lv > 1:
+                        _nav = []
+                        if _pag_lv > 0:
+                            _nav.append({"text": "◀", "callback_data": f"h_cur_living:{job_id}:{_pag_lv - 1}"})
+                        _nav.append({"text": f"{_pag_lv + 1}/{_tot_lv}", "callback_data": f"h_cur_living:{job_id}:{_pag_lv}"})
+                        if _pag_lv < _tot_lv - 1:
+                            _nav.append({"text": "▶", "callback_data": f"h_cur_living:{job_id}:{_pag_lv + 1}"})
+                        rows.append(_nav)
                     rows.append([{"text": "➕ Proponer nueva living note (mandá un link)", "callback_data": f"h_cur_propln:{job_id}"}])
                     rows.append([{"text": "↩ Volver", "callback_data": f"h_cur_volver:{job_id}"}])
                     await query.edit_message_text(
@@ -16337,7 +16351,10 @@ async def _post_init(application: Application) -> None:
         BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
         BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
         BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
+        BotCommand("nutricion",         "Briefing de nutrición — alimentar living notes"),
         # ── Contenido ─────────────────────────────────────────────────────────
+        BotCommand("vivo",              "Cobertura EN VIVO — nota + redes, todo desde el bot"),
+        BotCommand("input_evento",      "Tandas EN VIVO — texto, audios y fotos para la crónica"),
         BotCommand("evento",            "Cobertura de evento propio — audios, fotos y texto → nota"),
         BotCommand("campania",          "Campaña de evento en curso — revivir, armar o cancelar"),
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
