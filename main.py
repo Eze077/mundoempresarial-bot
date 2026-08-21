@@ -10150,6 +10150,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     def _grupo_ln(_tema):
                         _t = _tema.lower()
+                        # GUÍAS de trámite (cómo hacer algo) ANTES que ARCA: si no, caen
+                        # todas en "impuestos" mezcladas con las fichas de dato (categorías,
+                        # calendarios). Pedido de Leo 21/8 al sumar la guía del VEP.
+                        if any(k in _t for k in ("cómo", "como emitir", "paso a paso",
+                                                 "constancia", "clave fiscal", "factura electr",
+                                                 "vep", "recategor", "plan de pagos",
+                                                 "obra social", "trámite", "tramite")):
+                            return "gui"
                         if any(k in _t for k in ("escala", "salari", "sueldo", "recibo", "smvm")):
                             return "esc"
                         if any(k in _t for k in ("monotribut", "autónom", "autonom", "arca", "afip",
@@ -10162,7 +10170,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return "otr"
                     # Living notes de DATO (id numérico) + COTIZACIÓN de living_topics
                     # (sentinel cot_<asset>, sin ':' porque el callback_data se parsea con split(':')).
-                    _grupos_lv = {"esc": [], "arca": [], "fin": [], "cot": [], "otr": []}
+                    _grupos_lv = {"esc": [], "arca": [], "gui": [], "fin": [], "cot": [], "otr": []}
                     _seen_lv = set()
                     for _ln in _br.get_living_notes():
                         _wp = _ln.get("wp_post_id")
@@ -10175,8 +10183,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             continue
                         _grupos_lv["cot"].append((f"cot_{_tp['asset']}", f"📈 {_tp['nombre'][:40]}"))
                     _META_LV = [("esc", "💼 Escalas salariales"), ("arca", "🧾 ARCA e impuestos"),
-                                ("fin", "💳 Finanzas y créditos"), ("cot", "📈 Cotizaciones"),
-                                ("otr", "🗂 Otras")]
+                                ("gui", "📘 Guías y trámites"), ("fin", "💳 Finanzas y créditos"),
+                                ("cot", "📈 Cotizaciones"), ("otr", "🗂 Otras")]
                     if not _grp_lv or _grp_lv not in _grupos_lv:
                         # Nivel 1: menú de grupos con conteo
                         rows = [[{"text": f"{_lbl} ({len(_grupos_lv[_k])})",
