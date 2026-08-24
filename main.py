@@ -7242,6 +7242,65 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── C1 auto: revertir una acción del digest + APRENDER la causa (Leo toca ↩️) ──
+    if query.data.startswith("h_c1_undo:"):
+        import sys as _sysc1
+        _sysc1.path.insert(0, "/opt/me-harness"); _sysc1.path.insert(0, "/opt/me-harness/agents")
+        try:
+            _, _kind, _ref = query.data.split(":", 2)
+            await query.answer("Revirtiendo…", show_alert=False)
+
+            def _rev():
+                import c1_auto as _c
+                return _c.revertir(_kind, int(_ref))
+
+            ok, fb_id, label = await asyncio.wait_for(asyncio.to_thread(_rev), timeout=120)
+            if ok:
+                def _causas():
+                    import c1_auto as _c
+                    return _c.CAUSAS.get(_kind, [("otra", "Otra")])
+
+                causas = await asyncio.to_thread(_causas)
+                kb = {"inline_keyboard": [[{"text": lbl, "callback_data": f"h_c1_causa:{fb_id}:{code}"}]
+                                          for code, lbl in causas]}
+                base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+                await query.edit_message_text(
+                    base + f"\n\n↩️ <b>Revertido</b>: {label}\n¿Por qué? (así aprende y deja de auto-hacerlo)",
+                    parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            else:
+                await query.answer(f"No pude revertir: {label}", show_alert=True)
+        except Exception as _ec1:
+            try:
+                await query.answer(f"Error: {str(_ec1)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    if query.data.startswith("h_c1_causa:"):
+        import sys as _sysc1b, re as _rec1
+        _sysc1b.path.insert(0, "/opt/me-harness"); _sysc1b.path.insert(0, "/opt/me-harness/agents")
+        try:
+            _, _fbid, _causa = query.data.split(":", 2)
+
+            def _save():
+                import c1_auto as _c
+                return _c.guardar_causa(int(_fbid), _causa)
+
+            await asyncio.to_thread(_save)
+            await query.answer("Aprendido ✓", show_alert=False)
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            base = _rec1.sub(r"\n\n¿Por qué\?.*$", "", base, flags=_rec1.S)
+            _apre = "no lo va a auto-hacer con temas parecidos" if _causa == "no_c1" else "queda registrado"
+            await query.edit_message_text(
+                base + f"\n\n🧠 <b>Aprendido</b>: {_causa} — {_apre}.",
+                parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as _ec1b:
+            try:
+                await query.answer(f"Error: {str(_ec1b)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── Auditor: acuse de recibo + corregir (directiva Leo 29/7) ──
     # El auditor avisaba al vacío: mandaba la alerta y nunca sabía si Leo se enteró, así que
     # o repetía o se callaba por cooldown. Con estos botones el loop cierra. "Visto" silencia
