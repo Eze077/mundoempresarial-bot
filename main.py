@@ -7471,6 +7471,28 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # ── ARCA: promover una novedad oficial a nota (estudio diario) ──
+    if query.data.startswith("h_arca_prom:"):
+        import sys as _sa; _sa.path.insert(0, "/opt/me-harness"); _sa.path.insert(0, "/opt/me-harness/agents")
+        try:
+            _aid = query.data.split(":")[1]
+            await query.answer("Promoviendo la novedad de ARCA a nota…", show_alert=False)
+            def _prom_arca():
+                from agents import arca_estudio as _ae
+                return _ae.promover_por_id(_aid)
+            _jid = await asyncio.wait_for(asyncio.to_thread(_prom_arca), timeout=120)
+            base = query.message.text_html if query.message.text else (query.message.caption_html or "")
+            footer = (f"\n\n✅ Promovida a nota (job #{_jid}) — la escribe el redactor y cita a ARCA."
+                      if _jid else "\n\n⚠️ No encontré esa novedad en el feed.")
+            await query.edit_message_text(base + footer, parse_mode="HTML",
+                                          reply_markup=query.message.reply_markup, disable_web_page_preview=True)
+        except Exception as _ea:
+            try:
+                await query.answer(f"Error: {str(_ea)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── ✏️ Ajustar (opinar/complementar): editor/supervisor/reco/impacto → pide el texto ──
     if (query.data.startswith("h_edit_ajustar:") or query.data.startswith("h_sup_ajustar:")
             or query.data.startswith("h_reco_ajustar:") or query.data.startswith("h_imp_ajustar:")
