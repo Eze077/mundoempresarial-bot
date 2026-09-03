@@ -2959,11 +2959,21 @@ def scrape_youtube(url: str) -> dict:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         try:
-            # API 1.x: cookies= acepta path a Netscape cookies file (None = sin cookies)
-            _yapi = YouTubeTranscriptApi(
-                cookies=YOUTUBE_COOKIES,
-                proxies={"https": YOUTUBE_PROXY, "http": YOUTUBE_PROXY},
-            )
+            # youtube-transcript-api 1.x cambió el constructor: ya no acepta cookies= ni
+            # proxies=, sino proxy_config= y http_client=. Con los viejos tiraba TypeError y
+            # la transcripción se iba al fallback. Una Session propia cubre proxy y cookies.
+            _sess_yt = requests.Session()
+            if YOUTUBE_PROXY:
+                _sess_yt.proxies = {"http": YOUTUBE_PROXY, "https": YOUTUBE_PROXY}
+            if YOUTUBE_COOKIES:
+                from http.cookiejar import MozillaCookieJar
+                try:
+                    _cj_yt = MozillaCookieJar(YOUTUBE_COOKIES)
+                    _cj_yt.load(ignore_discard=True, ignore_expires=True)
+                    _sess_yt.cookies = _cj_yt
+                except Exception as _ec:
+                    logger.warning(f"cookies de YouTube ilegibles ({_ec}): sigo sin ellas")
+            _yapi = YouTubeTranscriptApi(http_client=_sess_yt)
             _tlist = _yapi.list(video_id)
             # Preferir español, luego inglés
             _preferred = None
