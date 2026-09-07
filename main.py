@@ -3814,6 +3814,11 @@ def _scrape_instagram(url: str) -> dict:
     }
 
 
+# Piso de texto para considerar que una nota se extrajo entera. Un copete ronda los 300
+# chars; una nota de verdad, miles. Ver el bloque 3 de scrape() (7/9/2026).
+_TEXTO_MINIMO_NOTA = 600
+
+
 def scrape(url: str) -> dict:
     # Resolver redirect de Google News si aplica
     url = resolve_google_redirect(url)
@@ -3900,21 +3905,43 @@ def scrape(url: str) -> dict:
             if text:
                 extraction_method = f"trafilatura ({len(text)} chars, raw {len(traf_raw)})"
 
-    # 3) Si trafilatura también falla, intentar selectores de noticias comunes
-    if not text or len(text) < 100:
+    # 3) Si trafilatura falla —o trae MUY poco— intentar selectores de noticias comunes.
+    #    ⚠️ 7/9/2026: el umbral era `len(text) < 100` y dejaba pasar extracciones que traían
+    #    SOLO el copete. La columna de Pablo Bercovich en futurock.fm devolvió 327 chars sobre
+    #    una nota de 14.000: como 327 > 100 este bloque no corría, el redactor recibía tres
+    #    líneas y completó el hueco INVENTANDO cifras («60% de los empresarios», «22% del PBI»)
+    #    mientras la columna real traía datos mejores y verificables (50% más de empleadores,
+    #    de 400.000 a 600.000 entre 2003 y 2015). Una extracción corta pero NO vacía es el peor
+    #    caso: no dispara ningún fallback y parece que funcionó.
+    if not text or len(text) < _TEXTO_MINIMO_NOTA:
         article_selectors = [
             "article", ".article-body", ".article-content", ".entry-content",
             ".post-content", ".story-body", ".nota-body", '[itemprop="articleBody"]',
             ".body-nota", ".article__body", "#article-body", ".cuerpo-nota",
+            ".post-wrapper", ".blog-grid-content",
         ]
         for sel in article_selectors:
             el = soup.select_one(sel)
             if el and len(el.get_text(strip=True)) > 200:
                 paras = [p.get_text(strip=True) for p in el.find_all("p") if len(p.get_text(strip=True)) > 20]
                 if paras:
-                    text = clean_text("\n".join(paras))
-                    extraction_method = f"css-selector '{sel}' ({len(text)} chars)"
+                    cand = clean_text("\n".join(paras))
+                    # solo pisa lo que ya hay si es MEJOR: el bloque ahora corre con texto
+                    # existente (no solo vacío), así que no puede empeorar la extracción.
+                    if len(cand) > len(text):
+                        text = cand
+                        extraction_method = f"css-selector '{sel}' ({len(text)} chars)"
                     break
+        # Último recurso antes de los fallbacks de red: barrer los <p> largos de toda la
+        # página. En sitios con markup propio (futurock) ningún selector matchea, pero los
+        # párrafos del cuerpo están ahí: 10 <p> = 14.029 chars contra los 327 de trafilatura.
+        if not text or len(text) < _TEXTO_MINIMO_NOTA:
+            sueltos = [p.get_text(" ", strip=True) for p in soup.find_all("p")
+                       if len(p.get_text(strip=True)) > 120]
+            cand = clean_text("\n".join(sueltos))
+            if len(cand) > max(_TEXTO_MINIMO_NOTA, len(text) * 2):
+                text = cand
+                extraction_method = f"parrafos-sueltos ({len(text)} chars, {len(sueltos)} <p>)"
 
     # 4) Si el texto sigue vacío, intentar Wayback, Google Cache y trafilatura fetch_url
     if not text or len(text) < 150:
