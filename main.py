@@ -5701,67 +5701,49 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
         return
 
-    # ── Boletín semanal a Lectores: conversación (pregunta → opciones → slugs) ──
-    if context.user_data.get("awaiting_bol_pregunta"):
-        context.user_data.pop("awaiting_bol_pregunta")
-        context.user_data["bol_pregunta"] = text_in
-        context.user_data["awaiting_bol_opciones"] = True
-        await update.message.reply_text(
-            "📊 Ahora las OPCIONES de la encuesta, una por línea (2 a 4).\n\n"
-            "Ej:\nLa designación del jefe de Gabinete\nLa subida del dólar\nLos vencimientos de ARCA")
-        return
-    if context.user_data.get("awaiting_bol_opciones"):
-        context.user_data.pop("awaiting_bol_opciones")
-        ops = [l.strip(" -•\t") for l in text_in.split("\n") if l.strip(" -•\t")]
-        if len(ops) < 2:
-            context.user_data["awaiting_bol_opciones"] = True
-            await update.message.reply_text("Necesito al menos 2 opciones (una por línea). Reenviá:")
+    # ── Edición semanal: lo que Leo escribe al ajustar (pregunta, notas, asunto) ──
+    if context.user_data.get("awaiting_ed"):
+        aw = context.user_data["awaiting_ed"]
+        kw = {}
+        if aw["tipo"] == "pregunta":
+            if aw.get("paso") != "respuestas":
+                aw["pregunta"] = text_in.strip()
+                aw["paso"] = "respuestas"
+                await update.message.reply_text(
+                    "📊 Ahora las <b>RESPUESTAS</b>, una por línea (de 2 a 4).\n"
+                    "Si va con Sí / No / Ns-Nc, escribí solo: <b>sí/no</b>", parse_mode="HTML")
+                return
+            lineas = [l.strip(" -•\t") for l in text_in.split("\n") if l.strip(" -•\t")]
+            _sn = lineas[0].lower().replace("í", "i").replace(" ", "") if len(lineas) == 1 else ""
+            if _sn in ("si/no", "sino", "si-no"):
+                ops = []
+            elif 2 <= len(lineas) <= 4:
+                ops = lineas
+            else:
+                await update.message.reply_text(
+                    "Necesito entre 2 y 4 respuestas, una por línea, o «sí/no». Reenviá:")
+                return
+            kw = {"pregunta": aw["pregunta"], "opciones": ops}
+        elif aw["tipo"] == "principal":
+            kw = {"principal": text_in.strip()}
+        elif aw["tipo"] == "secundaria":
+            kw = {"secundaria": (int(aw["n"]), text_in.strip())}
+        elif aw["tipo"] == "asunto":
+            kw = {"asunto": text_in.strip()}
+        context.user_data.pop("awaiting_ed", None)
+        msg = await update.message.reply_text("⏳ Reescribiendo el borrador…")
+        E = _ed_mod()
+        try:
+            ok, err, ed = await asyncio.wait_for(
+                asyncio.to_thread(E.ajustar_edicion, aw["cid"], aw["ver"], **kw), timeout=240)
+        except Exception as _e:
+            ok, err, ed = False, "falló el ajuste: %s" % str(_e)[:150], None
+        if not ok:
+            await msg.edit_text("⚠️ " + err, parse_mode="HTML", reply_markup=_ed_kb(
+                [[("↩️ Volver al menú", "h_ed_aj:%s:%s" % (aw["cid"], aw["ver"]))]]))
             return
-        context.user_data["bol_opciones"] = ops
-        context.user_data["awaiting_bol_slugs"] = True
-        await update.message.reply_text(
-            f"✅ {len(ops)} opciones cargadas.\n📰 Ahora pasame los SLUGS o URLs de las notas, "
-            "en orden, separados por coma.")
-        return
-    if context.user_data.get("awaiting_bol_slugs"):
-        context.user_data.pop("awaiting_bol_slugs")
-        context.user_data["bol_slugs"] = text_in
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 Base completa", callback_data="h_bol_pub:base")],
-            [InlineKeyboardButton("👀 Lectores (abren)", callback_data="h_bol_pub:lectores")],
-            [InlineKeyboardButton("⚡ Activos (clickean)", callback_data="h_bol_pub:activos")]])
-        await update.message.reply_text(
-            "🎯 ¿A qué público de la base lo mando?", reply_markup=kb)
-        return
-    if context.user_data.get("awaiting_bol_hora"):
-        import re as _reh
-        info = context.user_data.get("awaiting_bol_hora")
-        m = _reh.match(r'^(\d{1,2}):(\d{2})$', text_in.strip())
-        if not m:
-            await update.message.reply_text("Hora inválida. Escribila como HH:MM (ej: 14:00):")
-            return
-        hh, mm = int(m.group(1)), int(m.group(2))
-        # Guard: hora ya pasada hoy → NO disparar; pedir una futura (o usar "Enviar ahora").
-        from datetime import datetime as _dtb, timezone as _tzb, timedelta as _tdb
-        _now_ar = _dtb.now(_tzb.utc) - _tdb(hours=3)
-        if (hh, mm) <= (_now_ar.hour, _now_ar.minute):
-            await update.message.reply_text(
-                f"⚠️ Las {hh:02d}:{mm:02d} ya pasaron (ahora {_now_ar.hour:02d}:{_now_ar.minute:02d}).\n"
-                "Mandá una hora FUTURA de hoy, o volvé a la tarjeta y tocá «✅ Enviar ahora».")
-            return   # sigue esperando la hora
-        context.user_data.pop("awaiting_bol_hora")
-        # Guardar hora y volver al menú: elegir la hora NO agenda nada. Solo «Confirmar envío»
-        # dispara el schedule. Podés cambiar la hora o cancelar sin mandar (pedido Leo 10/8).
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"✅ Confirmar envío {hh:02d}:{mm:02d}",
-                                  callback_data=f"h_bol_confirm:{info['cid']}:{info['publico']}:{hh:02d}{mm:02d}")],
-            [InlineKeyboardButton("🕐 Cambiar hora",
-                                  callback_data=f"h_bol_horaask:{info['cid']}:{info['publico']}")],
-            [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{info['cid']}")]])
-        await update.message.reply_text(
-            f"🗓️ <b>Boletín #{info['cid']}</b> — hora elegida: <b>{hh:02d}:{mm:02d}</b> ({info['publico']})\n"
-            f"No se manda hasta que toques <b>Confirmar envío</b>. Podés cambiar la hora o cancelar.",
-            reply_markup=kb, parse_mode="HTML")
+        await msg.edit_text(E.texto_vista_previa(ed), parse_mode="HTML",
+                            reply_markup=_ed_kb(E._botones(ed)), disable_web_page_preview=True)
         return
 
     # ── /encuesta: pregunta → opciones (2-6) → notas (1-4) → redes/acción ───────
@@ -5878,10 +5860,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nl = context.user_data.get("enc_nl")
         if not nl:
             await update.message.reply_text("⚠️ Se perdió el newsletter."); return
-        await update.message.reply_text(f"⏳ Programando el newsletter para {target.strftime('%d/%m %H:%M')}…")
-        txt = await _do_enc_newsletter(context, nl, target.strftime("%Y-%m-%d %H:%M:%S"))
-        context.user_data.pop("enc_nl", None)
-        await update.message.reply_text(txt, disable_web_page_preview=True)
+        # Escribir la hora ya NO programa (14/9/2026): hace falta tocar Confirmar, igual que en
+        # la edición semanal. Antes el texto disparaba el envío directo.
+        nl["cuando"] = target.strftime("%Y-%m-%d %H:%M:%S")
+        await update.message.reply_text(
+            f"📅 Newsletter de la encuesta a <b>{nl.get('base')}</b> para el {target.strftime('%d/%m %H:%M')}.\n"
+            "No se programa hasta que toques <b>Confirmar</b>.", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirmar programación", callback_data="enc_nl_conf")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="enc_nl_cancel")]]))
         return
 
     # ── /notamanual: enfoque manual / ajuste del enfoque (flujo estilo ME) ─────
@@ -6902,42 +6889,124 @@ async def _do_schedule(query, context, data, target):
         )
 
 
-def _boletin_enviar_ahora(cid, publico):
-    """Envía el boletín #cid YA (programa a la hora actual → sale de inmediato). (ok, texto)."""
+def _ed_mod():
+    """El módulo de la edición semanal del harness (agents/eventos.py)."""
     import sys as _s
-    _s.path.insert(0, "/opt/me-harness"); _s.path.insert(0, "/opt/me-harness/agents")
-    try:
-        import newsletter as _nl
-        from datetime import datetime, timezone, timedelta
-        now_ar = datetime.now(timezone.utc) - timedelta(hours=3)
-        sched = now_ar.strftime("%Y-%m-%d %H:%M:%S")
-        r = _nl.schedule_send(cid, sched)
-        if r.get("ok"):
-            warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
-            return True, (f"✅ <b>Boletín #{cid} ENVIADO</b> → {publico} ({r.get('recipients')} dest.){warn}\n"
-                          f"A +24h: feedback del funnel + nutrir bases + mejoras.")
-        return False, f"❌ No se pudo enviar #{cid}: {r.get('error')}"
-    except Exception as e:
-        return False, f"❌ Error enviando #{cid}: {str(e)[:160]}"
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    from agents import eventos as _e
+    return _e
 
 
-def _boletin_programar(cid, publico, hh, mm):
-    """Programa el envío del boletín #cid HOY a las hh:mm (AR) al público dado. (ok, texto)."""
-    import sys as _s
-    _s.path.insert(0, "/opt/me-harness"); _s.path.insert(0, "/opt/me-harness/agents")
+def _ed_kb(filas):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in fila]
+                                 for fila in filas])
+
+
+async def _edicion_callback(update, context, query):
+    """Botones de la edición semanal (esquema 14/9/2026). Cada botón lleva campaña y versión;
+    `eventos._validar` rechaza los de otra edición, los de una versión vieja, los de una edición
+    que ya no está en borrador y los vencidos. Nada sale sin OK + Confirmar."""
+    E = _ed_mod()
+    pv = query.data.split(":")
+    act = pv[0][len("h_ed_"):]
+    if len(pv) < 3:
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+    cid, ver, extra = pv[1], pv[2], pv[3:]
+    base = query.message.text_html if query.message.text else ""
+
+    async def _correr(fn, *a, **kw):
+        return await asyncio.wait_for(asyncio.to_thread(fn, *a, **kw), timeout=240)
+
+    async def _mostrar(par, err):
+        if not par:
+            await query.edit_message_text((base + "\n\n" if base else "") + "⚠️ " + err,
+                                          parse_mode="HTML", disable_web_page_preview=True)
+            return
+        txt, filas = par
+        await query.edit_message_text(txt, parse_mode="HTML", reply_markup=_ed_kb(filas),
+                                      disable_web_page_preview=True)
+
     try:
-        import newsletter as _nl
-        from datetime import datetime, timezone, timedelta
-        now_ar = datetime.now(timezone.utc) - timedelta(hours=3)
-        sched = now_ar.replace(hour=hh, minute=mm, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-        r = _nl.schedule_send(cid, sched)
-        if r.get("ok"):
-            warn = ("\n⚠️ " + r["warn"]) if r.get("warn") else ""
-            return True, (f"✅ <b>Boletín #{cid} programado</b> → {publico} ({r.get('recipients')} dest.)\n"
-                          f"🕐 Sale: {sched} (AR).\nA +24h: feedback del funnel + nutrir bases + mejoras.{warn}")
-        return False, f"❌ No se pudo programar #{cid}: {r.get('error')}"
-    except Exception as e:
-        return False, f"❌ Error programando #{cid}: {str(e)[:160]}"
+        if act == "ok":
+            await query.edit_message_text("⏳ Contando destinatarios…")
+            await _mostrar(*(await _correr(E.texto_confirmacion, cid, ver)))
+        elif act == "vol":
+            await _mostrar(*(await _correr(E.vista_previa, cid, ver)))
+        elif act == "aj":
+            await _mostrar(*(await _correr(E.menu_ajustar, cid, ver)))
+        elif act == "np":
+            await _mostrar(*(await _correr(E.menu_principal, cid, ver)))
+        elif act == "ns":
+            await _mostrar(*(await _correr(E.menu_secundarias, cid, ver)))
+        elif act == "cs":
+            await _mostrar(*(await _correr(E.menu_cambiar_secundaria, cid, ver, extra[0])))
+        elif act == "no":
+            ed, err = E._validar(cid, ver)
+            if not ed:
+                await _mostrar(None, err)
+                return
+            await query.edit_message_text(
+                "\U0001F6AB <b>¿Esta semana no sale boletín?</b>\nSe borra el borrador #%s." % cid,
+                parse_mode="HTML", reply_markup=_ed_kb([
+                    [("Sí, no sale esta semana", "h_ed_nos:%s:%s" % (cid, ver))],
+                    [("↩️ Volver", "h_ed_vol:%s:%s" % (cid, ver))]]))
+        elif act == "nos":
+            ok, txt = await _correr(E.cancelar_edicion, cid, ver)
+            await query.edit_message_text(txt, parse_mode="HTML")
+        elif act in ("go", "gof"):
+            await query.edit_message_text("⏳ Programando el envío…")
+            ok, txt = await _correr(E.confirmar_edicion, cid, ver, forzar=(act == "gof"))
+            if ok:
+                await query.edit_message_text(txt, parse_mode="HTML")
+            else:
+                await query.edit_message_text(txt, parse_mode="HTML", reply_markup=_ed_kb(
+                    [[("↩️ Volver a la vista previa", "h_ed_vol:%s:%s" % (cid, ver))]]))
+        elif act in ("sp", "ss"):
+            if act == "sp":
+                slug = E.candidata(extra[0])
+                kw = {"principal": slug}
+            else:
+                slug = E.candidata(extra[1])
+                kw = {"secundaria": (int(extra[0]), slug)}
+            if not slug:
+                await _mostrar(None, "No encontré esa nota entre las candidatas.")
+                return
+            await query.edit_message_text("⏳ Reescribiendo el borrador…")
+            ok, err, ed = await _correr(E.ajustar_edicion, cid, ver, **kw)
+            if not ok:
+                await query.edit_message_text("⚠️ " + err, parse_mode="HTML", reply_markup=_ed_kb(
+                    [[("↩️ Volver al menú", "h_ed_aj:%s:%s" % (cid, ver))]]))
+                return
+            await query.edit_message_text(E.texto_vista_previa(ed), parse_mode="HTML",
+                                          reply_markup=_ed_kb(E._botones(ed)),
+                                          disable_web_page_preview=True)
+        elif act in ("pq", "pp", "ps", "as"):
+            ed, err = E._validar(cid, ver)
+            if not ed:
+                await _mostrar(None, err)
+                return
+            for _k in ("awaiting_bol_pregunta", "awaiting_bol_opciones", "awaiting_bol_slugs",
+                       "awaiting_bol_hora"):
+                context.user_data.pop(_k, None)
+            tipo = {"pq": "pregunta", "pp": "principal", "ps": "secundaria", "as": "asunto"}[act]
+            aw = {"tipo": tipo, "cid": cid, "ver": ver}
+            if act == "ps":
+                aw["n"] = extra[0]
+            context.user_data["awaiting_ed"] = aw
+            pedido = {
+                "pregunta": "\U0001F5F3 Escribí la <b>PREGUNTA</b> de la encuesta.\nAhora: %s" % E._esc(ed.get("pregunta")),
+                "principal": "⭐ Pegá el <b>slug o la URL</b> de la nota principal.",
+                "secundaria": "\U0001F4F0 Pegá el <b>slug o la URL</b> de la secundaria %s." % (int(extra[0]) + 1 if extra else "?"),
+                "asunto": "✉️ Escribí el <b>ASUNTO</b> del mail.\nAhora: %s" % E._esc(ed.get("asunto")),
+            }[tipo]
+            await query.edit_message_text(pedido, parse_mode="HTML")
+        else:
+            await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as _e:
+        await query.edit_message_text("❌ Error en la edición semanal: %s" % str(_e)[:200])
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7756,12 +7825,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Error: {str(e)[:150]}", parse_mode="HTML")
         return
 
-    # ── Boletín semanal: arrancar la conversación (pregunta → opciones → slugs) ──
-    if query.data == "h_bol_start":
-        context.user_data["awaiting_bol_pregunta"] = True
+    # ── Edición semanal (esquema 14/9/2026): vista previa → OK / Ajustar / No sale ──
+    if query.data.startswith("h_ed_"):
+        await _edicion_callback(update, context, query)
+        return
+    # Botones del esquema viejo (armado conversacional, finde, «Enviar ahora» sin confirmar).
+    # Quedan en mensajes viejos del chat: no hacen nada.
+    if query.data.startswith("h_bol_"):
         await query.edit_message_text(
-            "🗳️ <b>Boletín semanal — Lectores</b>\n\nPasame la <b>PREGUNTA</b> de la encuesta.\n"
-            "Ej: ¿Qué va a influir más esta semana en tu empresa o negocio?", parse_mode="HTML")
+            "Este botón es del esquema viejo del boletín y ya no hace nada. Desde el 14/9 hay una "
+            "edición por semana: el lunes a las 10:30 llega la vista previa con OK o Ajustar.")
         return
 
     # ── /encuesta: toggles de redes + publicar / programar / cancelar ───────────
@@ -7804,6 +7877,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Sesión perdida", show_alert=True); return
         await query.edit_message_text("📤 Armando y enviando el newsletter…")
         txt = await _do_enc_newsletter(context, nl, None)
+        context.user_data.pop("enc_nl", None)
+        await query.edit_message_text(txt, disable_web_page_preview=True)
+        return
+    if query.data == "enc_nl_conf":
+        nl = context.user_data.get("enc_nl")
+        if not nl or not nl.get("cuando"):
+            await query.edit_message_text("Se perdió la sesión: el newsletter no se programó."); return
+        await query.edit_message_text("⏳ Programando el newsletter…")
+        txt = await _do_enc_newsletter(context, nl, nl["cuando"])
         context.user_data.pop("enc_nl", None)
         await query.edit_message_text(txt, disable_web_page_preview=True)
         return
@@ -7857,82 +7939,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data.pop("enc", None)
         await query.edit_message_text(txt, disable_web_page_preview=True)
-        return
-
-    # ── Boletín: elegido el público → armar el draft (GPT redacta la intro) ─────
-    if query.data.startswith("h_bol_pub:"):
-        publico = query.data.split(":")[1]
-        slugs = context.user_data.pop("bol_slugs", "")
-        preg  = context.user_data.pop("bol_pregunta", "")
-        ops   = context.user_data.pop("bol_opciones", None)
-        await query.edit_message_text(
-            f"⏳ Armando el boletín a <b>{publico}</b> (GPT redacta la intro con las notas)…",
-            parse_mode="HTML")
-        import sys as _sbp
-        _sbp.path.insert(0, "/opt/me-harness"); _sbp.path.insert(0, "/opt/me-harness/agents")
-        try:
-            import eventos as _ev
-            res = await asyncio.to_thread(_ev.build_boletin, slugs, preg, ops, None, publico)
-            if not res.get("ok"):
-                await query.edit_message_text(
-                    f"❌ No se pudo armar: {res.get('mensaje') or res.get('issues') or res.get('status')}",
-                    parse_mode="HTML")
-                return
-            cid = res["campaign_id"]
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Enviar ahora", callback_data=f"h_bol_send:{cid}:{publico}")],
-                [InlineKeyboardButton("📅 Programar (elegí la hora)", callback_data=f"h_bol_horaask:{cid}:{publico}")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data=f"h_bol_cancel:{cid}")]])
-            await query.edit_message_text(
-                f"📋 <b>Boletín listo — DRAFT #{cid}</b> → <b>{publico}</b>\n"
-                f"Asunto: {res.get('subject','')}\n"
-                f"Encuesta: {len(ops or [])} opciones · Notas: {slugs.count(',') + 1} · Intro GPT ✅\n\n"
-                f"Previsualizá: {res.get('preview')}\n\n¿Lo <b>envío ahora</b> o lo <b>programás</b> para una hora?",
-                parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error armando el boletín: {str(e)[:160]}", parse_mode="HTML")
-        return
-
-    # ── Boletín: ajustar hora (pedir HH:MM) ─────────────────────────────────────
-    if query.data.startswith("h_bol_horaask:"):
-        pv = query.data.split(":")
-        context.user_data["awaiting_bol_hora"] = {"cid": pv[1], "publico": pv[2] if len(pv) >= 3 else "lectores"}
-        await query.edit_message_text("🕐 Escribí la hora de envío (hoy), formato HH:MM. Ej: 14:00",
-                                      parse_mode="HTML")
-        return
-
-    # ── Boletín: CONFIRMAR la programación (recién acá dispara el schedule) ───────
-    if query.data.startswith("h_bol_confirm:"):
-        pv = query.data.split(":"); cid = pv[1]
-        publico = pv[2] if len(pv) >= 3 else "lectores"
-        hhmm = pv[3] if len(pv) >= 4 else "1030"
-        hh, mm = int(hhmm[:2]), int(hhmm[2:])
-        await query.edit_message_text(f"⏳ Programando #{cid} ({hh:02d}:{mm:02d})…", parse_mode="HTML")
-        ok, txt = await asyncio.to_thread(_boletin_programar, cid, publico, hh, mm)
-        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
-        return
-
-    # ── Boletín: programar el envío (hora fija 10:30 o ajustada) o cancelar ──────
-    # ── Boletín: ENVIAR ahora ───────────────────────────────────────────────────
-    if query.data.startswith("h_bol_send:"):
-        pv = query.data.split(":"); cid = pv[1]; publico = pv[2] if len(pv) >= 3 else "lectores"
-        await query.edit_message_text(f"⏳ Enviando boletín #{cid} a {publico}…", parse_mode="HTML")
-        ok, txt = await asyncio.to_thread(_boletin_enviar_ahora, cid, publico)
-        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
-        return
-
-    if query.data.startswith("h_bol_sched:") or query.data.startswith("h_bol_cancel:"):
-        pv = query.data.split(":"); cid = pv[1]
-        if pv[0] == "h_bol_cancel":
-            await query.edit_message_text(f"❌ Boletín #{cid} cancelado (queda como draft en FluentCRM).",
-                                          parse_mode="HTML")
-            return
-        publico = pv[2] if len(pv) >= 3 else "lectores"
-        hhmm = pv[3] if len(pv) >= 4 else "1030"
-        hh, mm = int(hhmm[:2]), int(hhmm[2:])
-        await query.edit_message_text(f"⏳ Programando #{cid} ({hh:02d}:{mm:02d})…", parse_mode="HTML")
-        ok, txt = await asyncio.to_thread(_boletin_programar, cid, publico, hh, mm)
-        await query.edit_message_text(txt, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     if (query.data.startswith("h_tip_accept:") or
