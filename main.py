@@ -6911,6 +6911,9 @@ async def _edicion_callback(update, context, query):
     E = _ed_mod()
     pv = query.data.split(":")
     act = pv[0][len("h_ed_"):]
+    # Cada toque queda en el log: el 14/9 hubo que reconstruir qué se había apretado por la hora
+    # en que cambió boletin_edicion.json.
+    logger.info("edicion semanal: boton %s (%s)", act, query.data)
     if len(pv) < 3:
         await query.edit_message_reply_markup(reply_markup=None)
         return
@@ -6959,6 +6962,7 @@ async def _edicion_callback(update, context, query):
         elif act in ("go", "gof"):
             await query.edit_message_text("⏳ Programando el envío…")
             ok, txt = await _correr(E.confirmar_edicion, cid, ver, forzar=(act == "gof"))
+            logger.info("edicion semanal: confirmar #%s v%s -> ok=%s %s", cid, ver, ok, str(txt)[:160])
             if ok:
                 await query.edit_message_text(txt, parse_mode="HTML")
             else:
@@ -7006,6 +7010,7 @@ async def _edicion_callback(update, context, query):
         else:
             await query.edit_message_reply_markup(reply_markup=None)
     except Exception as _e:
+        logger.exception("edicion semanal: error en %s: %s", query.data, _e)
         await query.edit_message_text("❌ Error en la edición semanal: %s" % str(_e)[:200])
 
 
