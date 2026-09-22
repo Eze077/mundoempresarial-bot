@@ -16669,6 +16669,12 @@ def _pdf_to_text(path: str):
 _AUTOR_BIO = {
     "leo bilanski": "https://mundoempresarial.ar/leo-ezequiel-bilanski/",
 }
+# Usuario de WordPress de cada autor: la columna se publica A SU NOMBRE (recuadro de autor,
+# archivo /author/… y campo author del schema). Sin esto, todo salía como «Equipo Mundo
+# Empresarial», el usuario técnico del bot. Ver [[nota_manual_verbatim]].
+_AUTOR_WP = {
+    "leo bilanski": 6,
+}
 
 
 def _h_esc(s: str) -> str:
@@ -16959,7 +16965,12 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "",
     if not integridad["ok"]:
         logger.warning("nota manual: el cuerpo quedó en %d de %d palabras del documento",
                        integridad["nota"], integridad["doc"])
-    return {"integridad": integridad,
+    autor_wp = 0
+    for _nom, _uid in _AUTOR_WP.items():
+        if _nom in autor.lower():
+            autor_wp = _uid
+            break
+    return {"integridad": integridad, "autor_wp_id": autor_wp,
             "title": title, "excerpt": bajada or cuerpo[:160], "content_html": body_html,
             "bullets": bullets, "h2_headings": h2, "category_ids": cat_ids,
             "tag_names": tags, "hashtags": hts, "focus_keyword": kw, "autor": autor,
@@ -16988,6 +16999,7 @@ def _crear_job_nota_manual(d: dict, modo: str, hilo: int = 3) -> int:
         # Una columna es una nota deliberada y autónoma: nunca se consolida en otra.
         "skip_consolidacion": True, "title_locked": True,
         "es_nota_manual": True, "manual_modo": modo, "manual_submission": True,
+        "autor_wp_id": d.get("autor_wp_id", 0),
         "pdf_images": d.get("pdf_images", 0), "hilo": hilo,
     }
     return _br.enqueue("curado", source_url=d["source_url"], title=d["title"],
