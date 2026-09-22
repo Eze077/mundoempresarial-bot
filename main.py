@@ -6889,6 +6889,46 @@ async def _do_schedule(query, context, data, target):
         )
 
 
+def _xc_mod():
+    """La cola de reintento de X del harness (agents/x_cola.py)."""
+    import sys as _s
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    from agents import x_cola as _x
+    return _x
+
+
+async def _xcola_callback(update, context, query):
+    """Botones del aviso de X (22/9/2026): «👀 Visto» solo saca los botones; «✅ Corregido»
+    prueba si el servicio volvió y, si volvió, manda lo que quedó en la cola."""
+    logger.info("x_cola: boton %s", query.data)
+    if query.data == "xc_visto":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    X = _xc_mod()
+    pend = await asyncio.to_thread(X.pendientes)
+    await query.edit_message_text("⏳ Probando si X volvió… (%d en la cola)" % len(pend),
+                                  parse_mode="HTML")
+    if not pend:
+        # Sin cola no hay con qué probar: publica un tweet de chequeo y lo borra (US$0,015).
+        r = await asyncio.to_thread(X.probar)
+        if r.get("ok"):
+            await query.edit_message_text(
+                "✅ X volvió a publicar (tuit de prueba enviado y borrado). "
+                "No quedaba nada en la cola.", parse_mode="HTML")
+        else:
+            await query.edit_message_text(
+                "❌ X sigue sin publicar: <code>%s</code>" % str(r.get("error", ""))[:150],
+                parse_mode="HTML")
+        return
+    res = await asyncio.to_thread(X.flush, 12, True)
+    await query.edit_message_text(X.texto_resultado(res), parse_mode="HTML")
+
+
 def _ed_mod():
     """El módulo de la edición semanal del harness (agents/eventos.py)."""
     import sys as _s
@@ -7828,6 +7868,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML")
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {str(e)[:150]}", parse_mode="HTML")
+        return
+
+    # ── Cola de reintento de X: «Visto» / «Corregido» del aviso de 402 ──
+    if query.data in ("xc_visto", "xc_fix"):
+        await _xcola_callback(update, context, query)
         return
 
     # ── Edición semanal (esquema 14/9/2026): vista previa → OK / Ajustar / No sale ──
