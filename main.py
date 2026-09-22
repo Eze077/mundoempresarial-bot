@@ -16664,6 +16664,101 @@ def _pdf_to_text(path: str):
         return "", 0
 
 
+# Bio del autor para enlazar la firma de las columnas (antes la firma era texto plano y
+# el bot enlazaba a una búsqueda interna). Ver [[nota_manual_verbatim]].
+_AUTOR_BIO = {
+    "leo bilanski": "https://mundoempresarial.ar/leo-ezequiel-bilanski/",
+}
+
+
+def _h_esc(s: str) -> str:
+    import html as _h
+    return _h.escape(s or "", quote=False)
+
+
+def _doc_parrafos(raw_text: str) -> str:
+    """Reconstruye los párrafos de un documento (PDF/txt) y saca la basura de página.
+
+    pypdf devuelve UNA LÍNEA POR RENGLÓN VISUAL, sin líneas en blanco entre párrafos: el
+    documento entero llegaba como un bloque y había que adivinar. Acá se rearma:
+      · se tiran los encabezados/pies repetidos en 3+ páginas y los «4 / 7»,
+      · un renglón cierra párrafo si termina en puntuación de cierre o si es NOTORIAMENTE
+        más corto que el ancho de la caja de texto (última línea del párrafo, o subtítulo),
+      · después se vuelven a pegar los subtítulos partidos en dos renglones y las líneas
+        sueltas de URL o dominio, que si no quedarían como subtítulos falsos.
+    Devuelve el texto con una línea en blanco entre párrafos, listo para `_format_columna_html`,
+    que es determinístico: sin IA de por medio no hay forma de que se pierda ni se cambie una
+    palabra. Nació del corte de la columna del 20/9/2026 (39% del texto perdido)."""
+    lineas = [l.rstrip() for l in (raw_text or "").replace("\r\n", "\n").split("\n")]
+    lineas = [l for l in lineas if l.strip()]
+    if not lineas:
+        return ""
+
+    # 1) pies y encabezados de página: el mismo renglón repetido 3+ veces
+    from collections import Counter
+    repes = Counter(l.strip() for l in lineas if len(l.strip()) <= 90)
+    basura = {t for t, n in repes.items() if n >= 3 and len(t) > 3}
+    num_pag = re.compile(r"^\s*(?:p[áa]g(?:ina)?\.?\s*)?\d{1,3}\s*(?:/|de)\s*\d{1,3}\s*$|^\s*\d{1,3}\s*$", re.I)
+    lineas = [l for l in lineas if l.strip() not in basura and not num_pag.match(l.strip())]
+    if not lineas:
+        return ""
+
+    # 2) ancho de la caja de texto: percentil 80 de los renglones
+    largos = sorted(len(l) for l in lineas)
+    ancho = largos[min(int(len(largos) * 0.8), len(largos) - 1)]
+    corte_corto = ancho * 0.72
+    cierra = (".", "?", "!", ":", "…", "»", '"', ";")
+
+    parrafos, actual = [], []
+    for l in lineas:
+        actual.append(l.strip())
+        if l.rstrip().endswith(cierra) or len(l) < corte_corto:
+            parrafos.append(" ".join(actual))
+            actual = []
+    if actual:
+        parrafos.append(" ".join(actual))
+
+    # 3) volver a pegar lo que no era un párrafo nuevo:
+    #    · un subtítulo partido en dos renglones («…hace quince años que» / «están mirando»),
+    #    · una URL o dominio suelto, que pertenece a la línea de fuente anterior.
+    solo_url = re.compile(r"^(?:https?://\S+|[a-z0-9.\-]+\.(?:ar|com|org|gob|net|gov|edu)(?:\.[a-z]{2})?(?:/\S*)?)$", re.I)
+    unidos = []
+    for p in parrafos:
+        p = " ".join(p.split())
+        if unidos:
+            prev = unidos[-1]
+            sigue_titulo = (not prev.rstrip().endswith(cierra) and not prev.rstrip().endswith(",")
+                            and p[:1].islower())
+            if sigue_titulo or solo_url.match(p):
+                unidos[-1] = prev + " " + p
+                continue
+        unidos.append(p)
+    return "\n\n".join(x for x in unidos if x)
+
+
+def _doc_sin_titulo_ni_firma(texto: str, title: str = ""):
+    """Saca del texto del documento el título y la línea de firma: el título ya va en el campo
+    título de WordPress y la firma la agrega el bot con su formato. Devuelve (cuerpo, firma)."""
+    bloques = [b.strip() for b in re.split(r"\n\s*\n", texto or "") if b.strip()]
+    if not bloques:
+        return "", ""
+    norm = lambda s: re.sub(r"\s+", " ", (s or "")).strip().lower()
+    if title:
+        if norm(bloques[0]) == norm(title):
+            bloques.pop(0)
+        elif norm(bloques[0]).startswith(norm(title)):
+            bloques[0] = bloques[0][len(title):].strip(" -–—:")
+            if not bloques[0]:
+                bloques.pop(0)
+    firma = ""
+    for i, b in enumerate(bloques[:3]):
+        if re.match(r"^por\s+[A-ZÁÉÍÓÚÑ]", b.strip(), re.I) and len(b) <= 200:
+            firma = b.strip()
+            bloques.pop(i)
+            break
+    return "\n\n".join(bloques), firma
+
+
 def _gpt_nota_manual_extract(raw_text: str):
     """GPT separa la columna cruda en campos. Preserva la voz del autor; no inventa."""
     if not OPENAI_API_KEY:
@@ -16684,7 +16779,7 @@ def _gpt_nota_manual_extract(raw_text: str):
         '}\n'
         "REGLAS: No inventes datos. No cambies la postura ni la tesis del autor. "
         "Espanol rioplatense. Devolve SOLO el JSON.\n\n"
-        "TEXTO:\n" + raw_text[:9000]
+        "TEXTO:\n" + raw_text[:14000]   # 9000 cortaba las columnas largas (20/9/2026)
     )
     try:
         r = openai_post(
@@ -16793,7 +16888,8 @@ def _format_columna_html(cuerpo: str) -> dict:
     return _cols_det_html(blocks or [cuerpo])
 
 
-def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "") -> dict:
+def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "",
+                            fuente_texto: str = "") -> dict:
     """Arma el data listo para publicar. `modo`:
     - 'tal_cual' (recomendado): PRESERVA el texto del autor, solo lo formatea (sin reescribir).
     - 'estilo_me': lo reescribe al formato del diario (bullets + secciones + resumen pymes).
@@ -16801,7 +16897,14 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "")
     title  = (ex.get("title") or "").strip()
     bajada = (ex.get("bajada") or "").strip()
     autor  = (ex.get("autor") or "").strip()
+    # El cuerpo sale del DOCUMENTO, no de la IA: el extractor tenía tope de 9.000 chars y
+    # devolvía el texto "tal cual" sin verificación — se perdió el 39% de la columna del
+    # 20/9/2026 y cambió palabras. La IA solo aporta título, bajada, autor y etiquetas.
     cuerpo = (ex.get("cuerpo") or "").strip()
+    if fuente_texto:
+        cuerpo_doc, _firma_doc = _doc_sin_titulo_ni_firma(fuente_texto, title)
+        if len(re.findall(r"\w+", cuerpo_doc)) >= len(re.findall(r"\w+", cuerpo)):
+            cuerpo = cuerpo_doc
     kw = focus_keyword(title)
     _fallback = "<p>" + "</p><p>".join(p.strip() for p in cuerpo.split("\n\n") if p.strip()) + "</p>"
     if modo == "estilo_me":
@@ -16821,8 +16924,17 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "")
         bullets = fmt["bullets"]
         h2      = fmt["h2_headings"]
     if autor:
+        # La firma enlaza a la bio del autor cuando la conocemos.
+        autor_html = _h_esc(autor)
+        for _nom, _url in _AUTOR_BIO.items():
+            m_bio = re.search(re.escape(_nom).replace(r"\ ", r"\s+"), autor, re.I)
+            if m_bio:
+                autor_html = (_h_esc(autor[:m_bio.start()])
+                              + '<a href="%s">%s</a>' % (_url, _h_esc(m_bio.group(0)))
+                              + _h_esc(autor[m_bio.end():]))
+                break
         byline = ('<p style="font-size:14px;color:#15487F;border-left:4px solid #E97C1E;'
-                  'padding-left:12px;margin:0 0 20px;">Por <strong>' + autor + '</strong></p>')
+                  'padding-left:12px;margin:0 0 20px;">Por <strong>' + autor_html + '</strong></p>')
         body_html = byline + body_html
     try:
         cat_ids = detect_categories(title, cuerpo, bajada) or []
@@ -16841,7 +16953,14 @@ def _build_nota_manual_data(ex: dict, modo: str = "tal_cual", enfoque: str = "")
     hts = list(dict.fromkeys(hts))[:5]
     if not hts:
         hts = ["#" + re.sub(r"\s+", "", t) for t in tags[:4]]
-    return {"title": title, "excerpt": bajada or cuerpo[:160], "content_html": body_html,
+    pal = lambda t: len(re.findall(r"\w+", re.sub(r"<[^>]+>", " ", t or "")))
+    integridad = {"doc": pal(cuerpo), "nota": pal(body_html)}
+    integridad["ok"] = (modo != "tal_cual" or integridad["nota"] >= integridad["doc"] * 0.98)
+    if not integridad["ok"]:
+        logger.warning("nota manual: el cuerpo quedó en %d de %d palabras del documento",
+                       integridad["nota"], integridad["doc"])
+    return {"integridad": integridad,
+            "title": title, "excerpt": bajada or cuerpo[:160], "content_html": body_html,
             "bullets": bullets, "h2_headings": h2, "category_ids": cat_ids,
             "tag_names": tags, "hashtags": hts, "focus_keyword": kw, "autor": autor,
             "formato": "continua", "portada": False,
@@ -17089,7 +17208,12 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
     if len(raw_text) < 400:
         await update.message.reply_text("⚠️ El texto es muy corto para una nota. Pegá la columna completa (mín. ~400 caracteres).")
         return
-    ex = await asyncio.to_thread(_gpt_nota_manual_extract, raw_text)
+    # El documento se rearma en párrafos ANTES de tocar la IA, y ese texto es el que se
+    # publica en modo «tal cual». La IA solo lee para proponer título, bajada y etiquetas.
+    limpio = await asyncio.to_thread(_doc_parrafos, raw_text)
+    if len(limpio) < len(raw_text) * 0.5:      # el reconstructor se comió texto: uso el crudo
+        limpio = raw_text
+    ex = await asyncio.to_thread(_gpt_nota_manual_extract, limpio)
     if not ex:
         m = "❌ No pude procesar el texto (GPT). Reintentá en un momento."
         if status_msg: await status_msg.edit_text(m)
@@ -17097,7 +17221,8 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
         return
     # Elegir el TRATAMIENTO antes de armar (botones): tal cual (preserva) vs estilo ME (reescribe)
     import html as _hh
-    context.user_data["nota_manual_ex"] = {"ex": ex, "pdf_images": pdf_images}
+    context.user_data["nota_manual_ex"] = {"ex": ex, "pdf_images": pdf_images,
+                                           "texto": limpio}
     context.user_data.pop("nota_manual", None)
     if status_msg:
         try: await status_msg.edit_text("📝 Columna recibida.")
@@ -17185,7 +17310,8 @@ async def _nm_estilo_procesar(update, context):
     enfoque = context.user_data.get("nm_enfoque") or ""
     st = await context.bot.send_message(chat_id=update.effective_chat.id,
                                         text="🧩 Redactando estilo ME con ese enfoque…")
-    d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], "estilo_me", enfoque)
+    d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], "estilo_me", enfoque,
+                                stash.get("texto", ""))
     d["pdf_images"] = stash.get("pdf_images", 0)
     context.user_data["nm_d"] = d
     try:
@@ -17326,8 +17452,19 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         modo = "tal_cual"
         etq = "tal cual (tu texto)"
         await q.edit_message_text(f"🧩 Armando la nota — {etq}…")
-        d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], modo)
+        d = await asyncio.to_thread(_build_nota_manual_data, stash["ex"], modo,
+                                    "", stash.get("texto", ""))
         d["pdf_images"] = stash.get("pdf_images", 0)
+        # Guard de integridad: si el cuerpo quedó más corto que el documento, no se publica
+        # mutilado sin avisar (el 20/9 se publicó el 61% de una columna y nadie se enteró).
+        _integ = d.get("integridad") or {}
+        if _integ and not _integ.get("ok"):
+            await q.message.reply_text(
+                "⚠️ <b>Se perdió texto en el camino</b>: el documento tiene %d palabras y el "
+                "cuerpo armado %d. NO la publico así. Probá con el texto pegado o avisame."
+                % (_integ.get("doc", 0), _integ.get("nota", 0)), parse_mode="HTML")
+            context.user_data.pop("nota_manual_ex", None)
+            return
         context.user_data.pop("nota_manual_ex", None)
         context.user_data.pop("nota_manual", None)
         try:
