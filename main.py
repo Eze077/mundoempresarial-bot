@@ -6546,7 +6546,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["awaiting_wm_foto_for"] = _wmf_job
             await update.message.reply_text("Mandá una URL válida (https://) o enviá la foto directamente.")
             return
-        msg = await update.message.reply_text("⏳ Subiendo la foto (con watermark)…")
+        msg = await update.message.reply_text("⏳ Subiendo la foto…")
         try:
             import sys as _sy_wu, json as _js_wu, sqlite3 as _sq_wu
             _sy_wu.path.insert(0, "/opt/me-harness")
@@ -6556,6 +6556,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: _cj = _js_wu.loads(_job.get("content_json") or "{}")
             except Exception: pass
             _wmon = not _cj.get("sin_watermark", False)
+            try:      # guardo el original para poder rehacerla si cambia el botón de marca
+                _orig = await asyncio.to_thread(lambda: requests.get(_u, timeout=30).content)
+                _foto_guardar_original(_wmf_job, _orig)
+            except Exception:
+                pass
             mid = await asyncio.to_thread(upload_image, _u, "", _wmon)
         except Exception as e:
             await msg.edit_text(f"❌ No pude subir la foto: {e}")
@@ -6887,6 +6892,52 @@ async def _do_schedule(query, context, data, target):
             parse_mode="Markdown",
             reply_markup=_build_eco_kb(eco),
         )
+
+
+_FOTOS_ORIG = "/opt/me-harness/fotos_job"
+
+
+def _foto_guardar_original(job_id: int, data: bytes):
+    """Guarda la foto ORIGINAL (sin marca) de un job, para poder rehacerla si Leo cambia el
+    botón de marca de agua después de subirla. Ver `_foto_rehacer`."""
+    try:
+        os.makedirs(_FOTOS_ORIG, exist_ok=True)
+        with open(os.path.join(_FOTOS_ORIG, "%d.bin" % job_id), "wb") as f:
+            f.write(data)
+    except Exception as e:
+        logger.debug("no pude guardar el original de la foto del job %s: %s", job_id, e)
+
+
+def _foto_rehacer(job_id: int, con_marca: bool):
+    """Vuelve a subir la foto del job desde el original, con o sin marca de agua. Devuelve el
+    media_id nuevo, o None si no hay original guardado. Borra la versión anterior."""
+    ruta = os.path.join(_FOTOS_ORIG, "%d.bin" % job_id)
+    if not os.path.exists(ruta):
+        return None
+    import sys as _s, json as _j, sqlite3 as _q
+    _s.path.insert(0, "/opt/me-harness")
+    import broker as _b
+    job = _b.get_job(job_id) or {}
+    try:
+        cj = _j.loads(job.get("content_json") or "{}")
+    except Exception:
+        cj = {}
+    with open(ruta, "rb") as f:
+        data = f.read()
+    mid = upload_image_bytes(data, "jpg", "", con_marca)
+    if not mid:
+        return None
+    viejo = cj.get("image_id_override")
+    cj["image_id_override"] = mid
+    with _q.connect("/opt/me-harness/harness.db") as c:
+        c.execute("UPDATE jobs SET content_json=? WHERE id=?", (_j.dumps(cj, ensure_ascii=False), job_id))
+    if viejo and viejo != mid:
+        try:
+            requests.delete("%s/wp-json/wp/v2/media/%s?force=true" % (WP_URL, viejo),
+                            headers=wp_auth(), timeout=20)
+        except Exception:
+            pass
+    return mid
 
 
 def _xc_mod():
@@ -10660,8 +10711,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state  = _load_state(job_id)
                 state["sin_watermark"] = not state.get("sin_watermark", False)
                 _save_state(job_id, state)
+                # La marca se quema al subir la foto: si ya había una cargada, se rehace desde
+                # el original con el ajuste nuevo (26/9/2026, nota #51563 salió marcada).
+                rehecha = None
+                if state.get("image_id_override"):
+                    rehecha = await asyncio.to_thread(_foto_rehacer, job_id,
+                                                      not state["sin_watermark"])
+                    if rehecha:
+                        state = _load_state(job_id)
                 await query.edit_message_reply_markup(reply_markup=_cur.build_card_keyboard(job_id, state))
-                await query.answer("Sin marca de agua" if state["sin_watermark"] else "Con marca de agua", show_alert=False)
+                _txt_wm = "Sin marca de agua" if state.get("sin_watermark") else "Con marca de agua"
+                if state.get("image_id_override") and not rehecha:
+                    _txt_wm += " — ojo: la foto ya cargada NO cambia, volvé a mandarla"
+                elif rehecha:
+                    _txt_wm += " — foto rehecha"
+                await query.answer(_txt_wm, show_alert=bool(state.get("image_id_override")))
 
             # Cambiar la foto de la nota del briefing (con watermark, sin tocar el stage)
             elif action == "h_cur_foto" and len(parts) >= 2:
@@ -13183,7 +13247,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     _wmf_job = context.user_data.get("awaiting_wm_foto_for")
     if _wmf_job:
         context.user_data.pop("awaiting_wm_foto_for", None)
-        msg = await update.message.reply_text("⏳ Subiendo la foto (con watermark)…")
+        msg = await update.message.reply_text("⏳ Subiendo la foto…")
         try:
             photo = update.message.photo[-1]
             file  = await photo.get_file(read_timeout=30, connect_timeout=15)
@@ -13197,6 +13261,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             try: _cj = _js_wf.loads(_job.get("content_json") or "{}")
             except Exception: pass
             _wmon = not _cj.get("sin_watermark", False)
+            _foto_guardar_original(_wmf_job, dl.content)
             mid = await asyncio.to_thread(upload_image_bytes, dl.content, "jpg", "", _wmon)
         except Exception as e:
             await msg.edit_text(f"❌ No pude subir la foto: {e}")
