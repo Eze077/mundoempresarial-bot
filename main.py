@@ -3609,6 +3609,7 @@ def _whisper_from_url(url: str, proxy: str | None = None, cookies: str | None = 
             "quiet": True,
             "no_warnings": True,
             "socket_timeout": 60,
+            "max_filesize": 30 * 1024 * 1024,   # no bajar un archivo que Whisper va a rechazar
             "http_headers": {"User-Agent": HEADERS_BROWSER["User-Agent"]},
         }
         if proxy:
@@ -3739,8 +3740,15 @@ def _scrape_instagram(url: str) -> dict:
         logger.info(f"Instagram Whisper: {len(transcript)} chars")
     elif duration > 600:
         logger.info(f"Instagram Whisper: omitido, duración {duration:.0f}s > 10 min")
+    elif OPENAI_API_KEY:
+        # Instagram dejó de informar la duración (28/9/2026): con `duration=0` el reel se
+        # publicaba con el epígrafe solo, sin lo que se DICE, que es el contenido real. Se
+        # intenta igual; _whisper_from_url corta por tamaño (24,5 MB) y por timeout.
+        logger.info("Instagram Whisper: duración desconocida — intento igual")
+        transcript = _whisper_from_url(clean_url, cookies=INSTAGRAM_COOKIES)
+        logger.info(f"Instagram Whisper: {len(transcript)} chars")
     else:
-        logger.info("Instagram Whisper: omitido (sin OPENAI_API_KEY o duración=0)")
+        logger.info("Instagram Whisper: omitido (sin OPENAI_API_KEY)")
 
     # 3) Texto principal = transcripción (lo que se dijo en el video)
     #    Caption limpio solo como contexto adicional si el transcript es corto
