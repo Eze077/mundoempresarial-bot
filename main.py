@@ -7072,6 +7072,60 @@ async def cmd_livingnotes(update, context):
                                     disable_web_page_preview=True)
 
 
+def _lb_mod():
+    """El armador de fichas vivas del harness (agents/living_builder.py)."""
+    import sys as _s
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    from agents import living_builder as _lb
+    return _lb
+
+
+def _lnb_kb(wp_id: int, edit_url: str) -> dict:
+    """Botones de la ficha recién armada. Nace borrador: publicar lo decide Leo."""
+    return {"inline_keyboard": [
+        [{"text": "🚀 Publicarla", "callback_data": "h_lnb:pub:%d" % wp_id},
+         {"text": "📝 Abrir en WP", "url": edit_url}],
+        [{"text": "🗑️ Tirar el borrador", "callback_data": "h_lnb:del:%d" % wp_id}]]}
+
+
+async def _ln_armar(query, context, idx: int):
+    """Arma la ficha de la propuesta `idx` y la manda para leer."""
+    espera = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=("🏗️ Armando la ficha…" + chr(10) +
+              "<i>junto las fuentes, la redacto y la controlan dos motores. Tarda un par de minutos.</i>"),
+        parse_mode="HTML")
+    try:
+        res = await asyncio.to_thread(_lb_mod().armar, idx)
+    except Exception as e:
+        logger.warning("armar living note #%s: %s", idx, e)
+        res = {"ok": False, "error": str(e)[:160]}
+    try:
+        await espera.delete()
+    except Exception:
+        pass
+    if not res.get("ok"):
+        await context.bot.send_message(chat_id=query.message.chat_id,
+                                       text="⚠️ No pude armarla: %s" % res.get("error", "sin motivo"))
+        return
+    cab = ["🏗️ <b>Ficha armada</b> — queda como borrador",
+           "📄 %s" % _h_esc(res.get("titulo", "")),
+           "%s palabras · %s fuentes · revisión %s" % (res.get("palabras"), res.get("fuentes"),
+                                                       res.get("frecuencia")),
+           "🧑‍⚖️ el control corrigió %s cosas y agregó %s datos que faltaban"
+           % (res.get("objeciones", 0), res.get("sumadas", 0))]
+    if res.get("huerfanas"):
+        cab.append("⚠️ cifras sin fuente: %s" % _h_esc(", ".join(res["huerfanas"][:5])))
+    await context.bot.send_message(chat_id=query.message.chat_id, text=chr(10).join(cab),
+                                   parse_mode="HTML", disable_web_page_preview=True,
+                                   reply_markup=_lnb_kb(res["wp_post_id"], res["edit"]))
+    for trozo in (res.get("texto") or []):
+        await context.bot.send_message(chat_id=query.message.chat_id, text=trozo,
+                                       parse_mode="HTML", disable_web_page_preview=True)
+
+
 def _comite_mod():
     """El comité de living notes del harness (agents/comite_living.py)."""
     import sys as _s
@@ -7084,7 +7138,7 @@ def _comite_mod():
 
 def _ln_kb(idx: int, dic: dict) -> dict:
     """Botones del dictamen. El índice es el de la propuesta en la lista."""
-    filas = [[{"text": "✅ Hacerla", "callback_data": "h_ln_ok:%d" % idx},
+    filas = [[{"text": "🏗️ Hacerla", "callback_data": "h_ln_ok:%d" % idx},
               {"text": "🔁 Reevaluar", "callback_data": "h_ln_fb:%d" % idx}]]
     if dic.get("complementa"):
         filas.append([{"text": "🔗 Complementar la que existe",
@@ -8134,17 +8188,47 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _estado = {"h_ln_ok": "aprobada", "h_ln_no": "descartada",
                    "h_ln_comp": "complementar"}[_acc]
         _p = C.set_estado(_idx, _estado)
-        _msg = {"aprobada": "✅ Aprobada: queda en la cola para armarla.",
-                "descartada": "🗑️ Descartada.",
-                "complementar": "🔗 Anotada para complementar «%s»."
-                                % ((_p.get("ultimo_dictamen") or {}).get("complementa") or "")}[_estado]
         logger.info("living note propuesta #%s → %s", _idx, _estado)
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        if _acc == "h_ln_ok":
+            # «Aprobada» era una etiqueta y nada la armaba: ahora se arma acá mismo.
+            await query.answer("🏗️ La armo ahora")
+            await _ln_armar(query, context, _idx)
+            return
+        _msg = {"descartada": "🗑️ Descartada.",
+                "complementar": "🔗 Anotada para complementar «%s»."
+                                % ((_p.get("ultimo_dictamen") or {}).get("complementa") or "")}[_estado]
         await query.answer()
         await query.message.reply_text(_msg)
+        return
+
+    # ── Ficha armada: publicar o tirar el borrador ───────────────────────────
+    if query.data.startswith("h_lnb:"):
+        _, _acc_lnb, _wp_lnb = query.data.split(":", 2)
+        LB = _lb_mod()
+        try:
+            if _acc_lnb == "pub":
+                await query.answer("Publicando…")
+                _r_lnb = await asyncio.to_thread(LB.publicar, int(_wp_lnb))
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await query.message.reply_text("🚀 Publicada: %s" % _r_lnb.get("url", ""),
+                                               disable_web_page_preview=False)
+            else:
+                _ok_lnb = await asyncio.to_thread(LB.borrar_borrador, int(_wp_lnb))
+                await query.answer("🗑️ A la papelera" if _ok_lnb else "No pude borrarlo")
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+        except Exception as _e_lnb:
+            logger.warning("ficha armada %s: %s", query.data, _e_lnb)
+            await query.answer("Error: %s" % str(_e_lnb)[:60], show_alert=True)
         return
 
     # ── Cola de reintento de X: «Visto» / «Corregido» del aviso de 402 ──
