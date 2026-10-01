@@ -5709,6 +5709,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
         return
 
+    # ── Devolución de Leo al comité de living notes: vuelven a dictaminar con eso ──
+    if context.user_data.get("awaiting_ln_feedback") is not None:
+        _idx_ln = context.user_data.pop("awaiting_ln_feedback")
+        _fb_ln = (update.message.text or "").strip()
+        if not _fb_ln:
+            await update.message.reply_text("Mandame la devolución en texto.")
+            return
+        await _ln_dictamen(update, context, int(_idx_ln), feedback=_fb_ln)
+        return
+
     # ── Edición semanal: lo que Leo escribe al ajustar (pregunta, notas, asunto) ──
     if context.user_data.get("awaiting_ed"):
         aw = context.user_data["awaiting_ed"]
@@ -6962,6 +6972,55 @@ def _foto_rehacer(job_id: int, con_marca: bool):
     return mid
 
 
+def _comite_mod():
+    """El comité de living notes del harness (agents/comite_living.py)."""
+    import sys as _s
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    from agents import comite_living as _c
+    return _c
+
+
+def _ln_kb(idx: int, dic: dict) -> dict:
+    """Botones del dictamen. El índice es el de la propuesta en la lista."""
+    filas = [[{"text": "✅ Hacerla", "callback_data": "h_ln_ok:%d" % idx},
+              {"text": "🔁 Reevaluar", "callback_data": "h_ln_fb:%d" % idx}]]
+    if dic.get("complementa"):
+        filas.append([{"text": "🔗 Complementar la que existe",
+                       "callback_data": "h_ln_comp:%d" % idx}])
+    filas.append([{"text": "🗑️ Descartar", "callback_data": "h_ln_no:%d" % idx}])
+    return {"inline_keyboard": filas}
+
+
+async def _ln_dictamen(update_o_query, context, idx: int, feedback: str = ""):
+    """Corre el comité sobre la propuesta `idx` y muestra el dictamen con sus botones."""
+    C = _comite_mod()
+    lst = C._leer()
+    if not (0 <= idx < len(lst)):
+        return
+    prop = lst[idx]
+    chat_id = (update_o_query.message.chat_id if hasattr(update_o_query, "message")
+               else update_o_query.effective_chat.id)
+    espera = await context.bot.send_message(
+        chat_id=chat_id,
+        text=("🧑‍⚖️ Convocando al comité (gpt · gemini · deepseek)…"
+              + ("\n<i>con tu devolución</i>" if feedback else "")),
+        parse_mode="HTML")
+    previos = {m.get("motor"): m for m in
+               ((prop.get("historial") or [{}])[-1].get("motores") or [])} if feedback else {}
+    dic = await asyncio.to_thread(C.evaluar, prop.get("titulo", ""), prop.get("link", ""),
+                                  prop.get("texto", ""), feedback, previos)
+    C.guardar_dictamen(idx, dic, feedback)
+    try:
+        await espera.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(chat_id=chat_id, text=C.texto_dictamen(prop, dic),
+                                   parse_mode="HTML", disable_web_page_preview=True,
+                                   reply_markup=_ln_kb(idx, dic))
+
+
 def _xc_mod():
     """La cola de reintento de X del harness (agents/x_cola.py)."""
     import sys as _s
@@ -7941,6 +8000,34 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML")
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {str(e)[:150]}", parse_mode="HTML")
+        return
+
+    # ── Dictamen del comité de living notes ──────────────────────────────────
+    if query.data.startswith(("h_ln_ok:", "h_ln_no:", "h_ln_comp:", "h_ln_fb:")):
+        _acc, _idx = query.data.split(":", 1)
+        _idx = int(_idx)
+        C = _comite_mod()
+        if _acc == "h_ln_fb":
+            context.user_data["awaiting_ln_feedback"] = _idx
+            await query.answer()
+            await query.message.reply_text(
+                "✍️ Escribí tu devolución para el comité (qué ven mal, qué les falta) "
+                "y vuelven a dictaminar.")
+            return
+        _estado = {"h_ln_ok": "aprobada", "h_ln_no": "descartada",
+                   "h_ln_comp": "complementar"}[_acc]
+        _p = C.set_estado(_idx, _estado)
+        _msg = {"aprobada": "✅ Aprobada: queda en la cola para armarla.",
+                "descartada": "🗑️ Descartada.",
+                "complementar": "🔗 Anotada para complementar «%s»."
+                                % ((_p.get("ultimo_dictamen") or {}).get("complementa") or "")}[_estado]
+        logger.info("living note propuesta #%s → %s", _idx, _estado)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await query.answer()
+        await query.message.reply_text(_msg)
         return
 
     # ── Cola de reintento de X: «Visto» / «Corregido» del aviso de 402 ──
@@ -10490,17 +10577,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     open(_PROP, "w").write(_jpl.dumps(_lst, ensure_ascii=False, indent=2))
                 except Exception:
                     pass
-                await query.answer("➕ Propuesta guardada")
+                await query.answer("➕ Propuesta guardada — la evalúa el comité")
                 try:
                     await query.message.delete()   # borra el menú del curador
                 except Exception:
                     pass
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=("➕ <b>Living note propuesta guardada</b> (" + str(len(_lst)) + " en cola)"
-                          + chr(10) + "📄 " + _titp[:70] + chr(10) + "🔗 " + _linkp
-                          + chr(10) + chr(10) + "La ejecutamos cuando la conversemos."),
-                    parse_mode="HTML")
+                # El comité de tres motores dictamina si vale la pena (pedido de Leo 1/10/2026):
+                # antes esto quedaba anotado en una lista que nadie leía.
+                await _ln_dictamen(query, context, len(_lst) - 1)
 
             elif action == "h_cur_setliving" and len(parts) >= 3:
                 job_id = int(parts[1]); _dest_raw = parts[2]
