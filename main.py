@@ -6752,6 +6752,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from agents.social import analyze as _soc_analyze, format_panel as _soc_panel
             msg_soc = await update.message.reply_text("🔍 Analizando contenido...")
             data_soc = await asyncio.to_thread(_soc_analyze, url)
+            # Si el reel/video vino VACÍO (Instagram pidiendo login, bajada fallida), no se crea
+            # la tarjeta: en el curador aparecía «Sin título» sin una línea de texto y Leo no
+            # tenía con qué decidir. Mejor decirlo acá y que lo reintente (1/10/2026).
+            _txt_soc = (data_soc.get("text") or "").strip()
+            _tit_soc = (data_soc.get("title") or "").strip()
+            if len(_txt_soc) < 300 or not _tit_soc:
+                await msg_soc.edit_text(
+                    "❌ No pude leer ese contenido: traje %d caracteres%s. "
+                    "Suele ser Instagram pidiendo login (las cookies se vencen cada pocos días). "
+                    "Probá de nuevo en un rato, o pegame el texto y lo publico como nota manual."
+                    % (len(_txt_soc), " y sin título" if not _tit_soc else ""))
+                logger.warning("social: %s vino vacío (%d chars, título %r) — no se encola",
+                               url, len(_txt_soc), _tit_soc[:40])
+                return
             # Encolar en curado para tener job_id
             import broker as _br_soc
             content_soc = {
