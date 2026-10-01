@@ -6972,6 +6972,106 @@ def _foto_rehacer(job_id: int, con_marca: bool):
     return mid
 
 
+_LN_CATS = [("esc", "💼 Escalas salariales"), ("arca", "🧾 ARCA e impuestos"),
+            ("gui", "📘 Guías y trámites"), ("fin", "💳 Finanzas y créditos"),
+            ("cot", "📈 Cotizaciones"), ("otr", "🗂 Otras")]
+
+
+def _ln_grupo(tema: str) -> str:
+    """Misma clasificación que el picker del curador: guías ANTES que ARCA, o los trámites
+    caen mezclados con las fichas de dato."""
+    t = (tema or "").lower()
+    if any(k in t for k in ("cómo", "como emitir", "paso a paso", "constancia", "clave fiscal",
+                            "factura electr", "vep", "recategor", "plan de pagos", "obra social",
+                            "trámite", "tramite")):
+        return "gui"
+    if any(k in t for k in ("escala", "salari", "sueldo", "recibo", "smvm")):
+        return "esc"
+    if any(k in t for k in ("monotribut", "autónom", "autonom", "arca", "afip", "ganancias",
+                            "clave fiscal", "factura", "recategor", "plan de pagos",
+                            "obra social", "vencimiento")):
+        return "arca"
+    if any(k in t for k in ("plazo fijo", "crédito", "credito", "préstamo", "prestamo",
+                            "cheque", "tasa")):
+        return "fin"
+    return "otr"
+
+
+def _ln_catalogo() -> dict:
+    """{grupo: [ {tema, url, frecuencia, ultimo} ]} con TODAS las notas vivas publicadas."""
+    import sys as _s
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    import broker as _b
+    cat = {k: [] for k, _ in _LN_CATS}
+    vistos = set()
+    for ln in _b.get_living_notes():
+        wp = ln.get("wp_post_id")
+        if not wp or wp in vistos:
+            continue
+        vistos.add(wp)
+        url = ln.get("wp_url") or ("%s/?p=%s" % (WP_URL, wp))
+        cat[_ln_grupo(ln.get("tema"))].append({
+            "tema": ln.get("tema") or "(sin tema)", "url": url,
+            "frecuencia": ln.get("frecuencia") or "", "ultimo": (ln.get("ultimo_update") or "")[:10]})
+    for tp in _b.get_living_topics():
+        if not tp.get("wp_post_id"):
+            continue
+        cat["cot"].append({"tema": tp.get("nombre") or tp.get("slug"),
+                           "url": "%s/%s/" % (WP_URL, tp.get("slug")),
+                           "frecuencia": "diaria", "ultimo": (tp.get("last_updated") or "")[:10]})
+    for k in cat:
+        cat[k].sort(key=lambda x: x["tema"].lower())
+    return cat
+
+
+def _ln_menu_cats(cat: dict) -> tuple:
+    total = sum(len(v) for v in cat.values())
+    filas = [[{"text": "%s (%d)" % (lbl, len(cat[k])), "callback_data": "h_lnm:%s:0" % k}]
+             for k, lbl in _LN_CATS if cat[k]]
+    txt = ("📌 <b>Notas vivas</b> — %d publicadas\n"
+           "<i>Se actualizan solas. Elegí una categoría para verlas.</i>" % total)
+    return txt, {"inline_keyboard": filas}
+
+
+def _ln_menu_grupo(cat: dict, grp: str, pag: int = 0, por_pag: int = 8) -> tuple:
+    items = cat.get(grp, [])
+    lbl = dict(_LN_CATS).get(grp, grp)
+    paginas = max(1, (len(items) + por_pag - 1) // por_pag)
+    pag = max(0, min(pag, paginas - 1))
+    trozo = items[pag * por_pag:(pag + 1) * por_pag]
+    lineas = ["📌 <b>%s</b> — %d nota(s)" % (lbl, len(items)), ""]
+    filas = []
+    for it in trozo:
+        det = " · ".join(x for x in (it["frecuencia"], ("últ. " + it["ultimo"]) if it["ultimo"] else "") if x)
+        lineas.append("· <b>%s</b>%s" % (it["tema"][:70], (" — <i>%s</i>" % det) if det else ""))
+        filas.append([{"text": "📄 %s" % it["tema"][:52], "url": it["url"]}])
+    nav = []
+    if paginas > 1:
+        if pag > 0:
+            nav.append({"text": "◀", "callback_data": "h_lnm:%s:%d" % (grp, pag - 1)})
+        nav.append({"text": "%d/%d" % (pag + 1, paginas), "callback_data": "h_lnm:%s:%d" % (grp, pag)})
+        if pag < paginas - 1:
+            nav.append({"text": "▶", "callback_data": "h_lnm:%s:%d" % (grp, pag + 1)})
+    if nav:
+        filas.append(nav)
+    filas.append([{"text": "↩ Categorías", "callback_data": "h_lnm:menu:0"}])
+    return "\n".join(lineas), {"inline_keyboard": filas}
+
+
+async def cmd_livingnotes(update, context):
+    """Catálogo de notas vivas por categoría."""
+    try:
+        cat = await asyncio.to_thread(_ln_catalogo)
+    except Exception as e:
+        await update.message.reply_text("❌ No pude leer las notas vivas: %s" % str(e)[:120])
+        return
+    txt, kb = _ln_menu_cats(cat)
+    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=kb,
+                                    disable_web_page_preview=True)
+
+
 def _comite_mod():
     """El comité de living notes del harness (agents/comite_living.py)."""
     import sys as _s
@@ -8000,6 +8100,23 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML")
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {str(e)[:150]}", parse_mode="HTML")
+        return
+
+    # ── Catálogo /livingnotes: categorías ⇄ notas ────────────────────────────
+    if query.data.startswith("h_lnm:"):
+        _, _grp_ln, _pag_ln = (query.data.split(":") + ["0"])[:3]
+        try:
+            cat = await asyncio.to_thread(_ln_catalogo)
+            if _grp_ln == "menu":
+                txt, kb = _ln_menu_cats(cat)
+            else:
+                txt, kb = _ln_menu_grupo(cat, _grp_ln, int(_pag_ln))
+            await query.answer()
+            await query.edit_message_text(txt, parse_mode="HTML", reply_markup=kb,
+                                          disable_web_page_preview=True)
+        except Exception as _e_ln:
+            logger.warning("catálogo de notas vivas: %s", _e_ln)
+            await query.answer("Error: %s" % str(_e_ln)[:60], show_alert=True)
         return
 
     # ── Dictamen del comité de living notes ──────────────────────────────────
@@ -16744,6 +16861,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("campania",          "Campaña de evento en curso — revivir, armar o cancelar"),
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
         BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
+        BotCommand("livingnotes",       "Catálogo de notas vivas por categoría"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
         BotCommand("editar",            "Editar una nota ya publicada"),
         # ── Información ───────────────────────────────────────────────────────
@@ -19365,6 +19483,7 @@ def main():
     app.add_handler(CommandHandler("pipeline", cmd_pipeline))
     app.add_handler(CommandHandler("rutina", cmd_rutina))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
+    app.add_handler(CommandHandler("livingnotes", cmd_livingnotes))
     app.add_handler(CommandHandler("evento", cmd_evento))
     app.add_handler(CommandHandler("input_evento", cmd_input_evento))
     app.add_handler(CommandHandler("vivo", cmd_vivo))
