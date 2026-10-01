@@ -10066,16 +10066,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                 else:
+                    _dropped = []
                     for jid in drop:
                         try:
                             jb = _br.get_job(jid)
                             if jb and jb.get("stage") == "curado":
                                 _br.update_stage(jid, "rejected")
-                        except Exception:
-                            pass
+                                _dropped.append(jid)
+                        except Exception as _e_drop:
+                            logger.warning("proponer: no pude descartar #%s: %s", jid, _e_drop)
+                    logger.info("curador proponer: conservo %s, descarto %s de %s",
+                                keep, _dropped, drop)
                     try:
                         await query.edit_message_text(
-                            f"🔄 Conservo {len(keep)}, busco {needed} para completar el trío…")
+                            "🔄 Conservo %d, descarté %d y busco %d nuevas…"
+                            % (len(keep), len(_dropped), needed))
                     except Exception:
                         pass
                     try:
@@ -10708,8 +10713,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _save_state(job_id, state)
                 keyboard = _cur.build_card_keyboard(job_id, state)
                 await query.edit_message_reply_markup(reply_markup=keyboard)
-                _capa_names = {1: "Informarse es respetarse", 2: "Mundo empresarial", 3: "La Voz de las pymes"}
-                ans = (f"✅ CAPA: {_capa_names[capa_id]}" if state.get("hilo")
+                _capa_names = {1: "Informarse es respetarse", 2: "Mundo empresarial",
+                               3: "La Voz de las pymes", 4: "Comercial"}
+                ans = (f"✅ CAPA: {_capa_names.get(capa_id, capa_id)}" if state.get("hilo")
                        else "Capa deseleccionada")
                 await query.answer(ans, show_alert=False)
 
