@@ -7117,6 +7117,9 @@ async def _reel_armar(chat_id: int, context, wp_id: int):
     if res.get("huerfanas"):
         cap.append("⚠️ cifras que no están en la ficha: %s"
                    % _h_esc(", ".join(res["huerfanas"][:4])))
+    if res.get("vencidas"):
+        cap.append("⚠️ fechas que ya pasaron: %s"
+                   % _h_esc(", ".join(res["vencidas"][:4])))
     with open(res["mp4"], "rb") as f:
         await context.bot.send_video(chat_id=chat_id, video=f, caption=chr(10).join(cap),
                                      parse_mode="HTML", supports_streaming=True,
