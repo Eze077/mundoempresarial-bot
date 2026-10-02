@@ -7013,7 +7013,7 @@ def _ln_catalogo() -> dict:
         vistos.add(wp)
         url = ln.get("wp_url") or ("%s/?p=%s" % (WP_URL, wp))
         cat[_ln_grupo(ln.get("tema"))].append({
-            "tema": ln.get("tema") or "(sin tema)", "url": url,
+            "tema": ln.get("tema") or "(sin tema)", "url": url, "wp_post_id": wp,
             "frecuencia": ln.get("frecuencia") or "", "ultimo": (ln.get("ultimo_update") or "")[:10]})
     for tp in _b.get_living_topics():
         if not tp.get("wp_post_id"):
@@ -7072,6 +7072,90 @@ async def cmd_livingnotes(update, context):
                                     disable_web_page_preview=True)
 
 
+def _reel_mod():
+    """El armador de reels del harness (agents/reel.py)."""
+    import sys as _s
+    for _p in ("/opt/me-harness/agents", "/opt/me-harness"):
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+    from agents import reel as _r
+    return _r
+
+
+def _reel_kb(wp_id: int) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "🚀 Publicar en IG", "callback_data": "h_reelp:pub:%d" % wp_id},
+         {"text": "🔁 Otro guion", "callback_data": "h_reelp:re:%d" % wp_id}],
+        [{"text": "🗑️ Descartar", "callback_data": "h_reelp:no:%d" % wp_id}]]}
+
+
+async def _reel_armar(chat_id: int, context, wp_id: int):
+    """Arma el reel de la ficha `wp_id` y lo manda para mirarlo. No publica nada."""
+    R = _reel_mod()
+    espera = await context.bot.send_message(
+        chat_id=chat_id,
+        text=("🎬 Armando el reel…" + chr(10) +
+              "<i>escribo el guion con la ficha, lo verifico contra ella y lo dibujo. "
+              "Un minuto.</i>"), parse_mode="HTML")
+    try:
+        res = await asyncio.to_thread(R.armar, wp_id)
+    except Exception as e:
+        logger.warning("reel #%s: %s", wp_id, e)
+        res = {"ok": False, "error": str(e)[:160]}
+    try:
+        await espera.delete()
+    except Exception:
+        pass
+    if not res.get("ok"):
+        await context.bot.send_message(chat_id=chat_id,
+                                       text="⚠️ No pude armar el reel: %s" % res.get("error", ""))
+        return
+    R.guardar_pendiente(wp_id, res)
+    cap = ["🎬 <b>%s</b>" % _h_esc(res.get("titulo", "")[:80]),
+           "%s s · %s escenas · %s MB" % (res.get("segundos"), len(res.get("escenas") or []),
+                                          res.get("peso_mb"))]
+    if res.get("huerfanas"):
+        cap.append("⚠️ cifras que no están en la ficha: %s"
+                   % _h_esc(", ".join(res["huerfanas"][:4])))
+    with open(res["mp4"], "rb") as f:
+        await context.bot.send_video(chat_id=chat_id, video=f, caption=chr(10).join(cap),
+                                     parse_mode="HTML", supports_streaming=True,
+                                     reply_markup=_reel_kb(wp_id))
+    await context.bot.send_message(chat_id=chat_id,
+                                   text="📝 <b>Caption para Instagram</b>" + chr(10) + chr(10)
+                                        + _h_esc(res.get("caption", ""))[:3500],
+                                   parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def cmd_reel(update, context):
+    """Arma el reel de una ficha viva. Sin argumento, lista las últimas."""
+    arg = (context.args[0] if context.args else "").strip()
+    if arg.isdigit():
+        await _reel_armar(update.message.chat_id, context, int(arg))
+        return
+    try:
+        cat = await asyncio.to_thread(_ln_catalogo)
+    except Exception as e:
+        await update.message.reply_text("❌ No pude leer las fichas: %s" % str(e)[:120])
+        return
+    fichas = [i for g in cat.values() for i in g if i.get("url", "").startswith("http")]
+    fichas.sort(key=lambda x: x.get("ultimo") or "", reverse=True)
+    filas = []
+    for f in fichas[:10]:
+        wp = "".join(ch for ch in f["url"].split("?p=")[-1] if ch.isdigit()) if "?p=" in f["url"] else ""
+        if not wp:
+            wp = str(f.get("wp_post_id") or "")
+        if wp:
+            filas.append([{"text": "🎬 %s" % f["tema"][:52], "callback_data": "h_reel:%s" % wp}])
+    if not filas:
+        await update.message.reply_text("No tengo fichas con ID para armar el reel.")
+        return
+    await update.message.reply_text(
+        "🎬 <b>Reel de una ficha viva</b>" + chr(10) +
+        "<i>Elegí cuál. También podés mandar /reel 51996.</i>",
+        parse_mode="HTML", reply_markup={"inline_keyboard": filas})
+
+
 def _lb_mod():
     """El armador de fichas vivas del harness (agents/living_builder.py)."""
     import sys as _s
@@ -7087,6 +7171,7 @@ def _lnb_kb(wp_id: int, edit_url: str) -> dict:
     return {"inline_keyboard": [
         [{"text": "🚀 Publicarla", "callback_data": "h_lnb:pub:%d" % wp_id},
          {"text": "📝 Abrir en WP", "url": edit_url}],
+        [{"text": "🎬 Hacer el reel", "callback_data": "h_reel:%d" % wp_id}],
         [{"text": "🗑️ Tirar el borrador", "callback_data": "h_lnb:del:%d" % wp_id}]]}
 
 
@@ -8203,6 +8288,57 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 % ((_p.get("ultimo_dictamen") or {}).get("complementa") or "")}[_estado]
         await query.answer()
         await query.message.reply_text(_msg)
+        return
+
+    # ── Reel de una ficha: armar, publicar, rehacer o descartar ──────────────
+    if query.data.startswith("h_reel:"):
+        await query.answer("🎬 Lo armo")
+        await _reel_armar(query.message.chat_id, context, int(query.data.split(":", 1)[1]))
+        return
+
+    if query.data.startswith("h_reelp:"):
+        _, _acc_r, _wp_r = query.data.split(":", 2)
+        _wp_r = int(_wp_r)
+        R = _reel_mod()
+        _p_r = R.pendiente(_wp_r)
+        if not _p_r:
+            await query.answer("Ese reel ya no está — armalo de nuevo", show_alert=True)
+            return
+        if _acc_r == "re":
+            await query.answer("🔁 Otro guion")
+            R.olvidar(_wp_r)
+            await _reel_armar(query.message.chat_id, context, _wp_r)
+            return
+        if _acc_r == "no":
+            R.olvidar(_wp_r)
+            await query.answer("🗑️ Descartado")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        await query.answer("Publicando en Instagram… tarda un par de minutos")
+        try:
+            _res_r = await asyncio.to_thread(R.publicar, _p_r["mp4"], _p_r["caption"],
+                                             _p_r.get("link", ""))
+        except Exception as e:
+            logger.warning("publicar reel %s: %s", _wp_r, e)
+            await query.message.reply_text("⚠️ No pude publicarlo: %s" % str(e)[:140])
+            return
+        _ig_r = _res_r.get("instagram") or {}
+        if _ig_r.get("ok"):
+            R.olvidar(_wp_r, borrar_mp4=False)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            _tg_r = (_res_r.get("telegram") or {}).get("ok")
+            await query.message.reply_text(
+                "🚀 Reel publicado: %s%s" % (_res_r.get("permalink") or _ig_r.get("id"),
+                                             chr(10) + "📣 también al canal de Telegram" if _tg_r else ""),
+                disable_web_page_preview=False)
+        else:
+            await query.message.reply_text("⚠️ Instagram: %s" % str(_ig_r.get("error"))[:160])
         return
 
     # ── Ficha armada: publicar o tirar el borrador ───────────────────────────
@@ -16946,6 +17082,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
         BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
         BotCommand("livingnotes",       "Catálogo de notas vivas por categoría"),
+        BotCommand("reel",              "Armar el reel de una ficha viva"),
         BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
         BotCommand("editar",            "Editar una nota ya publicada"),
         # ── Información ───────────────────────────────────────────────────────
@@ -19568,6 +19705,7 @@ def main():
     app.add_handler(CommandHandler("rutina", cmd_rutina))
     app.add_handler(CommandHandler("notamanual", cmd_notamanual))
     app.add_handler(CommandHandler("livingnotes", cmd_livingnotes))
+    app.add_handler(CommandHandler("reel", cmd_reel))
     app.add_handler(CommandHandler("evento", cmd_evento))
     app.add_handler(CommandHandler("input_evento", cmd_input_evento))
     app.add_handler(CommandHandler("vivo", cmd_vivo))
