@@ -8198,6 +8198,45 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Nota rechazada por el gate: publicar igual (release → publicacion) ──
+    # ── Ver el borrador de una nota que el comité rechazó ────────────────────
+    if query.data.startswith("h_preview:"):
+        _jid_pv = int(query.data.split(":")[1])
+        import sys as _syspv
+        for _p in ("/opt/me-harness", "/opt/me-harness/agents"):
+            if _p not in _syspv.path:
+                _syspv.path.insert(0, _p)
+        try:
+            import broker as _bkpv
+            import re as _repv
+            await query.answer("Te lo mando")
+            _job_pv = await asyncio.to_thread(_bkpv.get_job, _jid_pv)
+            _cont_pv = _bkpv.get_content(_job_pv) if _job_pv else {}
+            _html_pv = _cont_pv.get("content_html") or ""
+            _txt_pv = _repv.sub(r"\n{3,}", "\n\n",
+                                _repv.sub(r"<[^>]+>", "", _repv.sub(r"</(p|h2|h3|li)>", "\n",
+                                                                    _html_pv)))
+            _cab_pv = ["📝 <b>%s</b>" % _h_esc(_cont_pv.get("title") or "job #%d" % _jid_pv)]
+            if _cont_pv.get("meta_desc"):
+                _cab_pv.append("<i>%s</i>" % _h_esc(_cont_pv["meta_desc"]))
+            for _b_pv in (_cont_pv.get("bullets") or [])[:5]:
+                _cab_pv.append("· %s" % _h_esc(str(_b_pv)))
+            _partes_pv = [chr(10).join(_cab_pv)]
+            _buf_pv = ""
+            for _par_pv in _txt_pv.split(chr(10)):
+                if len(_buf_pv) + len(_par_pv) > 3500:
+                    _partes_pv.append(_buf_pv.strip())
+                    _buf_pv = ""
+                _buf_pv += _par_pv + chr(10)
+            if _buf_pv.strip():
+                _partes_pv.append(_buf_pv.strip())
+            for _p_pv in _partes_pv[:4]:
+                await query.message.reply_text(_h_esc(_p_pv) if _p_pv is not _partes_pv[0] else _p_pv,
+                                               parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as _e_pv:
+            logger.warning("ver borrador #%s: %s", _jid_pv, _e_pv)
+            await query.message.reply_text("❌ No pude traer el borrador: %s" % str(_e_pv)[:120])
+        return
+
     if query.data.startswith("h_prerelease:"):
         jid = int(query.data.split(":")[1])
         import sys as _syspr
