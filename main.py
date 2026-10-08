@@ -11598,19 +11598,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── Liberar la tanda mostrada y traer la próxima (vacía el registro) ──
             elif action == "h_cur_liberar":
-                await query.answer("Liberando…", show_alert=False)
-                _cleared = await asyncio.to_thread(_cur.liberar_batch)
-                for _mid in (_cleared or []):
+                # Un segundo toque mientras se arma la tanda nueva duplicaba el briefing (8/10/2026):
+                # la tanda tardaba 60-90 s en llegar, sin nada visible, y parecía que no andaba.
+                if context.bot_data.get("_cur_liberando"):
+                    await query.answer("Ya estoy trayendo la tanda nueva, un momento…", show_alert=False)
+                    return
+                context.bot_data["_cur_liberando"] = True
+                try:
+                    await query.answer("Liberando…", show_alert=False)
+                    _cleared = await asyncio.to_thread(_cur.liberar_batch)
+                    for _mid in (_cleared or []):   # tarjetas + encabezado de la tanda
+                        try:
+                            await context.bot.delete_message(
+                                chat_id=query.message.chat_id, message_id=_mid)
+                        except Exception:
+                            pass
                     try:
-                        await context.bot.delete_message(
-                            chat_id=query.message.chat_id, message_id=_mid)
+                        await query.edit_message_text("🗑️ Liberadas. Buscando la próxima tanda…")
                     except Exception:
                         pass
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                await asyncio.to_thread(_cur.run_briefing, 0)
+                    await asyncio.to_thread(_cur.run_briefing, 0)
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        pass
+                finally:
+                    context.bot_data["_cur_liberando"] = False
 
         except Exception as _he:
             logger.warning(f"h_cur handler error: {_he}")
