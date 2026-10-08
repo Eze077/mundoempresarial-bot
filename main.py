@@ -10551,16 +10551,25 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             jb = _br.get_job(jid)
                             if jb and jb.get("stage") == "curado":
-                                _br.update_stage(jid, "rejected")
+                                _br.reject_job(jid, "liberado_proponer")
                                 _dropped.append(jid)
                         except Exception as _e_drop:
                             logger.warning("proponer: no pude descartar #%s: %s", jid, _e_drop)
                     logger.info("curador proponer: conservo %s, descarto %s de %s",
                                 keep, _dropped, drop)
+                    # Antes de crear la tanda nueva se borra TODA la anterior: tarjetas (también
+                    # las conservadas, que se reenvían marcadas), encabezado y este checklist.
+                    # Antes solo se editaba el checklist y las conservadas quedaban duplicadas
+                    # (reporte de Leo, 8/10/2026). Va antes del thread: run_briefing_auto pisa
+                    # el card_msg_id de las conservadas.
+                    await _borrar_cards_briefing(context, query.message.chat_id, jids)
                     try:
-                        await query.edit_message_text(
-                            "🔄 Conservo %d, descarté %d y busco %d nuevas…"
-                            % (len(keep), len(_dropped), needed))
+                        await query.message.delete()
+                    except Exception:
+                        pass
+                    try:
+                        await query.answer("🔄 Conservo %d, liberé %d y busco %d nuevas…"
+                                           % (len(keep), len(_dropped), needed))
                     except Exception:
                         pass
                     try:
