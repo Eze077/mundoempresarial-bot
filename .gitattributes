@@ -1,0 +1,19 @@
+# Todo lo que corre en Linux se guarda y se baja con LF, sin importar desde qué máquina se
+# commitee. Sin esto, un archivo editado en Windows entra al repo con CRLF y el md5 del VPS
+# nunca coincide con el de git: el 7/10/2026 el preflight de deploy daba falsos «el server no
+# coincide» en 11 archivos, y el control de «nada vive solo en el server» quedaba ciego.
+# Para comparar a mano: tr -d '\r' < archivo | md5sum
+*.py        text eol=lf
+*.php       text eol=lf
+*.service   text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.html      text eol=lf
+
+# Binarios: que git no los toque nunca.
+*.ttf       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.mp4       binary
+*.db        binary
