@@ -18096,8 +18096,16 @@ _WHISPER_OK_EXT = {".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".wav", ".webm",
                    ".ogg", ".oga", ".flac"}
 
 
-def _whisper_from_file(path: str) -> str:
-    """Transcribe un archivo de audio/voz local con Whisper API (español).
+_TRANSCRIBE_PROMPT = ("Transcripción en español rioplatense (Argentina) de un evento, una entrevista o "
+                      "una nota de voz. Respetá nombres propios, siglas y nombres de entidades. Las cifras van en "
+                      "números (972, 2.291, 38.000, 20 años), no en letras.")
+
+
+def _whisper_from_file(path: str, contexto: str = "") -> str:
+    """Transcribe un archivo de audio/voz local (español).
+    Modelo gpt-4o-transcribe con un prompt de contexto (nombre del evento, etc.): whisper-1 a
+    secas, sin contexto, dejaba errores como «granquizar» por «jerarquizar» o «asociactiva» en
+    la cobertura de Asociativa (9/10/2026). Mismo precio por minuto. Si falla, cae a whisper-1.
     Convierte con ffmpeg a mp3 mono si el formato no es soportado o pesa demasiado."""
     if not OPENAI_API_KEY:
         return ""
@@ -18118,17 +18126,21 @@ def _whisper_from_file(path: str) -> str:
         if _os.path.getsize(src) / (1024 * 1024) > 24.5:
             logger.error("_whisper_from_file: audio > 25 MB incluso comprimido")
             return ""
-        with open(src, "rb") as f:
-            r = openai_post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                data={"model": "whisper-1", "language": "es", "response_format": "text"},
-                files={"file": (_os.path.basename(src), f, "audio/mpeg")},
-                timeout=300,
-            )
-        if r.status_code == 200:
-            return r.text.strip()
-        logger.error(f"_whisper_from_file API {r.status_code}: {r.text[:300]}")
+        _prompt = (_TRANSCRIBE_PROMPT + (" Contexto: " + contexto.strip()[:600] if contexto else ""))
+        for _model in ("gpt-4o-transcribe", "whisper-1"):
+            with open(src, "rb") as f:
+                r = openai_post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data={"model": _model, "language": "es", "response_format": "text",
+                          "prompt": _prompt},
+                    files={"file": (_os.path.basename(src), f, "audio/mpeg")},
+                    timeout=300,
+                )
+            if r.status_code == 200 and r.text.strip():
+                logger.info(f"_whisper_from_file: {_model} OK ({len(r.text)} chars)")
+                return r.text.strip()
+            logger.error(f"_whisper_from_file {_model} API {r.status_code}: {r.text[:300]}")
     except Exception as e:
         logger.error(f"_whisper_from_file: {e}")
     finally:
@@ -18285,7 +18297,8 @@ async def handle_evento_media(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"❌ No pude bajar el audio ({e}). Ojo: Telegram limita los archivos del bot a ~20 MB.")
         return
     await status.edit_text("🧠 Transcribiendo… (puede tardar un rato)")
-    texto = await asyncio.to_thread(_whisper_from_file, path)
+    _ctx_ev = " ".join(x for x in (ev.get("nombre"), ev.get("instr"), m.caption) if x)
+    texto = await asyncio.to_thread(_whisper_from_file, path, _ctx_ev)
     try:
         if path: _os.remove(path)
     except Exception:
