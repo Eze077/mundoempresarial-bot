@@ -1,0 +1,44 @@
+{
+  "frases_gen.py": {
+    "mtime": 1791418604.5737922,
+    "seen": 1791818390.2767434,
+    "ast_hash": "6ded937a8caeddcdea1c71a7b2bfe15f",
+    "semantic_hash": "6ded937a8caeddcdea1c71a7b2bfe15f"
+  },
+  "main.py": {
+    "mtime": 1791551427.4566822,
+    "seen": 1791818390.2767508,
+    "ast_hash": "65e95e441dbbfb1df63017c3d62b660f",
+    "semantic_hash": "65e95e441dbbfb1df63017c3d62b660f"
+  },
+  "placas.py": {
+    "mtime": 1791418604.5922208,
+    "seen": 1791818390.2767546,
+    "ast_hash": "0dfb9e7bdf880ffd43bb4f01ec29af65",
+    "semantic_hash": "0dfb9e7bdf880ffd43bb4f01ec29af65"
+  },
+  "sources.json": {
+    "mtime": 1791418604.598013,
+    "seen": 1791818390.2767572,
+    "ast_hash": "d568b54aa54273945210a8ab89a15620",
+    "semantic_hash": "d568b54aa54273945210a8ab89a15620"
+  },
+  "MANUAL_DE_ESTILO.md": {
+    "mtime": 1791418604.553218,
+    "seen": 1791818390.2767594,
+    "ast_hash": "d77596d7e09b0c39b970f652665f8d64",
+    "semantic_hash": "d77596d7e09b0c39b970f652665f8d64"
+  },
+  "requirements.txt": {
+    "mtime": 1791418604.596419,
+    "seen": 1791818390.2767606,
+    "ast_hash": "539ecc09d15a41c3f7e755df398a556e",
+    "semantic_hash": "539ecc09d15a41c3f7e755df398a556e"
+  },
+  "assets/frases_base.png": {
+    "mtime": 1791418604.5737922,
+    "seen": 1791818390.2767625,
+    "ast_hash": "af30fd40f8fa6d95b22c700da196c488",
+    "semantic_hash": "af30fd40f8fa6d95b22c700da196c488"
+  }
+}
