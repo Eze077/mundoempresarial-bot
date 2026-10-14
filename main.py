@@ -28,6 +28,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+# httpx loguea en INFO cada request con la URL entera, y la URL de la API de Telegram lleva el
+# token del bot: quedaba en el journal en cada mensaje (14/10/2026). Errores siguen saliendo.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 WP_URL  = os.environ.get("WP_URL", "https://mundoempresarial.ar").rstrip("/")
