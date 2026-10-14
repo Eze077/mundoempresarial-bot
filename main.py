@@ -14164,14 +14164,18 @@ def _restore_scheduled_jobs(app):
         except Exception as e:
             logger.warning(f"No pude re-registrar job {job.get('post_id')}: {e}")
 
-    # Limpiar expirados
+    # Limpiar expirados. Antes: .replace(tzinfo=None) a las fechas CON zona las dejaba sin zona
+    # y la comparación tiraba «can't compare offset-naive and offset-aware» → las vencidas no se
+    # limpiaban nunca (14/10/2026).
+    def _run_at_arg(j):
+        try:
+            d = datetime.fromisoformat(j["run_at"])
+            return d if d.tzinfo else d.replace(tzinfo=tz_arg)
+        except Exception:
+            return None
     if expired:
-        fb["scheduled_jobs"] = [
-            j for j in pending
-            if datetime.fromisoformat(j["run_at"]).replace(
-                tzinfo=tz_arg if datetime.fromisoformat(j["run_at"]).tzinfo is None else None
-            ) > datetime.now(tz_arg)
-        ]
+        _ahora = datetime.now(tz_arg)
+        fb["scheduled_jobs"] = [j for j in pending if (_run_at_arg(j) or _ahora) > _ahora]
         _save_feedback(fb)
 
     logger.info(f"Scheduled jobs restaurados: {restored} pendientes, {expired} expirados")
