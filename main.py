@@ -2053,6 +2053,29 @@ def _get_linkedin_author_urn() -> str:
     return f"urn:li:organization:{LINKEDIN_ORG_ID}"
 
 
+# LinkedIn da de baja cada versión de la API a los ~12 meses (426 NONEXISTENT_VERSION). La fija «202503» venció
+# y LinkedIn dejó de publicar en silencio (detectado 18/10/2026; activas ese día: 202511 a 202610). Misma lista
+# que agents/linkedin_org.py del harness: se prueban en orden y la que anda queda en memoria.
+_LI_VERSIONES = ("202609", "202606", "202603")
+_LI_VERSION_OK = None
+
+
+def _li_request(method: str, url: str, headers: dict, **kw):
+    global _LI_VERSION_OK
+    h = dict(headers)
+    r = None
+    for v in dict.fromkeys(x for x in (_LI_VERSION_OK,) + _LI_VERSIONES if x):
+        h["LinkedIn-Version"] = v
+        r = requests.request(method, url, headers=h, **kw)
+        if r.status_code != 426:
+            if v != _LI_VERSIONES[0] and _LI_VERSION_OK != v:
+                logger.warning(f"LinkedIn-Version {_LI_VERSIONES[0]} inactiva; usé {v} (actualizar _LI_VERSIONES)")
+            _LI_VERSION_OK = v
+            return r
+    logger.error(f"LinkedIn: ninguna versión activa {_LI_VERSIONES} (426)")
+    return r
+
+
 def post_linkedin(data: dict, wp_url: str) -> str | None:
     """Publica en LinkedIn. Usa perfil personal si LINKEDIN_MEMBER_ID está seteado, organización si no."""
     global _LAST_LINKEDIN_ERROR, _LAST_LINKEDIN_URN
@@ -2071,7 +2094,6 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
         h = {
             "Authorization": f"Bearer {LINKEDIN_TOKEN}",
             "Content-Type": "application/json",
-            "LinkedIn-Version": "202503",
         }
         payload = {
             "author": author_urn,
@@ -2088,7 +2110,7 @@ def post_linkedin(data: dict, wp_url: str) -> str | None:
             "lifecycleState": "PUBLISHED",
             "isReshareDisabledByAuthor": False,
         }
-        r = requests.post("https://api.linkedin.com/rest/posts", headers=h, json=payload, timeout=15)
+        r = _li_request("POST", "https://api.linkedin.com/rest/posts", h, json=payload, timeout=15)
         if r.status_code in (200, 201):
             post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
             _LAST_LINKEDIN_URN = post_urn
@@ -2131,7 +2153,6 @@ def post_linkedin_org(data: dict, wp_url: str) -> str | None:
         h = {
             "Authorization": f"Bearer {tok}",
             "Content-Type": "application/json",
-            "LinkedIn-Version": "202503",
         }
         payload = {
             "author": f"urn:li:organization:{LINKEDIN_ORG_ID}",
@@ -2142,7 +2163,7 @@ def post_linkedin_org(data: dict, wp_url: str) -> str | None:
             "lifecycleState": "PUBLISHED",
             "isReshareDisabledByAuthor": False,
         }
-        r = requests.post("https://api.linkedin.com/rest/posts", headers=h, json=payload, timeout=15)
+        r = _li_request("POST", "https://api.linkedin.com/rest/posts", h, json=payload, timeout=15)
         if r.status_code in (200, 201):
             post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
             post_url_li = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else tracked_url
@@ -2161,8 +2182,8 @@ def delete_linkedin_post(urn: str) -> bool:
         return False
     try:
         encoded = requests.utils.quote(urn, safe="")
-        h = {"Authorization": f"Bearer {LINKEDIN_TOKEN}", "LinkedIn-Version": "202503"}
-        r = requests.delete(f"https://api.linkedin.com/rest/posts/{encoded}", headers=h, timeout=15)
+        h = {"Authorization": f"Bearer {LINKEDIN_TOKEN}"}
+        r = _li_request("DELETE", f"https://api.linkedin.com/rest/posts/{encoded}", h, timeout=15)
         if r.status_code in (200, 204):
             logger.info(f"LinkedIn delete OK: {urn}")
             return True
