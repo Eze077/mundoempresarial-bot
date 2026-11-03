@@ -33,6 +33,7 @@ cotizaciones_config.json
 ht_feedback.json
 ht_freq.json
 ht_mapping.json
+uso_bot.db*
 
 # Scripts de una sola vez (no los llama nadie; si uno se vuelve permanente, commitearlo)
 update_*.py

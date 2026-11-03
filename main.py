@@ -23,6 +23,7 @@ from telegram.ext import (
     TypeHandler,
     ApplicationHandlerStop,
 )
+import comandos_menu  # menú de Telegram, /help e informe de uso salen de una sola lista
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -87,11 +88,55 @@ async def _solo_admin(update, context):
     if user is None:
         return  # channel post / my_chat_member: no es un comando de usuario, seguir
     if user.id in _admin_ids():
+        try:
+            k = _uso_clave(update)
+            if k:
+                await asyncio.to_thread(_uso_anotar, *k)
+        except Exception as e:
+            logger.debug("registro de uso: %s", e)
         return  # operador → flujo normal
     logger.warning("ACCESO DENEGADO: user=%s (@%s) tipo=%s",
                    user.id, getattr(user, "username", "?"),
                    "callback" if update.callback_query else "mensaje")
     raise ApplicationHandlerStop  # frena TODA la cadena de handlers para este update
+
+
+# ── Registro de uso (3/11/2026, pedido de Leo) ────────────────────────────────
+# El bot no sabía qué comandos y botones se usan: el menú se ordenaba a ojo. Se anota cada
+# interacción del operador (tipo + comando o prefijo del botón, NUNCA el texto) y informe_uso.py
+# lo resume a los 30 días. Lo llama _solo_admin, que ya corre antes que todo.
+_USO_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uso_bot.db")
+
+
+def _uso_clave(update):
+    """(tipo, clave) de una interacción, o None. Botón: callback_data sin ids («edito_tema_12» →
+    «edito_tema», «efem_edit:dia-x» → «efem_edit»). Mensaje: link / texto / foto / audio / documento."""
+    q = getattr(update, "callback_query", None)
+    if q is not None:
+        base = (q.data or "").split(":", 1)[0]
+        return "boton", re.sub(r"(?:[_-]?\d+)+$", "", base)[:40] or "?"
+    m = getattr(update, "message", None)
+    if m is None:
+        return None
+    txt = m.text or m.caption or ""
+    if txt.startswith("/"):
+        return "comando", txt.split()[0][1:].split("@")[0][:40]
+    if m.photo:
+        return "mensaje", "foto"
+    if m.voice or m.audio or m.video:
+        return "mensaje", "audio/video"
+    if m.document:
+        return "mensaje", "documento"
+    if txt:
+        return "mensaje", "link" if re.search(r"https?://", txt) else "texto"
+    return None
+
+
+def _uso_anotar(tipo, clave):
+    import sqlite3 as _sq
+    with _sq.connect(_USO_DB, timeout=5) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS uso (ts TEXT, tipo TEXT, clave TEXT)")
+        c.execute("INSERT INTO uso VALUES (datetime('now', '-3 hours'), ?, ?)", (tipo, clave))
 
 
 _ENV_FILE = "/etc/mundoempresarial-bot.env"
@@ -4117,37 +4162,9 @@ async def delete_from_channel(bot, message_id: int) -> bool:
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
 
 def _build_commands_text() -> str:
-    """Texto de ayuda con todos los comandos disponibles. Reusable para /start y /comandos."""
-    return (
-        "🤖 *Bot MundoEmpresarial — Comandos disponibles*\n\n"
-        "📥 *Publicar*\n"
-        "• Pegar link (con o sin texto alrededor) → scrape + preview + publicación.\n"
-        "  Soporta artículos, YouTube (con transcripción), URLs de Google News.\n"
-        "• `/editar <URL o ID>` → editar título, categoría, foto, redes sociales o borrar.\n"
-        "• `/hilo <URL o ID>` → generar hilo de Twitter desde una nota ya publicada.\n"
-        "• `/borrar <URL o ID>` → mandar una nota directo a la papelera de WP.\n"
-        "\n"
-        "📰 *Curaduría diaria*\n"
-        "• `/horarios` → ver y configurar cuántas veces por día y a qué hora se envía el curador.\n"
-        "• `/feedback_ver` → ver qué dominios y keywords aprendió el curador a "
-        "favorecer/penalizar en base a tus 👍👎 sobre las notas.\n"
-        "\n"
-        "📂 *Datos del ecosistema*\n"
-        "• `/fuentes [dominio]` → repositorio de medios que usás (orientación editorial, "
-        "afinidad, hilo típico, quirks técnicos).\n"
-        "• `/cola` → notas programadas pendientes de publicar.\n"
-        "• `/stats` → publicadas / canceladas / errores del día y fuentes.\n"
-        "  (Auto: reporte diario 23:00 ARG)\n"
-        "\n"
-        "💳 *Servicios y créditos*\n"
-        "• `/creditos` → estado de OpenAI, X/Twitter, RapidAPI, EnvíaloSimple, DonWeb, "
-        "Telegram, WordPress, dolarapi, etc.\n"
-        "  (Auto: reporte semanal lunes 09:00 ARG + alertas reactivas ante 402/quota)\n"
-        "• `/testtwitter` → diagnóstico OAuth 1.0a de Twitter (whoami).\n"
-        "\n"
-        "ℹ️ *Ayuda*\n"
-        "• `/start` o `/comandos` → este listado.\n"
-    )
+    """Texto de /start, /help y /comandos (HTML). Sale de comandos_menu: el texto escrito a mano
+    había quedado viejo (nombraba /horarios, /feedback_ver y /cola, que ya no existían)."""
+    return comandos_menu.texto_ayuda()
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4170,11 +4187,11 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         _persist_admin_chat_id(str(update.message.chat_id))
-    await update.message.reply_text(_build_commands_text(), parse_mode="Markdown")
+    await update.message.reply_text(_build_commands_text(), parse_mode="HTML")
 
 
 async def cmd_comandos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(_build_commands_text(), parse_mode="Markdown")
+    await update.message.reply_text(_build_commands_text(), parse_mode="HTML")
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4983,11 +5000,18 @@ async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # Lista completa, ordenada por distancia editorial (más afines primero)
-    if not sources:
-        await update.message.reply_text("No hay fuentes registradas.")
-        return
+    texto, kb = _fuentes_lista(sources)
+    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=kb)
 
+
+def _fuentes_lista(sources=None):
+    """(texto Markdown, teclado) de la lista completa de fuentes. La usan /fuentes y el botón
+    📡 de /rutina (3/11/2026: /fuentes salió del menú y se consolidó ahí)."""
+    sources = _load_sources() if sources is None else sources
+    if not sources:
+        return "No hay fuentes registradas.", None
+
+    # Lista completa, ordenada por distancia editorial (más afines primero)
     entries = sorted(
         sources.items(),
         key=lambda x: x[1].get("distancia_editorial", 99)
@@ -5008,9 +5032,7 @@ async def cmd_fuentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("➕ Agregar fuente", callback_data="src_add"),
         InlineKeyboardButton("🗑️ Borrar fuente", callback_data="src_del"),
     ]])
-    await update.message.reply_text(
-        "\n".join(parts), parse_mode="Markdown", reply_markup=kb,
-    )
+    return "\n".join(parts), kb
 
 
 async def handle_sources_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7688,6 +7710,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                             disable_web_page_preview=True)
         except Exception:
             pass
+        return
+
+    # ── /rutina: fuentes RSS (antes /fuentes en el menú; 3/11/2026) ──
+    if query.data == "rutina_fuentes":
+        await query.answer()
+        texto, kb = await asyncio.to_thread(_fuentes_lista)
+        await query.message.reply_text(texto, parse_mode="Markdown", reply_markup=kb)
         return
 
     # ── AUTO-PARCHE del supervisor: generar diff / aplicar+deploy / revertir (async, con rollback) ──
@@ -16624,7 +16653,8 @@ _RUTINA_TXT = (
 
 
 def _rutina_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔎 ¿Está todo bien?", callback_data="rutina_check")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔎 ¿Está todo bien?", callback_data="rutina_check")],
+                                 [InlineKeyboardButton("📡 Fuentes RSS", callback_data="rutina_fuentes")]])
 
 
 def _chequeo_rapido() -> str:
@@ -17154,35 +17184,9 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def _post_init(application: Application) -> None:
     from telegram import BotCommand
-    await application.bot.set_my_commands([
-        # ── Pipeline editorial ────────────────────────────────────────────────
-        BotCommand("rutina",            "Tu rutina diaria + chequeo de salud en un toque"),
-        BotCommand("pipeline",          "Estado del pipeline editorial — todas las etapas"),
-        BotCommand("programadas",       "Notas programadas — reprogramar o publicar ahora"),
-        BotCommand("eventos",           "Agenda — boletín semanal + efemérides que vienen"),
-        BotCommand("briefing",          "Briefing manual — /briefing (notas) · /briefing auto (config)"),
-        BotCommand("ciclaje",           "Briefing auto — notas por corrida + horarios (= /briefing auto)"),
-        BotCommand("coladepublicacion", "Cola de publicación — confirmar destinos"),
-        BotCommand("editor",            "Editor — agenda temática, descubrimientos, living notes"),
-        BotCommand("ingesta",           "Disparar ingesta manual de fuentes RSS"),
-        BotCommand("nutricion",         "Briefing de nutrición — alimentar living notes"),
-        # ── Contenido ─────────────────────────────────────────────────────────
-        BotCommand("vivo",              "Cobertura EN VIVO — nota + redes, todo desde el bot"),
-        BotCommand("input_evento",      "Tandas EN VIVO — texto, audios y fotos para la crónica"),
-        BotCommand("evento",            "Cobertura de evento propio — audios, fotos y texto → nota"),
-        BotCommand("campania",          "Campaña de evento en curso — revivir, armar o cancelar"),
-        BotCommand("frases",            "Crear nota con frase inspiradora + imagen"),
-        BotCommand("notamanual",        "Cargar columna de autor (PDF o texto) y publicarla"),
-        BotCommand("livingnotes",       "Catálogo de notas vivas por categoría"),
-        BotCommand("reel",              "Armar el reel de una ficha viva"),
-        BotCommand("publicador",        "Gestionar nota publicada — links, republicar, borrar"),
-        BotCommand("editar",            "Editar una nota ya publicada"),
-        # ── Información ───────────────────────────────────────────────────────
-        BotCommand("stats",             "Estadísticas del día (publicadas, errores)"),
-        # ── Configuración ─────────────────────────────────────────────────────
-        BotCommand("fuentes",           "Gestionar fuentes RSS del EDITOR"),
-    ])
-    logger.info("BotCommands registrados en Telegram")
+    # La lista vive en comandos_menu.MENU (la misma que arma /help y lee el informe de uso).
+    await application.bot.set_my_commands([BotCommand(c, d) for _g, c, d in comandos_menu.MENU])
+    logger.info("BotCommands registrados en Telegram (%d)", len(comandos_menu.MENU))
 
 
 async def on_finde_approval_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
