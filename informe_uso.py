@@ -34,6 +34,8 @@ def dm(ts):
 
 
 def datos():
+    if not os.path.exists(DB):   # la crea el bot con la primera interacción del operador
+        return (None, None, 0), []
     with sqlite3.connect("file:%s?mode=ro" % DB, uri=True) as c:
         rango = c.execute("SELECT MIN(ts), MAX(ts), COUNT(*) FROM uso").fetchone()
         filas = c.execute("SELECT tipo, clave, COUNT(*), MAX(ts) FROM uso GROUP BY tipo, clave "
