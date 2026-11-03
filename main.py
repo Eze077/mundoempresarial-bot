@@ -15988,6 +15988,21 @@ def _edito_get_temas():
         return []
 
 
+def _edito_get_negras():
+    """Temas en lista negra: no aparecen en la lista de temas, se ven (y se sacan) desde acá."""
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(_EDITO_DB) as conn:
+            conn.row_factory = _sq.Row
+            rows = conn.execute(
+                "SELECT id, nombre, nivel, estado, n_notas FROM temas WHERE estado='lista_negra' ORDER BY nombre"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"_edito_get_negras: {e}")
+        return []
+
+
 def _edito_get_subtemas(parent_id: int):
     import sqlite3 as _sq
     try:
@@ -16215,6 +16230,7 @@ def _edito_main_kb(temas_count: int = 0, disc_count: int = 0) -> InlineKeyboardM
             InlineKeyboardButton("🗂 Seed desde WP",   callback_data="edito_seedwp"),
             InlineKeyboardButton("🔄 Scan publicados", callback_data="edito_rebuild"),
         ],
+        [InlineKeyboardButton(f"🚫 Lista negra ({len(_edito_get_negras())})", callback_data="edito_negras")],
         [InlineKeyboardButton("❌ Cerrar", callback_data="edito_close")],
     ])
 
@@ -16273,11 +16289,27 @@ def _edito_tema_detail_kb(tema_id: int, nsub: int = 0, parent_id: int = None) ->
         rows.append([InlineKeyboardButton(
             "🔀 Mover como subtema de...", callback_data=f"edito_chpadre_{tema_id}"
         )])
-    rows.append([
-        InlineKeyboardButton("❌ Cerrar",      callback_data=f"edito_cerrar_{tema_id}"),
-        InlineKeyboardButton("🚫 Lista negra", callback_data=f"edito_negra_{tema_id}"),
-    ])
-    back_cb = f"edito_subtemas_{parent_id}" if is_sub else "edito_temas_0"
+    # Botones según el estado: cada uno se puede deshacer desde el mismo lugar.
+    t = _edito_get_tema(tema_id) or {}
+    estado = t.get("estado") or "activo"
+    if estado == "lista_negra":
+        rows.append([InlineKeyboardButton("🟢 Sacar de lista negra", callback_data=f"edito_activar_{tema_id}")])
+    elif estado == "cerrado":
+        rows.append([InlineKeyboardButton("🟢 Reactivar", callback_data=f"edito_activar_{tema_id}")])
+    else:
+        fila = []
+        if estado == "saturado":
+            fila.append(InlineKeyboardButton("🟢 Reactivar", callback_data=f"edito_activar_{tema_id}"))
+        elif t.get("embedding"):
+            # Sin notas el tema no tiene con qué reconocer sus noticias: «saturado» no haría nada.
+            fila.append(InlineKeyboardButton("🟡 Saturado", callback_data=f"edito_satur_{tema_id}"))
+        fila.append(InlineKeyboardButton("🚫 Lista negra", callback_data=f"edito_negra_{tema_id}"))
+        rows.append(fila)
+        rows.append([InlineKeyboardButton("❌ Cerrar tema", callback_data=f"edito_cerrar_{tema_id}")])
+    if estado == "lista_negra":
+        back_cb = "edito_negras"
+    else:
+        back_cb = f"edito_subtemas_{parent_id}" if is_sub else "edito_temas_0"
     rows.append([InlineKeyboardButton("↩ Volver", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
@@ -16396,11 +16428,22 @@ def _edito_tema_detail_text(t: dict, nsub: int = 0, parent_nombre: str = "") -> 
     sub_txt = f"\nSubtemas: <b>{nsub}</b>" if nsub else ""
     pad_txt = f"\nSubtema de: <i>{parent_nombre}</i>" if parent_nombre else ""
     icono   = "🔹" if parent_nombre else "📌"
+    efecto  = {
+        "activo":      "sus noticias entran al briefing",
+        "saturado":    "sus noticias van a 🔭 Descubrimientos, no al briefing",
+        "lista_negra": "sus noticias no entran más",
+        "cerrado":     "no se sigue (sus noticias entran por la vía general)",
+    }.get(t["estado"], "")
+    leyenda = ("\n\n<i>🟡 Saturado: sus noticias van a 🔭 Descubrimientos (vencen a las 48 h).\n"
+               "🚫 Lista negra: no entran más (por parecido o por las palabras del nombre).\n"
+               "❌ Cerrar tema: deja de seguirlo, sus noticias entran igual.</i>")
     return (
         f"{icono} <b>{t['nombre']}</b>{pad_txt}\n\n"
         f"Temporalidad: {ne} <b>{t['nivel']}</b>  |  Estado: {ee} {t['estado']}\n"
+        f"→ {efecto}\n"
         f"Notas cubierta: <b>{t.get('n_notas',0)}</b>{sub_txt}\n"
         f"Primera nota: {pv or '—'}  |  Última: {uv or '—'}"
+        f"{leyenda}"
     )
 
 
@@ -16784,6 +16827,16 @@ async def cmd_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _edito_toast(query, txt: str, show_alert: bool = False):
+    """handle_edito_button contesta el callback al entrar y Telegram solo acepta UNA respuesta por
+    botón: los avisos de adentro no se ven. Antes eran `query.answer(...)` sueltos y, si Telegram
+    los rechazaba, cortaban el handler a mitad (la acción ya hecha, el mensaje sin actualizar)."""
+    try:
+        await query.answer(txt, show_alert=show_alert)
+    except Exception:
+        pass
+
+
 async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -16802,7 +16855,9 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         import sys as _sys
         _sys.path.insert(0, "/opt/me-harness")
         try:
-            from agents import editor as _ed
+            # Vive en clusterizador desde que agents/editor.py pasó a ser el «gran articulador»:
+            # el botón tiraba AttributeError (3/11/2026).
+            from agents import clusterizador as _ed
             result = await asyncio.to_thread(_ed.seed_temas_from_wp_categories)
             temas  = await asyncio.to_thread(_edito_get_temas)
             discs  = await asyncio.to_thread(_edito_get_descubrimientos)
@@ -16821,7 +16876,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         import sys as _sys
         _sys.path.insert(0, "/opt/me-harness")
         try:
-            from agents import editor as _ed
+            from agents import clusterizador as _ed
             n      = await asyncio.to_thread(_ed.build_temas_from_published, 30)
             temas  = await asyncio.to_thread(_edito_get_temas)
             discs  = await asyncio.to_thread(_edito_get_descubrimientos)
@@ -16862,7 +16917,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         tema_id   = int(d.split("_")[2])
         t         = await asyncio.to_thread(_edito_get_tema, tema_id)
         if not t:
-            await query.answer("Tema no encontrado", show_alert=True)
+            await _edito_toast(query, "Tema no encontrado", show_alert=True)
             return
         nsub      = await asyncio.to_thread(_edito_count_subtemas, tema_id)
         parent_id = t.get("parent_id")
@@ -16895,7 +16950,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     if d.startswith("edito_indep_"):
         tema_id = int(d.split("_")[2])
         await asyncio.to_thread(_edito_make_independent, tema_id)
-        await query.answer("⬆️ Ahora es tema independiente", show_alert=False)
+        await _edito_toast(query, "⬆️ Ahora es tema independiente", show_alert=False)
         t    = await asyncio.to_thread(_edito_get_tema, tema_id)
         nsub = await asyncio.to_thread(_edito_count_subtemas, tema_id)
         await query.edit_message_text(
@@ -16926,7 +16981,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         await asyncio.to_thread(_edito_set_parent, tema_id, parent_id)
         parent  = await asyncio.to_thread(_edito_get_tema, parent_id)
         pnombre = parent["nombre"] if parent else f"#{parent_id}"
-        await query.answer(f"✅ Padre: «{pnombre}»", show_alert=False)
+        await _edito_toast(query, f"✅ Padre: «{pnombre}»", show_alert=False)
         t    = await asyncio.to_thread(_edito_get_tema, tema_id)
         nsub = await asyncio.to_thread(_edito_count_subtemas, tema_id)
         await query.edit_message_text(
@@ -16981,7 +17036,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode="HTML",
                 reply_markup=_edito_tema_detail_kb(tema_id, nsub, parent_id),
             )
-        await query.answer(f"✅ Temporalidad → {nivel}", show_alert=False)
+        await _edito_toast(query, f"✅ Temporalidad → {nivel}", show_alert=False)
         return
 
     # ── Cerrar tema ───────────────────────────────────────────────────────────
@@ -16995,21 +17050,44 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="HTML",
             reply_markup=_edito_main_kb(len(temas), len(discs)),
         )
-        await query.answer("⛔ Tema cerrado", show_alert=False)
+        await _edito_toast(query, "⛔ Tema cerrado", show_alert=False)
         return
 
-    # ── Lista negra ───────────────────────────────────────────────────────────
-    if d.startswith("edito_negra_"):
-        tema_id = int(d.split("_")[2])
-        await asyncio.to_thread(_edito_set_tema_estado, tema_id, "lista_negra")
-        temas = await asyncio.to_thread(_edito_get_temas)
-        discs = await asyncio.to_thread(_edito_get_descubrimientos)
-        await query.edit_message_text(
-            _edito_main_text(len(temas), len(discs)),
-            parse_mode="HTML",
-            reply_markup=_edito_main_kb(len(temas), len(discs)),
-        )
-        await query.answer("🚫 En lista negra — no atraerá más material", show_alert=False)
+    # ── Lista negra / saturado / reactivar (3/11/2026: antes la lista negra no frenaba nada y
+    #    «saturado» no tenía botón). Se queda en la ficha del tema para poder deshacerlo. ──────
+    for _pref, _estado, _aviso in (
+        ("edito_negra_",   "lista_negra", "🚫 En lista negra: sus noticias no entran desde la próxima ingesta"),
+        ("edito_satur_",   "saturado",    "🟡 Saturado: sus noticias van a 🔭 Descubrimientos"),
+        ("edito_activar_", "activo",      "🟢 Activo de nuevo"),
+    ):
+        if d.startswith(_pref):
+            tema_id = int(d[len(_pref):])
+            await asyncio.to_thread(_edito_set_tema_estado, tema_id, _estado)
+            t = await asyncio.to_thread(_edito_get_tema, tema_id)
+            if not t:
+                await _edito_toast(query, "Tema no encontrado", show_alert=True)
+                return
+            nsub      = await asyncio.to_thread(_edito_count_subtemas, tema_id)
+            parent_id = t.get("parent_id") or None
+            p = await asyncio.to_thread(_edito_get_tema, parent_id) if parent_id else None
+            # El aviso va en el texto: el callback ya se contestó arriba y Telegram no acepta otro.
+            await query.edit_message_text(
+                f"<b>{_aviso}</b>\n\n" + _edito_tema_detail_text(t, nsub, p["nombre"] if p else ""),
+                parse_mode="HTML",
+                reply_markup=_edito_tema_detail_kb(tema_id, nsub, parent_id),
+            )
+            return
+
+    if d == "edito_negras":
+        negras = await asyncio.to_thread(_edito_get_negras)
+        rows = [[InlineKeyboardButton(f"🔴 {x['nombre'][:34]}", callback_data=f"edito_tema_{x['id']}")]
+                for x in negras[:30]]
+        rows.append([InlineKeyboardButton("↩ Menú", callback_data="edito_main")])
+        txt = ("🚫 <b>Lista negra</b>\n\n" +
+               ("Las noticias de estos temas no entran. Tocá uno para sacarlo." if negras else
+                "Vacía. Para vetar un tema: abrilo y tocá 🚫 Lista negra "
+                "(si no existe, ➕ Agregar tema con la palabra a vetar, ej. «Adorni»)."))
+        await query.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     # ── Descubrimientos — acciones ok/del ────────────────────────────────────
@@ -17020,10 +17098,10 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         pos     = int(parts[3])
         if is_ok:
             await asyncio.to_thread(_edito_promote_disc, job_id)
-            await query.answer("✅ Enviado a briefing", show_alert=False)
+            await _edito_toast(query, "✅ Enviado a briefing", show_alert=False)
         else:
             await asyncio.to_thread(_edito_reject_disc, job_id)
-            await query.answer("🗑 Descartado", show_alert=False)
+            await _edito_toast(query, "🗑 Descartado", show_alert=False)
         discs = await asyncio.to_thread(_edito_get_descubrimientos)
         if not discs:
             temas = await asyncio.to_thread(_edito_get_temas)
@@ -17131,7 +17209,7 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         await asyncio.to_thread(_edito_unificar, src_id, dst_id)
         dst = await asyncio.to_thread(_edito_get_tema, dst_id)
         dname = dst["nombre"] if dst else f"#{dst_id}"
-        await query.answer(f"✅ Unificado en «{dname}»", show_alert=False)
+        await _edito_toast(query, f"✅ Unificado en «{dname}»", show_alert=False)
         nsub = await asyncio.to_thread(_edito_count_subtemas, dst_id)
         await query.edit_message_text(
             _edito_tema_detail_text(dst, nsub) if dst else "Tema destino no encontrado.",
@@ -17157,10 +17235,10 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         nombre    = context.user_data.pop("edito_add_nombre", None)
         parent_id = context.user_data.pop("edito_add_parent_id", None)
         if not nombre:
-            await query.answer("No encontré el nombre del tema", show_alert=True)
+            await _edito_toast(query, "No encontré el nombre del tema", show_alert=True)
             return
         tid = await asyncio.to_thread(_edito_upsert_tema, nombre, nivel, parent_id)
-        await query.answer(f"✅ «{nombre}» creado como {nivel}", show_alert=False)
+        await _edito_toast(query, f"✅ «{nombre}» creado como {nivel}", show_alert=False)
         if parent_id:
             # Volver al detalle del padre
             parent  = await asyncio.to_thread(_edito_get_tema, parent_id)
@@ -17172,12 +17250,13 @@ async def handle_edito_button(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=_edito_tema_detail_kb(parent_id, nsub, pparent) if parent else None,
             )
         else:
-            temas = await asyncio.to_thread(_edito_get_temas)
-            discs = await asyncio.to_thread(_edito_get_descubrimientos)
+            # La ficha del tema nuevo, no el menú: un tema sin notas queda último en la lista y
+            # lo habitual es crearlo para vetarlo (🚫 Lista negra) en el mismo paso.
+            t = await asyncio.to_thread(_edito_get_tema, tid)
             await query.edit_message_text(
-                _edito_main_text(len(temas), len(discs)),
+                f"<b>✅ «{nombre}» creado</b>\n\n" + _edito_tema_detail_text(t, 0),
                 parse_mode="HTML",
-                reply_markup=_edito_main_kb(len(temas), len(discs)),
+                reply_markup=_edito_tema_detail_kb(tid, 0, None),
             )
         return
 
