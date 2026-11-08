@@ -6907,6 +6907,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from agents import curador as _cur_hl
             await asyncio.to_thread(_cur_hl.run_briefing_single, job_id_hl)
         except Exception as _e_hl:
+            # Sin este log, un link que no se puede leer no dejaba rastro en el journal (caso
+            # vaticannews 8/11/2026: Leo vio el error y el journal no tenía nada que mirar).
+            logger.warning("link manual falló: %s — %s: %s", url[:120], type(_e_hl).__name__,
+                           str(_e_hl)[:200])
             await update.message.reply_text(f"❌ Error al agregar al harness: {_e_hl}")
         return
 
