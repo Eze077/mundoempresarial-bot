@@ -4587,7 +4587,9 @@ def _format_credits_report(status: dict) -> str:
             emoji, detail, tier = status[key]
             label, desc = SERVICE_LABELS[key]
             tier_tag = f" _({tier})_" if tier != "pago" else ""
-            lines.append(f"  {emoji} *{label}*{tier_tag}: {detail}")
+            # El detalle viene de las APIs («@MundoEmpresarial_bot», «RAPIDAPI_TEST_HOST»): un «_» suelto
+            # rompía el Markdown y el reporte del domingo no salía (8/11/2026).
+            lines.append(f"  {emoji} *{label}*{tier_tag}: {md_escape(detail)}")
             lines.append(f"      _{desc}_")
         lines.append("")
 
@@ -4614,7 +4616,7 @@ def _format_credits_report(status: dict) -> str:
                 continue
             emoji, detail, _ = status[key]
             label, desc = SERVICE_LABELS[key]
-            lines.append(f"  {emoji} *{label}*: {detail}")
+            lines.append(f"  {emoji} *{label}*: {md_escape(detail)}")
 
     return "\n".join(lines)
 
@@ -15155,14 +15157,20 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     best_slots = _ga4_best_slots(hourly)
     slots_str = " / ".join(f"{h:02d}:00" for h in best_slots)
 
-    # Fuentes top
+    # Fuentes top. Fuentes, títulos y el texto de GPT van escapados en el MENSAJE (Markdown): un «_»
+    # suelto («me_ads/nota») hacía rebotar el reporte entero (8/11/2026). El prompt usa el texto crudo.
     sources_text = "\n".join(
         f"  • {s['source']}/{s['medium']}: {s['sessions']} sesiones"
+        for s in sources[:5]
+    )
+    sources_md = "\n".join(
+        f"  • {md_escape(s['source'])}/{md_escape(s['medium'])}: {s['sessions']} sesiones"
         for s in sources[:5]
     )
 
     # Top páginas
     pages_text = "\n".join(f"  • {p['title']}: {p['views']} vistas" for p in pages[:5])
+    pages_md = "\n".join(f"  • {md_escape(p['title'])}: {p['views']} vistas" for p in pages[:5])
 
     # Dispositivos
     dev_text = " | ".join(f"{k}: {v}" for k, v in devices.items())
@@ -15208,11 +15216,11 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         f"{'✅ Objetivo superado!' if avg_users >= goal else f'Faltan *{gap} usuarios/día* para el objetivo'}\n"
         f"{slots_notice}\n\n"
         f"⏱ *Horas pico:* {slots_str}\n\n"
-        f"🌐 *Fuentes de tráfico:*\n{sources_text}\n\n"
-        f"📄 *Top notas:*\n{pages_text}\n\n"
+        f"🌐 *Fuentes de tráfico:*\n{sources_md}\n\n"
+        f"📄 *Top notas:*\n{pages_md}\n\n"
     )
     if gpt_recs:
-        msg += f"💡 *3 recomendaciones para llegar a 1.000:*\n{gpt_recs}"
+        msg += f"💡 *3 recomendaciones para llegar a 1.000:*\n{md_escape(gpt_recs.replace('**', ''))}"
 
     try:
         await context.bot.send_message(
