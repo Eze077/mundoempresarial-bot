@@ -17502,8 +17502,10 @@ def _ortografia_cambios(texto: str) -> list:
             "Sos corrector ortográfico de español rioplatense. Del texto, listá SOLO errores claros: "
             "tildes faltantes o sobrantes, palabras mal escritas, letras repetidas o cambiadas, "
             "mayúscula inicial evidente faltante, ¿ ¡ de apertura faltantes, espacios dobles. "
-            "NO cambies estilo, vocabulario, voseo, nombres propios, siglas, cifras, anglicismos ni "
-            "construcciones del autor. Ante la duda, NO listes. Cada cambio debe ser una palabra o "
+            "NO cambies estilo, vocabulario, voseo, siglas, cifras, anglicismos ni "
+            "construcciones del autor, ni reemplaces nombres propios por otros; PERO sí corregí la tilde "
+            "faltante en nombres conocidos en español (ej. «Leon»→«León», «Peron»→«Perón», «Jose»→«José»). "
+            "Ante la duda, NO listes. Cada cambio debe ser una palabra o "
             "frase corta COPIADA EXACTA del texto ('de') y su versión corregida ('a'). "
             'Devolvé SOLO JSON: {"cambios":[{"de":"...","a":"..."}]}\n\nTEXTO:\n' + trozo)
         try:
