@@ -1727,6 +1727,14 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
         except Exception as fetch_err:
             logger.warning(f"append_social_meta: no se pudo fetchear contenido fresco ({fetch_err}), usando el cacheado")
 
+        if not (content or "").strip():
+            logger.error(f"append_social_meta: contenido vacío en #{post_id}, no escribo (evita borrar la nota)")
+            return False
+        # Combinar con lo ya registrado: guardar el ID de TG no debe borrar el del tweet (y viceversa)
+        _prev = parse_social_meta(content)
+        tweet_id = tweet_id or _prev.get("tweet_id", "")
+        tg_msg_id = tg_msg_id or _prev.get("tg_msg", "")
+        li_urn = li_urn or _prev.get("li_urn", "")
         # Remover comentarios previos si existen
         clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
         meta_parts = []
@@ -11847,6 +11855,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res_lines.append(f"✅ WP: {post_url}")
                     if _fr_result.get("tg_msg_id"):
                         res_lines.append("✅ Canal TG")
+                        # Registrar el mensaje de TG en la nota para poder borrarlo desde /editar
+                        await asyncio.to_thread(append_social_meta, post_id, "", "", _fr_result["tg_msg_id"])
                     if _fr_result.get("tweet_id"):
                         res_lines.append("✅ Twitter")
                     # Marcar como ya publicado en redes para no repetir abajo
@@ -12063,6 +12073,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     json=payload, auth=auth, timeout=30,
                 )
                 if r_tw.status_code in (200, 201):
+                    try:
+                        _tw_id = (r_tw.json().get("data") or {}).get("id")
+                        if _tw_id and ft.get("post_id"):
+                            await asyncio.to_thread(append_social_meta, ft["post_id"], "", str(_tw_id))
+                    except Exception as _e:
+                        logger.warning(f"Frase: no pude registrar tweet_id: {_e}")
                     await query.edit_message_text(
                         f"✅ Twitteado!{chr(10) + 'WP: ' + post_url if post_url else ''}"
                     )
@@ -15915,10 +15931,12 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
             cap += f"\n\n{custom_ht}"
             bio = io.BytesIO(img_bytes)
             bio.name = "frase.png"
-            await context.bot.send_photo(
+            _msg_tg = await context.bot.send_photo(
                 chat_id=TELEGRAM_CHANNEL, photo=bio, caption=cap, parse_mode="Markdown",
             )
             results.append("✅ Canal TG")
+            if post_id:
+                await asyncio.to_thread(append_social_meta, post_id, "", "", _msg_tg.message_id)
         except Exception as e:
             results.append(f"❌ Canal TG: {e}")
 
