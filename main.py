@@ -5721,7 +5721,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await update.message.reply_text("Error: no hay frase pendiente (arrancá con /frases).")
             return
-        fp[campo] = text_in.strip()
+        fp[campo] = await _ortografia_corto(update, text_in.strip())
         await update.message.reply_text("🎨 Regenerando placa…")
         try:
             from frases_gen import generate_frase_image
@@ -6437,7 +6437,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post:
             await update.message.reply_text("No hay nota en edición.")
             return
-        new_title = text_in
+        new_title = await _ortografia_corto(update, text_in)
         ok = await asyncio.to_thread(
             update_post, post["id"],
             {"title": new_title, "slug": url_slug(new_title)}
@@ -15715,6 +15715,7 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    frase = await _ortografia_corto(update, frase)
     msg = await update.message.reply_text("🎨 Generando imagen...")
     try:
         from frases_gen import generate_frase_image
@@ -17486,6 +17487,72 @@ def _doc_sin_titulo_ni_firma(texto: str, title: str = ""):
     return "\n\n".join(bloques), firma
 
 
+def _ortografia_cambios(texto: str) -> list:
+    """Corrector ortográfico para lo que Leo carga a mano (frases, títulos, columnas, PDF).
+    Devuelve SOLO una lista de cambios [{"de","a"}] (tildes, tipeos, mayúsculas evidentes, signos ¿¡,
+    espacios dobles). NO reescribe: quien aplica es _ortografia_aplicar (reemplazo literal), así que
+    el texto del autor no se toca más que en esas palabras. Sin clave o ante error → [] (no frena nada)."""
+    texto = (texto or "").strip()
+    if not texto or not OPENAI_API_KEY:
+        return []
+    cambios, vistos = [], set()
+    for ini in range(0, min(len(texto), 36000), 12000):
+        trozo = texto[ini:ini + 12000]
+        prompt = (
+            "Sos corrector ortográfico de español rioplatense. Del texto, listá SOLO errores claros: "
+            "tildes faltantes o sobrantes, palabras mal escritas, letras repetidas o cambiadas, "
+            "mayúscula inicial evidente faltante, ¿ ¡ de apertura faltantes, espacios dobles. "
+            "NO cambies estilo, vocabulario, voseo, nombres propios, siglas, cifras, anglicismos ni "
+            "construcciones del autor. Ante la duda, NO listes. Cada cambio debe ser una palabra o "
+            "frase corta COPIADA EXACTA del texto ('de') y su versión corregida ('a'). "
+            'Devolvé SOLO JSON: {"cambios":[{"de":"...","a":"..."}]}\n\nTEXTO:\n' + trozo)
+        try:
+            r = openai_post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0, "response_format": {"type": "json_object"}},
+                timeout=60)
+            if r.status_code != 200:
+                logger.warning(f"_ortografia_cambios {r.status_code}: {r.text[:150]}")
+                continue
+            for c in json.loads(r.json()["choices"][0]["message"]["content"]).get("cambios", []):
+                de, a = str(c.get("de", "")).strip(), str(c.get("a", "")).strip()
+                # defensas: tiene que existir tal cual, ser distinto y corto (no reescritura)
+                if (de and a and de != a and de in texto and len(de) <= 40 and len(a) <= 40
+                        and de not in vistos):
+                    vistos.add(de); cambios.append({"de": de, "a": a})
+        except Exception as e:
+            logger.warning(f"_ortografia_cambios error: {e}")
+    return cambios[:60]
+
+
+def _ortografia_aplicar(texto: str, cambios: list) -> str:
+    """Reemplazo literal (palabra completa) de cada cambio. Idempotente y sin tocar nada más."""
+    for c in cambios or []:
+        texto = re.sub(r"(?<!\w)" + re.escape(c["de"]) + r"(?!\w)", c["a"], texto or "")
+    return texto
+
+
+def _ortografia_resumen(cambios: list, tope: int = 8) -> str:
+    return "\n".join(f"• {c['de']} → {c['a']}" for c in cambios[:tope]) + (
+        f"\n… y {len(cambios) - tope} más" if len(cambios) > tope else "")
+
+
+async def _ortografia_corto(update, texto: str) -> str:
+    """Frases / títulos / etiquetas: corrige solos y avisa qué cambió."""
+    cambios = await asyncio.to_thread(_ortografia_cambios, texto)
+    if not cambios:
+        return texto
+    nuevo = _ortografia_aplicar(texto, cambios)
+    if nuevo != texto:
+        try:
+            await update.message.reply_text("✏️ Corregí la ortografía:\n" + _ortografia_resumen(cambios))
+        except Exception:
+            pass
+    return nuevo
+
+
 def _gpt_nota_manual_extract(raw_text: str):
     """GPT separa la columna cruda en campos. Preserva la voz del autor; no inventa."""
     if not OPENAI_API_KEY:
@@ -17954,8 +18021,11 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
         return
     # Elegir el TRATAMIENTO antes de armar (botones): tal cual (preserva) vs estilo ME (reescribe)
     import html as _hh
+    # Ortografía: NO se aplica sola (la voz del autor se preserva); se propone con un botón
+    _ort = await asyncio.to_thread(
+        _ortografia_cambios, (ex.get("title") or "") + "\n" + limpio)
     context.user_data["nota_manual_ex"] = {"ex": ex, "pdf_images": pdf_images,
-                                           "texto": limpio}
+                                           "texto": limpio, "ortog": _ort}
     context.user_data.pop("nota_manual", None)
     if status_msg:
         try: await status_msg.edit_text("📝 Columna recibida.")
@@ -17966,11 +18036,15 @@ async def _process_nota_manual(update, context, raw_text: str, status_msg=None, 
            "firma del autor. Respeta tu voz — no reescribe ni una palabra.\n\n"
            "✍️ <b>Estilo ME</b>: lo reescribo con bullets, secciones y «Resumen para pymes», "
            "como una nota del diario.")
-    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=_nota_manual_modo_kb())
+    if _ort:
+        txt += ("\n\n✏️ <b>Ortografía: %d posibles correcciones</b>\n<pre>%s</pre>"
+                % (len(_ort), _hh.escape(_ortografia_resumen(_ort))))
+    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=_nota_manual_modo_kb(len(_ort)))
 
 
-def _nota_manual_modo_kb() -> dict:
-    return {"inline_keyboard": [
+def _nota_manual_modo_kb(n_ortog: int = 0) -> dict:
+    return {"inline_keyboard": (
+        [[{"text": "✏️ Corregir ortografía (%d)" % n_ortog, "callback_data": "nm_ortog"}]] if n_ortog else []) + [
         [{"text": "📝 Transcribir tal cual (recomendado)", "callback_data": "nm_modo_talcual"}],
         [{"text": "✍️ Procesar estilo ME", "callback_data": "nm_modo_estilome"}],
         [{"text": "✖️ Cancelar", "callback_data": "nm_cancel"}]]}
@@ -18079,6 +18153,21 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
         for _k in ("nota_manual", "nota_manual_ex", "nm_enfoque", "nm_capa", "nm_d"):
             context.user_data.pop(_k, None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    if act == "ortog":
+        stash = context.user_data.get("nota_manual_ex")
+        if not stash:
+            await q.edit_message_text("⚠️ Se perdió la columna. Reiniciá con /notamanual.")
+            return
+        cs = stash.get("ortog") or []
+        stash["texto"] = _ortografia_aplicar(stash.get("texto", ""), cs)
+        for _k in ("title", "bajada", "cuerpo"):
+            if stash["ex"].get(_k):
+                stash["ex"][_k] = _ortografia_aplicar(stash["ex"][_k], cs)
+        stash["ortog"] = []
+        await q.edit_message_text(
+            "✏️ Apliqué %d correcciones de ortografía. ¿Cómo la publico?" % len(cs),
+            reply_markup=_nota_manual_modo_kb(0))
         return
     # ── Flujo de ENFOQUE (estilo ME) ──────────────────────────────────────────
     if act.startswith("enf:"):          # capa 1-4 del briefing → enfoque de esa categoría
