@@ -9,11 +9,10 @@ Entra /encuesta (se usaba y no estaba). Los que salen del menú siguen funcionan
 # (grupo, comando, descripción). El orden es el del menú.
 MENU = [
     ("Pipeline editorial", "rutina", "Tu rutina diaria + chequeo de salud y fuentes RSS"),
-    ("Pipeline editorial", "pipeline", "Estado del pipeline editorial — todas las etapas"),
+    ("Pipeline editorial", "pipeline", "Estado del pipeline editorial — todas las etapas · 🗂 cola de publicación"),
     ("Pipeline editorial", "programadas", "Notas programadas — reprogramar o publicar ahora"),
     ("Pipeline editorial", "eventos", "Agenda — boletín semanal + efemérides que vienen"),
     ("Pipeline editorial", "briefing", "Briefing manual — /briefing (notas) · /briefing auto (config)"),
-    ("Pipeline editorial", "coladepublicacion", "Cola de publicación — confirmar destinos"),
     ("Pipeline editorial", "ingesta", "Disparar ingesta manual de fuentes RSS"),
     ("Pipeline editorial", "nutricion", "Briefing de nutrición — alimentar living notes"),
     ("Contenido", "evento", "Cobertura de evento propio — audios, fotos y texto → nota"),
@@ -45,6 +44,7 @@ OCULTOS = [
     ("creditos", "Estado de los servicios pagos (OpenAI, X, EnvíaloSimple…)"),
     ("testtwitter", "Diagnóstico de la conexión con X"),
     ("desbloquear", "Desbloquear IPs de redaccion.mundoempresarial.ar"),
+    ("coladepublicacion", "Cola de publicación, para ver (también /pipeline cola o el botón 🗂 en /pipeline)"),
     ("stats", "(viejo) redirige a /coladepublicacion"),
     ("STOP", "Pausar el bot (no procesa links ni programados)"),
     ("RESUME", "Reactivar el bot después de /STOP"),

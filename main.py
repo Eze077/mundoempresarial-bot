@@ -7796,6 +7796,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # ── /pipeline → 🗂 Cola de publicación (antes /coladepublicacion en el menú; 16/11/2026) ──
+    if query.data == "pip_cola_pub":
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        await _cola_vista(query.message, context)
+        return
+
     # ── /rutina: fuentes RSS (antes /fuentes en el menú; 3/11/2026) ──
     if query.data == "rutina_fuentes":
         await query.answer()
@@ -14965,26 +14974,23 @@ async def cmd_lector(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_coladepublicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Muestra la cola de publicación del harness con sugerencias del agente.
-    Leo confirma/ajusta destino → el job pasa a redaccion.
-    """
-    import sys as _sys, json as _js
+    """Fuera del menú desde el 16/11/2026 (Leo: «no uso cola de publicación directamente, ponela como subcomando en otro
+    comando, es para ver»). Ahora vive en /pipeline (botón 🗂 o `/pipeline cola`); escrito sigue andando."""
+    await _cola_vista(update.message, context)
+
+
+async def _cola_vista(message, context):
+    """Resumen de la cola de publicación, SOLO PARA VER: cuántas hay en cola, en pipeline y programadas, con botones
+    para mirar cada grupo. No dispara el agente de cola (el harness la procesa solo cada 2 minutos) ni ofrece procesar."""
+    import sys as _sys
     _sys.path.insert(0, "/opt/me-harness")
     try:
         import broker as _br_cola
-        from agents import cola as _cola_agent
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error cargando harness: {e}")
+        await message.reply_text(f"⚠️ Error cargando harness: {e}")
         return
 
-    msg = await update.message.reply_text("🗂 Cargando cola de publicación…")
-
-    # Ejecutar el agente para asignar sugerencias pendientes
-    try:
-        await asyncio.to_thread(_cola_agent.run_once)
-    except Exception:
-        pass
+    msg = await message.reply_text("🗂 Cargando cola de publicación…")
 
     jobs = _br_cola.dequeue_cola(limit=20)
 
@@ -15001,22 +15007,11 @@ async def cmd_coladepublicacion(update: Update, context: ContextTypes.DEFAULT_TY
     await msg.delete()
 
     if not jobs and not n_pendientes and not n_programadas_db:
-        await update.message.reply_text(
-            "📭 <b>Cola vacía</b> — no hay notas esperando publicación.\n"
-            "<i>Usá /briefing para curar notas primero.</i>",
+        await message.reply_text(
+            "📭 <b>Cola vacía</b> — no hay notas esperando publicación.",
             parse_mode="HTML"
         )
         return
-
-    # ── Solo el panel resumen — las cards se muestran con "Notas a procesar" ──
-    manualmente = sum(
-        1 for j in jobs
-        if j.get("agent_suggestion") and
-        "cambiado manualmente" in (
-            __import__("json").loads(j["agent_suggestion"]).get("reasoning", "")
-            if j["agent_suggestion"] else ""
-        )
-    )
 
     resumen = f"🗂 <b>Cola de publicación</b>"
     if jobs:
@@ -15026,27 +15021,17 @@ async def cmd_coladepublicacion(update: Update, context: ContextTypes.DEFAULT_TY
     if n_programadas_db:
         resumen += f"\n🗓 Programadas: <b>{n_programadas_db}</b>"
 
-    kb_resumen = []
+    kb_resumen = []                          # solo botones para VER (16/11/2026)
     if jobs:
-        kb_resumen.append([{"text": f"📋 Notas a procesar ({len(jobs)})",
+        kb_resumen.append([{"text": f"📋 Ver notas en cola ({len(jobs)})",
                             "callback_data": "h_cola_notas_a_procesar"}])
-    _proc_row = []
-    if jobs:
-        _proc_row.append({"text": f"📤 Procesar listado ({manualmente})", "callback_data": "h_cola_process_list"})
-    if n_pendientes:
-        _proc_row.append({"text": f"🔄 Procesar pendientes ({n_pendientes})", "callback_data": "h_cola_process_pend"})
-    if _proc_row:
-        kb_resumen.append(_proc_row)
-    if jobs or n_pendientes:
-        kb_resumen.append([{"text": "🚀 Procesar todo", "callback_data": "h_cola_process_all"}])
     if n_pendientes:
         kb_resumen.append([{"text": f"⏳ Ver pendientes ({n_pendientes})",
                             "callback_data": "h_cola_ver_pendientes"}])
     kb_resumen.append([{"text": "🗓 Ver notas programadas",
                         "callback_data": "h_cola_ver_programadas"}])
-    kb_resumen.append([{"text": "🛑 Cancelar publicador", "callback_data": "h_cola_stop_pub"}])
 
-    resumen_msg = await update.message.reply_text(
+    resumen_msg = await message.reply_text(
         resumen, parse_mode="HTML",
         reply_markup={"inline_keyboard": kb_resumen}
     )
@@ -16739,6 +16724,7 @@ def _pipeline_kb(counts: dict) -> dict:
     ]
     if counts.get("publinota"):
         rows.append([btn("publinota")])
+    rows.append([{"text": "🗂 Cola de publicación", "callback_data": "pip_cola_pub"}])   # antes /coladepublicacion (16/11)
     rows.append([{"text": "🔄 Refrescar", "callback_data": "pip_refresh"}])
     return {"inline_keyboard": rows}
 
@@ -16790,7 +16776,10 @@ def _pipeline_stage_detail(key: str) -> str:
 
 
 async def cmd_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Estado del pipeline editorial: cuántas notas hay en cada etapa."""
+    """Estado del pipeline editorial: cuántas notas hay en cada etapa. `/pipeline cola` = resumen de la cola de publicación."""
+    if context.args and context.args[0].lower() in ("cola", "coladepublicacion"):
+        await _cola_vista(update.message, context)
+        return
     msg = await update.message.reply_text("📊 Calculando…")
     try:
         text, counts = await asyncio.to_thread(_pipeline_stats)
