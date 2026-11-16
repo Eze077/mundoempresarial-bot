@@ -5455,6 +5455,53 @@ async def cmd_testtwitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
 
 
+async def _link_leo_resolver(update, job_id) -> bool:
+    """Link externo de Leo ya creado como job en 'curado': lo toma directo y le avisa (link_directo_bot.py).
+    True = quedó tomado y avisado (no va la tarjeta). False = bandera LINK_LEO_DIRECTO en 0, link ya publicado antes o
+    cualquier falla: el llamador manda la tarjeta de siempre."""
+    try:
+        import link_directo_bot as _ldb
+    except Exception:
+        return False
+    return await _ldb.resolver(update.message, job_id)
+
+
+def _confirmar_cola_leo(br, job_id, dest, **kw):
+    """Acción de LEO sobre la cola (/coladepublicacion, «⚡ Ahora», programar): confirma el destino también si el job ya pasó a
+    'redaccion' (el harness nuevo lo permite con por_leo=True) y devuelve las filas tocadas. 0 = no cambió nada (ya se publicó,
+    ya no está en la cola o lo frenó): el bot tiene que decirlo y no aplicar el aprendizaje. None = harness viejo, que no
+    devuelve nada (se comporta como antes)."""
+    try:
+        return br.confirm_cola(job_id, dest, por_leo=True, **kw)
+    except TypeError:
+        br.confirm_cola(job_id, dest, **kw)
+        return None
+
+
+def _cola_no_cambio_txt(br, job_id) -> str:
+    """Por qué la confirmación no cambió nada, en una frase verdadera."""
+    try:
+        et = (br.get_job(job_id) or {}).get("stage")
+    except Exception:
+        et = None
+    if et == "done":
+        return "ya se publicó (usá /editar para corregirla)"
+    if et == "rejected":
+        return "la nota ya está rechazada o frenada"
+    if et is None:
+        return "no encontré la nota"
+    return "ya no está en la cola (etapa: %s)" % et
+
+
+def _link_leo_directo_on() -> bool:
+    """True solo si el directo va a correr de verdad (bandera + harness con tomar_directo)."""
+    try:
+        import link_directo_bot as _ldb
+        return _ldb.puede_directo()
+    except Exception:
+        return False
+
+
 def _dup_manual_hl(titulo: str):
     """Posible duplicado de un link manual: compara el título contra los jobs recientes
     del harness (7 días, cualquier stage vivo) por Jaccard de palabras. El dedup
@@ -6108,7 +6155,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             pub_date_str = pub_dt.strftime("%Y-%m-%dT%H:%M:00")
-            _br_prog.confirm_cola(job_id, "fecha", pub_date=pub_date_str)
+            _n_pg = _confirmar_cola_leo(_br_prog, job_id, "fecha", pub_date=pub_date_str)
+            if _n_pg == 0:
+                await update.message.reply_text(f"⚠️ No pude programarla: {_cola_no_cambio_txt(_br_prog, job_id)}.")
+                return
             await update.message.reply_text(
                 f"🗓 Programado para <b>{pub_dt.strftime('%d/%m %H:%M')}</b> — job #{job_id} → redacción.",
                 parse_mode="HTML"
@@ -6718,8 +6768,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            "source_name": _url_mh.split("/")[2] if "/" in _url_mh else _url_mh}
             _jid_mh = _br_mh.enqueue("curado", source_url=_url_mh, title=_title_mh,
                                       content=_content_mh, score=8.0, hilo=_hilo_mh, force=True)
-            from agents import curador as _cur_mh
-            await asyncio.to_thread(_cur_mh.run_briefing_single, _jid_mh)
+            if not await _link_leo_resolver(update, _jid_mh):
+                from agents import curador as _cur_mh
+                await asyncio.to_thread(_cur_mh.run_briefing_single, _jid_mh)
         except Exception as _e_mh:
             await update.message.reply_text(f"❌ Error: {_e_mh}")
         return
@@ -6905,10 +6956,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dup_hl = await asyncio.wait_for(asyncio.to_thread(_dup_manual_hl, title_hl), timeout=10)
                 if dup_hl:
                     _, dj = dup_hl
+                    _fin_dup = ("La tomé igual — si es la misma noticia, tocá ⛔ Frenar en el aviso que sigue."
+                                if _link_leo_directo_on() else
+                                "La sigo procesando igual — si es la misma noticia, rechazá una de las dos.")
                     await update.message.reply_text(
                         f"⚠️ Posible duplicado: ya hay un job parecido en el pipeline:\n"
                         f"«{dj['title'][:90]}» (#{dj['id']}, {dj['stage']})\n"
-                        f"La sigo procesando igual — si es la misma noticia, rechazá una de las dos.")
+                        f"{_fin_dup}")
             except Exception:
                 pass
 
@@ -6927,8 +6981,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       content=content, score=7.5, hilo=hilo, force=True)
             job_id_hl = await asyncio.wait_for(asyncio.to_thread(_mk_job_hl), timeout=60)
             await msg_hl.delete()
-            from agents import curador as _cur_hl
-            await asyncio.to_thread(_cur_hl.run_briefing_single, job_id_hl)
+            # Directo (decisión de Leo 16/11): el link queda aprobado y recibe un aviso con «⛔ Frenar», sin tarjeta que
+            # esperar. Con LINK_LEO_DIRECTO=0 (o si falla) sigue la tarjeta de siempre.
+            if not await _link_leo_resolver(update, job_id_hl):
+                from agents import curador as _cur_hl
+                await asyncio.to_thread(_cur_hl.run_briefing_single, job_id_hl)
         except Exception as _e_hl:
             # Sin este log, un link que no se puede leer no dejaba rastro en el journal (caso
             # vaticannews 8/11/2026: Leo vio el error y el journal no tenía nada que mirar).
@@ -8912,6 +8969,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 anchor   = sg.get("anchor_date")
                 rec_type = sg.get("recurrence_type")
 
+                # Primero se confirma el destino: si no cambió nada (ya se publicó, ya no está en la cola) se dice la verdad y NO
+                # se aplica el aprendizaje de abajo.
+                _n_cf = _confirmar_cola_leo(_br_cola, job_id, pub_dest, anchor_date=anchor, recurrence_type=rec_type)
+                if _n_cf == 0:
+                    _txt_cf = _cola_no_cambio_txt(_br_cola, job_id)
+                    try:
+                        await query.edit_message_text(
+                            f"⚠️ <b>{(job.get('title') or '')[:60]}</b>\nNo cambié nada: {_txt_cf}.", parse_mode="HTML")
+                    except Exception:
+                        pass
+                    await query.answer("No cambió nada: " + _txt_cf, show_alert=True)
+                    return
+
                 # ── Aprendizaje: comparar sugerencia del agente vs lo que publicó Leo ──
                 import sys as _sys_lrn
                 _sys_lrn.path.insert(0, "/opt/me-harness")
@@ -8947,7 +9017,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-                _br_cola.confirm_cola(job_id, pub_dest, anchor_date=anchor, recurrence_type=rec_type)
                 label = _DEST_LABELS.get(pub_dest, pub_dest)
                 try:
                     await query.edit_message_text(
@@ -9214,8 +9283,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ── Ir directo a redacción (sin pub_dest específico) ─────────────
             elif action == "h_cola_skip" and arg:
                 job_id = int(arg)
-                _br_cola.confirm_cola(job_id, "hoy_normal")
+                _n_sk = _confirmar_cola_leo(_br_cola, job_id, "hoy_normal")
                 job = _br_cola.get_job(job_id)
+                if _n_sk == 0:
+                    await query.answer("No cambió nada: " + _cola_no_cambio_txt(_br_cola, job_id), show_alert=True)
+                    return
                 try:
                     await query.edit_message_text(
                         f"⏭ <b>{(job.get('title') or '')[:60]}</b>\n"
@@ -9384,7 +9456,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 pass
                         pub_dest = sg2.get("pub_dest") or "hoy_normal"
 
-                    _br_cola.confirm_cola(job_id, pub_dest)
+                    _n_st = _confirmar_cola_leo(_br_cola, job_id, pub_dest)
+                    if _n_st == 0:
+                        _txt_st = _cola_no_cambio_txt(_br_cola, job_id)
+                        try:
+                            await query.edit_message_text(
+                                f"⚠️ No cambié el destino: {_txt_st}.", parse_mode="HTML")
+                        except Exception:
+                            pass
+                        await query.answer("No cambió nada: " + _txt_st, show_alert=True)
+                        return
                     label = _PROG_LABELS.get(opcion, opcion)
                     try:
                         await query.edit_message_text(
@@ -9916,9 +9997,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if "cambiado manualmente" not in sg.get("reasoning", ""):
                         continue  # saltear las no tocadas por Leo
                     dest = sg.get("pub_dest") or j.get("pub_dest") or "hoy_normal"
-                    _br_cola.confirm_cola(j["id"], dest,
-                                          anchor_date=sg.get("anchor_date"),
-                                          recurrence_type=sg.get("recurrence_type"))
+                    if _confirmar_cola_leo(_br_cola, j["id"], dest, anchor_date=sg.get("anchor_date"),
+                                           recurrence_type=sg.get("recurrence_type")) == 0:
+                        continue
                     procesadas += 1
                 try:
                     await query.edit_message_text(
@@ -9943,9 +10024,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
                     dest = sg.get("pub_dest") or j.get("pub_dest") or "hoy_normal"
-                    _br_cola.confirm_cola(jid2, dest,
-                                          anchor_date=sg.get("anchor_date"),
-                                          recurrence_type=sg.get("recurrence_type"))
+                    if _confirmar_cola_leo(_br_cola, jid2, dest, anchor_date=sg.get("anchor_date"),
+                                           recurrence_type=sg.get("recurrence_type")) == 0:
+                        continue
                     procesadas += 1
                 # También re-ejecutar agentes de pipeline
                 for _ag_pa in ("redaccion", "publicacion"):
@@ -10554,6 +10635,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              + (f"\n📝 <i>{inst[:80]}</i>" if inst else ""),
                         parse_mode="HTML"
                     )
+
+            # ── ⛔ Frenar: el aviso del link directo de Leo (link_directo_bot.py) ──────────
+            elif action == "h_cur_frenar" and arg:
+                import link_directo_bot as _ldb_f
+                await _ldb_f.frenar(query, int(arg))
 
             # ── Briefing AUTO (Fase 3): box de checklist ──────────────────────
             elif action == "h_cur_auto_tog" and arg is not None:
