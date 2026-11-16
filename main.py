@@ -19977,6 +19977,33 @@ async def handle_desbloq_button(update: Update, context: ContextTypes.DEFAULT_TY
                                   parse_mode="HTML")
 
 
+async def _agenda_frase_a_preview(message, context, frase: str):
+    """Frase elegida en la reunión de agenda (agenda_reunion_bot) → MISMA vista previa que `/frases <texto>`: placa con la
+    plantilla y el teclado de redes; Leo todavía confirma ahí qué sale y cuándo (nada se publica solo).
+    Copia el cuerpo de cmd_frases salvo el corrector ortográfico: la cita es textual y no se toca."""
+    msg = await message.reply_text("🎨 Generando imagen...")
+    try:
+        from frases_gen import generate_frase_image
+        img_bytes = await asyncio.to_thread(generate_frase_image, frase)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error generando imagen: {e}")
+        return
+    fp = {"texto": frase, "img_bytes": img_bytes, "tw_on": True, "tg_on": True, "wp_on": True,
+          "igf_on": True, "igs_on": True, "wa_on": True}
+    context.user_data["frase_pending"] = fp
+    context.user_data.pop("frase_custom_ht", None)
+    context.user_data.pop("frase_sched_ht", None)
+    await msg.delete()
+    bio = io.BytesIO(img_bytes)
+    bio.name = "frase.png"
+    await message.reply_photo(
+        photo=bio,
+        caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
+        parse_mode="Markdown",
+        reply_markup=_build_frase_kb(fp),
+    )
+
+
 def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release()
@@ -20029,6 +20056,15 @@ def main():
     app.add_handler(CommandHandler("campania", cmd_campania))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
+    # Reunión de agenda diaria (fase 4 v2.0): detrás de AGENDA_REUNION (0 | dry | 1; por defecto 0 = no captura nada).
+    # Va ANTES de handle_link y handle_evento_media: solo coincide con la reunión de hoy abierta; si no, el mensaje sigue su camino.
+    try:
+        import agenda_reunion_bot as _agenda_bot
+        _agenda_bot.registrar(app, transcribir=_whisper_from_file, fallback_texto=handle_link,
+                              fallback_media=handle_evento_media, frase_flow=_agenda_frase_a_preview,
+                              pausado=lambda: BOT_PAUSED)
+    except Exception as _e_agd:
+        logger.warning(f"reunión de agenda no registrada: {_e_agd}")
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
