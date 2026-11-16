@@ -36,7 +36,7 @@
     "confiabilidad": 8,
     "notas": "Buen material para Hilo 3 (posición política). Notas con ángulo analítico.",
     "quirks": "Bloquea IPs cloud con 403 sin headers completos. Requiere Sec-Fetch-* + Referer google.com (ya configurado en HEADERS_BROWSER).",
-    "rss_url": "https://www.lapoliticaonline.com/files/rss/ultimasnoticias-es.xml"
+    "rss_url": "https://www.lapoliticaonline.com/files/rss/ultimasnoticias.xml"
   },
 
   "somospymes.com.ar": {
