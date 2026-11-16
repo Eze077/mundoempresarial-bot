@@ -44,3 +44,4 @@ reporte_semanal.py
 *connect to host*
 *delta *
 sword:
+.pytest_cache/

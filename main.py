@@ -24,6 +24,7 @@ from telegram.ext import (
     ApplicationHandlerStop,
 )
 import comandos_menu  # menú de Telegram, /help e informe de uso salen de una sola lista
+import fase1_robustez as _f1  # manejador de errores y días de los jobs
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -4650,6 +4651,8 @@ async def send_weekly_credits_check(context: ContextTypes.DEFAULT_TYPE):
             text=f"📅 *Reporte semanal*\n\n{report}",
             parse_mode="Markdown",
             disable_web_page_preview=True,
+            # sin sonido solo si no hay nada que hacer (sin ❌ ni «Acciones sugeridas»)
+            disable_notification=("❌" not in report and "Acciones sugeridas" not in report),
         )
         logger.info("Weekly credits check enviado")
     except Exception as e:
@@ -14123,7 +14126,9 @@ async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
         )
 
     if chat_id:
-        await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
+        # Aviso de «nota programada publicada»: sin sonido salvo que algo haya fallado (❌)
+        await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results),
+                                       disable_notification=not any("❌" in r for r in results))
 
     # Remover del store
     if post_id:
@@ -15243,6 +15248,7 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
             chat_id=int(ADMIN_CHAT_ID),
             text=msg,
             parse_mode="Markdown",
+            disable_notification=True,  # informe automático: sin sonido
         )
     except Exception as e:
         logger.error(f"_ga4_weekly_report send: {e}")
@@ -15307,6 +15313,7 @@ async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=int(ADMIN_CHAT_ID),
                 text=f"🧠 *HT Learning diario*\n_{md_escape(aprendizaje)}_\n\n_{len(today_records)} corrección(es) procesadas hoy._",
                 parse_mode="Markdown",
+                disable_notification=True,  # aviso automático diario: sin sonido
             )
     except Exception as e:
         logger.error(f"_learn_hashtags_daily: {e}")
@@ -19980,6 +19987,7 @@ def main():
     if not _admin_ids():
         logger.warning("⚠️ ADMIN_CHAT_ID vacío — el guard bloqueará a TODOS (fail-closed).")
     app.add_handler(TypeHandler(Update, _solo_admin), group=-1)
+    app.add_error_handler(_f1.crear_manejador_errores(lambda: ADMIN_CHAT_ID, logger))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("desbloquear", cmd_desbloquear))
     app.add_handler(CommandHandler("STOP", cmd_stop))
@@ -20021,7 +20029,7 @@ def main():
     app.add_handler(CommandHandler("campania", cmd_campania))
     app.add_handler(CallbackQueryHandler(handle_edito_button, pattern="^edito_"))
     app.add_handler(CallbackQueryHandler(handle_pubx_button, pattern="^pubx_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO, handle_evento_media))
@@ -20058,7 +20066,7 @@ def main():
     job_queue.run_daily(
         _ga4_weekly_report,
         time=dtime(hour=8, minute=0, tzinfo=tz_arg),
-        days=(0,),
+        days=(_f1.DIA_LUNES,),  # PTB>=20: 0 = domingo, 1 = lunes (antes corría el domingo)
         name="ga4_weekly",
     )
     logger.info("GA4 weekly report programado para los lunes 08:00 ARG")
@@ -20067,7 +20075,7 @@ def main():
     job_queue.run_daily(
         send_weekly_credits_check,
         time=dtime(hour=9, minute=0, tzinfo=tz_arg),
-        days=(0,),  # 0 = lunes en python-telegram-bot
+        days=(_f1.DIA_LUNES,),  # PTB>=20: 0 = domingo, 1 = lunes (antes corría el domingo)
         name="weekly_credits",
     )
     logger.info("Weekly credits check programado para los lunes 09:00 ARG")
