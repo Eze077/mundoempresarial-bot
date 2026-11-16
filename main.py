@@ -30,6 +30,8 @@ import fuentes_extra as _fuentes_extra  # /fuentes escribe acá lo que lee la in
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+import log_filtro  # tapa tokens/claves en cualquier registro (ver log_filtro.py)
+log_filtro.instalar()
 logger = logging.getLogger(__name__)
 # httpx loguea en INFO cada request con la URL entera, y la URL de la API de Telegram lleva el
 # token del bot: quedaba en el journal en cada mensaje (14/10/2026). Errores siguen saliendo.
