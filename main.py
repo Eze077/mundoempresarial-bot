@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 import comandos_menu  # menú de Telegram, /help e informe de uso salen de una sola lista
 import fase1_robustez as _f1  # manejador de errores y días de los jobs
+import fuentes_extra as _fuentes_extra  # /fuentes escribe acá lo que lee la ingesta del harness
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -4851,6 +4852,7 @@ def _load_sources() -> dict:
     try:
         fb = _load_feedback()
         overlay = fb.get("sources_overlay", {}) or {}
+        _fuentes_extra.sincronizar(overlay)   # la ingesta del harness lee este archivo
         for domain, src_data in overlay.items():
             if not isinstance(src_data, dict):
                 continue
@@ -4876,6 +4878,8 @@ def _add_source(domain: str, source_data: dict) -> bool:
     overlay = fb.setdefault("sources_overlay", {})
     overlay[domain] = source_data
     ok = _save_feedback(fb)
+    if ok:
+        _fuentes_extra.guardar_fuente(domain, source_data)   # donde lee la ingesta (fuera de git)
     _invalidate_sources_cache()
     return ok
 
@@ -4886,6 +4890,8 @@ def _delete_source(domain: str) -> bool:
     overlay = fb.setdefault("sources_overlay", {})
     overlay[domain] = {"_deleted": True}
     ok = _save_feedback(fb)
+    if ok:
+        _fuentes_extra.guardar_fuente(domain, {"_deleted": True})
     _invalidate_sources_cache()
     return ok
 
@@ -6427,7 +6433,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"*Distancia editorial:* {source_data.get('distancia_editorial', '?')}/10\n"
             f"*Confiabilidad:* {source_data.get('confiabilidad', '?')}/10\n\n"
             f"*Orientación:*\n_{md_escape(source_data.get('orientacion', '?'))}_\n\n"
-            f"_Para ajustar: borrala con /fuentes y agregala de nuevo, "
+            + ("" if (source_data.get('rss_url') or '').strip() else
+               "⚠️ *Sin RSS:* la ingesta automática no la va a leer hasta que tenga un `rss_url`.\n\n")
+            + f"_Para ajustar: borrala con /fuentes y agregala de nuevo, "
             f"o editá `sources.json` directo._",
             parse_mode="Markdown",
         )
@@ -15037,14 +15045,6 @@ async def _publish_processed(bot, context, data: dict, chat_id: int):
             li_urn = _LAST_LINKEDIN_URN
     await asyncio.to_thread(append_social_meta, post_id, post_content, tweet_id, tg_msg_id, li_urn)
     return get_title(data), post_url
-
-
-async def _auto_publish_url(bot, context, url: str, chat_id: int):
-    """Scrape + publicación completa de una URL. Retorna (title, wp_url) o (None, error_str)."""
-    data = await _process_url_for_review(url)
-    if data is None:
-        return None, f"Error scrapeando {url[:60]}"
-    return await _publish_processed(bot, context, data, chat_id)
 
 
 # ── Reporte diario programado ────────────────────────────────────────────────

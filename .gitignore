@@ -45,3 +45,7 @@ reporte_semanal.py
 *delta *
 sword:
 .pytest_cache/
+
+# /fuentes: lo que lee la ingesta del harness (estado de runtime)
+fuentes_extra.json
+fuentes_extra.json.tmp
