@@ -461,3 +461,29 @@ def test_append_social_meta_no_escribe_si_el_contenido_esta_vacio(main, monkeypa
     monkeypatch.setattr(main.requests, "get", lambda *a, **k: types.SimpleNamespace(status_code=500, json=lambda: {}))
     monkeypatch.setattr(main, "update_post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía escribir")))
     assert main.append_social_meta(1, "", "", 5) is False
+
+
+# ══ 4. /borrar y /editar → Borrar usan el mismo borrado que /publicador ═════════
+
+def test_borrar_y_editar_abren_la_misma_pantalla_que_publicador(main, monkeypatch):
+    post = montar_publicador(main, monkeypatch)
+
+    async def edit_text(self, texto, **kw):
+        self.enviados.append(("edicion", texto, kw))
+    monkeypatch.setattr(Msg, "edit_text", edit_text, raising=False)
+
+    ctx = Ctx({"pubx_del_sel": {"wp"}})
+    upd, m = upd_msg("/borrar 57490")
+    ctx.args = ["57490"]
+    run(main.cmd_borrar(upd, ctx))
+    ed = [e for e in m.enviados if e[0] == "edicion"][-1]
+    etiquetas = [b.text for fila in ed[2]["reply_markup"].inline_keyboard for b in fila]
+    assert "✅ Instagram (feed)" in etiquetas and "✅ LinkedIn (página)" in etiquetas   # antes: solo la papelera de WP
+    assert ctx.user_data["pubx_post"]["id"] == 57490
+    assert ctx.user_data["pubx_del_sel"] == {"wp", "telegram", "li_pag", "ig_feed", "ig_story"}   # selección vieja anulada
+
+    ctx2 = Ctx({"edit_post": dict(post)})
+    upd2, q = upd_btn("edit_delete", Msg())
+    run(main.handle_edit_button(upd2, ctx2))
+    assert "✅ Instagram (historia)" in [t for t, _ in teclado_de(q)]
+    assert ctx2.user_data["pubx_post"]["id"] == 57490 and "edit_post" not in ctx2.user_data

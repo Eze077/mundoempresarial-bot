@@ -2236,24 +2236,6 @@ def post_linkedin_org(data: dict, wp_url: str) -> str | None:
         return None
 
 
-def delete_linkedin_post(urn: str) -> bool:
-    """Borra un post de LinkedIn por su URN (ej: urn:li:share:xxx)."""
-    if not LINKEDIN_TOKEN or not urn:
-        return False
-    try:
-        encoded = requests.utils.quote(urn, safe="")
-        h = {"Authorization": f"Bearer {LINKEDIN_TOKEN}"}
-        r = _li_request("DELETE", f"https://api.linkedin.com/rest/posts/{encoded}", h, timeout=15)
-        if r.status_code in (200, 204):
-            logger.info(f"LinkedIn delete OK: {urn}")
-            return True
-        logger.error(f"LinkedIn delete falló {r.status_code}: {r.text[:200]}")
-        return False
-    except Exception as e:
-        logger.error(f"delete_linkedin_post: {e}")
-        return False
-
-
 def _fit_tweet(text: str, limit: int = 280) -> str:
     """Recorta un tweet al límite respetando límite de palabra."""
     if len(text) <= limit:
@@ -2384,23 +2366,6 @@ def post_twitter_thread(tweets: list[str], image_url: str = "") -> list[str]:
             break
 
     return urls
-
-
-def delete_tweet(tweet_id: str) -> bool:
-    """Elimina un tweet via API v2. Necesita tweet_id (no URL)."""
-    try:
-        auth = OAuth1(TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_TOKEN, TWITTER_SECRET)
-        r = requests.delete(
-            f"https://api.twitter.com/2/tweets/{tweet_id}",
-            auth=auth, timeout=15,
-        )
-        if r.status_code == 200:
-            return r.json().get("data", {}).get("deleted", False)
-        logger.error(f"delete_tweet {tweet_id}: {r.status_code} {r.text[:200]}")
-        return False
-    except Exception as e:
-        logger.error(f"delete_tweet error: {e}")
-        return False
 
 
 def tweet_id_from_url(url: str) -> str | None:
@@ -4162,16 +4127,6 @@ async def publish_to_channel(bot, data: dict, wp_url: str):
     except Exception as e:
         logger.error(f"Canal TG: {e}")
         return None
-
-
-async def delete_from_channel(bot, message_id: int) -> bool:
-    """Borra un mensaje del canal de Telegram."""
-    try:
-        await bot.delete_message(chat_id=TELEGRAM_CHANNEL, message_id=message_id)
-        return True
-    except Exception as e:
-        logger.error(f"delete_from_channel {message_id}: {e}")
-        return False
 
 
 # ── Handlers Telegram ──────────────────────────────────────────────────────────
@@ -12947,40 +12902,7 @@ async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("No encontre la nota. Verifica la URL o el ID.")
         return
 
-    context.user_data["delete_post"] = post
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Confirmar borrado", callback_data="del_confirm"),
-        InlineKeyboardButton("Cancelar", callback_data="del_cancel"),
-    ]])
-    await msg.edit_text(
-        f"Estas por mandar a la papelera:\n\n*{post['title']}*\n\nID: {post['id']}",
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
-
-
-async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "del_cancel":
-        await query.edit_message_text("Cancelado, la nota sigue publicada.")
-        return
-
-    post = context.user_data.get("delete_post")
-    if not post:
-        await query.edit_message_text("Error: no hay nota pendiente de borrar.")
-        return
-
-    ok = await asyncio.to_thread(trash_post, post["id"])
-    if ok:
-        await query.edit_message_text(
-            f"Nota enviada a la papelera.\n\n_{post['title']}_\n\n"
-            f"Podes recuperarla desde el panel de WordPress si fue un error.",
-            parse_mode="Markdown",
-        )
-    else:
-        await query.edit_message_text("Error al borrar. Revisa los logs del VPS.")
+    await _pubx_abrir_borrar(context, post, msg.edit_text)
 
 
 # ── Editar nota ───────────────────────────────────────────────────────────────
@@ -13070,25 +12992,6 @@ def _post_to_data(post: dict) -> dict:
         "image_url":      image_url,
         "source_url":     post.get("link", ""),
     }
-
-
-def _build_delete_kb(del_tw: bool, del_wp: bool, del_tg: bool, has_tw: bool, has_tg: bool,
-                     del_li: bool = False, has_li: bool = False) -> InlineKeyboardMarkup:
-    """Teclado con toggles on/off para elegir qué borrar."""
-    tw_label = ("✅" if del_tw else "❌") + " Borrar de Twitter" + ("" if has_tw else " (N/A)")
-    wp_label = ("✅" if del_wp else "❌") + " Borrar de WordPress"
-    tg_label = ("✅" if del_tg else "❌") + " Borrar del canal TG" + ("" if has_tg else " (N/A)")
-    li_label = ("✅" if del_li else "❌") + " Borrar de LinkedIn" + ("" if has_li else " (N/A)")
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(wp_label, callback_data="deltoggle_wp")],
-        [InlineKeyboardButton(tw_label, callback_data="deltoggle_tw")],
-        [InlineKeyboardButton(tg_label, callback_data="deltoggle_tg")],
-        [InlineKeyboardButton(li_label, callback_data="deltoggle_li")],
-        [
-            InlineKeyboardButton("🗑️ Ejecutar borrado", callback_data="del_execute"),
-            InlineKeyboardButton("Cancelar", callback_data="edit_cancel"),
-        ],
-    ])
 
 
 def _build_category_kb() -> InlineKeyboardMarkup:
@@ -13213,134 +13116,10 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("❌ Error al actualizar la categoría.")
         return
 
-    # ── Borrar: mostrar toggles ──
+    # ── Borrar: el mismo menú que /publicador → Borrar (todas las redes, verificado red por red) ──
     if query.data == "edit_delete":
-        meta = parse_social_meta(post.get("content", ""))
-        has_tw = bool(meta.get("tweet_id"))
-        has_tg = bool(meta.get("tg_msg"))
-        has_li = bool(meta.get("li_urn"))
-
-        context.user_data["del_wp"] = True
-        context.user_data["del_tw"] = has_tw
-        context.user_data["del_tg"] = has_tg
-        context.user_data["del_li"] = has_li
-        context.user_data["del_has_tw"] = has_tw
-        context.user_data["del_has_tg"] = has_tg
-        context.user_data["del_has_li"] = has_li
-
-        tw_info = f"Tweet ID: `{meta.get('tweet_id','-')}`" if has_tw else "Tweet: no registrado"
-        tg_info = f"TG msg: `{meta.get('tg_msg','-')}`" if has_tg else "TG canal: no registrado"
-        li_info = f"LinkedIn URN: `{meta.get('li_urn','-')}`" if has_li else "LinkedIn: no registrado"
-
-        await query.edit_message_text(
-            f"🗑️ *Borrar nota*\n\n*{post['title']}*\n\n"
-            f"{tw_info}\n{tg_info}\n{li_info}\n\n"
-            "Elegí qué borrar:",
-            parse_mode="Markdown",
-            reply_markup=_build_delete_kb(
-                context.user_data["del_tw"],
-                context.user_data["del_wp"],
-                context.user_data["del_tg"],
-                has_tw, has_tg,
-                context.user_data["del_li"], has_li,
-            ),
-        )
-        return
-
-    # Toggles de delete
-    if query.data == "deltoggle_wp":
-        context.user_data["del_wp"] = not context.user_data.get("del_wp", True)
-        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
-            context.user_data.get("del_tw", False), context.user_data["del_wp"],
-            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
-            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
-            context.user_data.get("del_has_li", False),
-        ))
-        return
-
-    if query.data == "deltoggle_tw":
-        if not context.user_data.get("del_has_tw"):
-            return
-        context.user_data["del_tw"] = not context.user_data.get("del_tw", False)
-        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
-            context.user_data["del_tw"], context.user_data.get("del_wp", True),
-            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
-            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
-            context.user_data.get("del_has_li", False),
-        ))
-        return
-
-    if query.data == "deltoggle_tg":
-        if not context.user_data.get("del_has_tg"):
-            return
-        context.user_data["del_tg"] = not context.user_data.get("del_tg", False)
-        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
-            context.user_data.get("del_tw", False), context.user_data.get("del_wp", True),
-            context.user_data["del_tg"], context.user_data.get("del_has_tw", False),
-            context.user_data.get("del_has_tg", False), context.user_data.get("del_li", False),
-            context.user_data.get("del_has_li", False),
-        ))
-        return
-
-    if query.data == "deltoggle_li":
-        if not context.user_data.get("del_has_li"):
-            return
-        context.user_data["del_li"] = not context.user_data.get("del_li", False)
-        await query.edit_message_reply_markup(reply_markup=_build_delete_kb(
-            context.user_data.get("del_tw", False), context.user_data.get("del_wp", True),
-            context.user_data.get("del_tg", False), context.user_data.get("del_has_tw", False),
-            context.user_data.get("del_has_tg", False), context.user_data["del_li"],
-            context.user_data.get("del_has_li", False),
-        ))
-        return
-
-    if query.data == "del_execute":
-        del_wp = context.user_data.get("del_wp", False)
-        del_tw = context.user_data.get("del_tw", False)
-        del_tg = context.user_data.get("del_tg", False)
-        del_li = context.user_data.get("del_li", False)
-
-        if not any([del_wp, del_tw, del_tg, del_li]):
-            await query.edit_message_text("Nada seleccionado. Edición cancelada.")
-            return
-
-        await query.edit_message_text("Borrando...")
-
-        meta = parse_social_meta(post.get("content", ""))
-        results = []
-
-        # Borrar de Twitter
-        if del_tw and meta.get("tweet_id"):
-            ok = await asyncio.to_thread(delete_tweet, meta["tweet_id"])
-            results.append("✅ Tweet borrado" if ok else "❌ Error borrando tweet")
-
-        # Borrar del canal TG
-        if del_tg and meta.get("tg_msg"):
-            try:
-                msg_id = int(meta["tg_msg"])
-                ok = await delete_from_channel(context.bot, msg_id)
-                results.append("✅ Mensaje del canal borrado" if ok
-                               else "❌ Error borrando del canal (puede ser muy viejo)")
-            except ValueError:
-                results.append("❌ tg_msg inválido en el post")
-
-        # Borrar de LinkedIn
-        if del_li and meta.get("li_urn"):
-            ok = await asyncio.to_thread(delete_linkedin_post, meta["li_urn"])
-            results.append("✅ Post de LinkedIn borrado" if ok else "❌ Error borrando de LinkedIn")
-
-        # Borrar de WordPress (último, porque cambia la URL)
-        if del_wp:
-            ok = await asyncio.to_thread(trash_post, post["id"])
-            results.append("✅ Nota enviada a la papelera de WordPress" if ok
-                           else "❌ Error borrando de WordPress")
-
-        # Limpiar estado
-        for k in ("edit_post", "del_wp", "del_tw", "del_tg", "del_li",
-                  "del_has_tw", "del_has_tg", "del_has_li"):
-            context.user_data.pop(k, None)
-
-        await query.edit_message_text("\n".join(results) or "Nada que borrar.")
+        context.user_data.pop("edit_post", None)
+        await _pubx_abrir_borrar(context, post, query.edit_message_text)
         return
 
     # ── Publicar en redes: mostrar toggles (TODAS las redes vía agente) ──
@@ -13701,6 +13480,32 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await ans()
 
 
+async def _pubx_pantalla_borrar(context, post: dict, editar):
+    """La pantalla de Borrar (la misma desde /publicador, /borrar y /editar): todas las redes donde salió la nota, con
+    lo registrado ya tildado. `editar(texto, parse_mode=..., reply_markup=...)` edita el mensaje que la muestra."""
+    reg = await _pubx_registro(post)
+    context.user_data["pubx_del_reg"] = reg
+    sel = context.user_data.get("pubx_del_sel") or set()
+    if not sel:
+        sel = {"wp"} | set(reg)           # por defecto: todo lo que se sabe que salió, más la nota
+        context.user_data["pubx_del_sel"] = sel
+    hay = ", ".join(_borrado.ETIQUETA[n] for n in _PUBX_NETS_DEL if n in reg) or "ninguna red registrada"
+    await editar(
+        f"🗑️ *Borrar nota*\n\n_{md_escape(post['title'])}_\n\n"
+        f"Registrado: {md_escape(hay)}\nSeleccioná de dónde borrar:",
+        parse_mode="Markdown",
+        reply_markup=_build_pubx_del_kb(sel, reg),
+    )
+
+
+async def _pubx_abrir_borrar(context, post: dict, editar):
+    """/borrar y /editar → Borrar: dejan la nota como la de /publicador y abren su pantalla de Borrar."""
+    for k in ("pubx_links_sel", "pubx_rep_sel", "pubx_del_sel", "pubx_del_reg"):
+        context.user_data.pop(k, None)
+    context.user_data["pubx_post"] = post
+    await _pubx_pantalla_borrar(context, post, editar)
+
+
 async def _pubx_registro(post: dict) -> dict:
     """{red: id} de lo registrado de la nota, con el contenido FRESCO de WordPress (el que guardó /publicador puede estar
     viejo: los ids se anotan después de publicar) y la cola de Meta del harness."""
@@ -13873,19 +13678,7 @@ async def _pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE, query
     # verificación: ver borrado_redes.py. Cada resultado queda en el journal.
 
     if d == "pubx_del":
-        reg = await _pubx_registro(post)
-        context.user_data["pubx_del_reg"] = reg
-        sel = context.user_data.get("pubx_del_sel") or set()
-        if not sel:
-            sel = {"wp"} | set(reg)           # por defecto: todo lo que se sabe que salió, más la nota
-            context.user_data["pubx_del_sel"] = sel
-        hay = ", ".join(_borrado.ETIQUETA[n] for n in _PUBX_NETS_DEL if n in reg) or "ninguna red registrada"
-        await query.edit_message_text(
-            f"🗑️ *Borrar nota*\n\n_{md_escape(post['title'])}_\n\n"
-            f"Registrado: {md_escape(hay)}\nSeleccioná de dónde borrar:",
-            parse_mode="Markdown",
-            reply_markup=_build_pubx_del_kb(sel, reg),
-        )
+        await _pubx_pantalla_borrar(context, post, query.edit_message_text)
         return
 
     if d.startswith("pubx_dt_"):
@@ -20414,10 +20207,9 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO, handle_evento_media))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Patrón más específico para /borrar (confirmar/cancelar), antes del nuevo flow de /editar
-    app.add_handler(CallbackQueryHandler(handle_delete_button, pattern="^del_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(handle_thread_button, pattern="^thread_"))
     app.add_handler(CallbackQueryHandler(handle_sources_button, pattern="^(src_|srcdel_)"))
-    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|deltoggle_|del_execute|pubtoggle_|pub_execute)"))
+    app.add_handler(CallbackQueryHandler(handle_edit_button, pattern="^(edit_|setcat_|pubtoggle_|pub_execute)"))
     app.add_handler(CallbackQueryHandler(on_finde_approval_cb, pattern="^fap_"))
     app.add_handler(CallbackQueryHandler(handle_notamanual_button, pattern="^nm_"))
     app.add_handler(CallbackQueryHandler(handle_evento_button, pattern="^ev_"))

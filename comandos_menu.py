@@ -34,7 +34,7 @@ OCULTOS = [
     ("vivo", "Cobertura EN VIVO — nota + redes desde el bot (nunca probado con un evento real)"),
     ("input_evento", "Tandas EN VIVO — texto, audios y fotos para la crónica"),
     ("hilo", "/hilo &lt;URL o ID&gt; — hilo de X de una nota publicada"),
-    ("borrar", "/borrar &lt;URL o ID&gt; — nota a la papelera de WP"),
+    ("borrar", "/borrar &lt;URL o ID&gt; — borra la nota de la web y de todas las redes (verifica red por red)"),
     ("inst", "/inst &lt;job_id&gt; &lt;texto&gt; — aprobar una nota con instrucciones"),
     ("lector", "Evaluar una nota con el Lector QA"),
     ("kwtemp", "/kwtemp &lt;keyword&gt; [capa:N] [dias:N] — keyword temporal a la agenda"),
