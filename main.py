@@ -13525,10 +13525,16 @@ async def _pubx_do_social(
                                post["link"].rstrip("/"), post["id"])
         target = chat_id or ADMIN_CHAT_ID
         if target:
-            await context.bot.send_message(
-                chat_id=target, text=copy_text,
-                parse_mode="Markdown", disable_web_page_preview=True,
-            )
+            # Texto PLANO (17/11/2026): con parse_mode=Markdown un título con «*» o «_» sueltos daba
+            # «Can't parse entities» y cortaba la republicación entera; además Telegram se comía los
+            # asteriscos de la negrita de WhatsApp, que tienen que llegar literales para pegarlos.
+            try:
+                await context.bot.send_message(chat_id=target, text=copy_text, disable_web_page_preview=True)
+                results.append(f"📋 Copy {_PUBX_NET_LABEL[net]} enviado al chat")
+            except Exception as _e_cp:
+                logger.warning("copy %s publinota: %s", net, _e_cp)
+                results.append(f"❌ No pude mandar el copy de {_PUBX_NET_LABEL[net]}")
+            continue
         results.append(f"📋 Copy {_PUBX_NET_LABEL[net]} enviado al chat")
 
     if new_tg_msg or new_tweet_id:
