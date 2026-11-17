@@ -177,7 +177,7 @@ def borrar_meta(red: str, oid: str) -> Resultado:
     if despues is False:
         return Resultado(BORRADO, "borrado y verificado")
     if despues is True:
-        extra = ("Instagram no deja borrar por API: borralo desde la app" if red.startswith("ig_")
+        extra = ("Instagram no lo borró: borralo desde la app" if red.startswith("ig_")
                  else "Meta no lo dejó borrar")
         return Resultado(SIGUE, "%s%s" % (extra, (" · " + link) if link else ""))
     return Resultado(DUDOSO, "mandé el borrado pero no pude confirmarlo")
