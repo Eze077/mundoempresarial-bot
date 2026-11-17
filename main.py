@@ -5471,11 +5471,31 @@ def _confirmar_cola_leo(br, job_id, dest, **kw):
     'redaccion' (el harness nuevo lo permite con por_leo=True) y devuelve las filas tocadas. 0 = no cambió nada (ya se publicó,
     ya no está en la cola o lo frenó): el bot tiene que decirlo y no aplicar el aprendizaje. None = harness viejo, que no
     devuelve nada (se comporta como antes)."""
-    try:
+    import inspect
+    try:                                            # se mira la firma (como link_directo_bot._tomar): un TypeError de
+        params = inspect.signature(br.confirm_cola).parameters   # ADENTRO de confirm_cola ya no se confunde con un harness viejo
+        con_por_leo = "por_leo" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        con_por_leo = False
+    if con_por_leo:
         return br.confirm_cola(job_id, dest, por_leo=True, **kw)
-    except TypeError:
-        br.confirm_cola(job_id, dest, **kw)
-        return None
+    br.confirm_cola(job_id, dest, **kw)
+    return None
+
+
+def _sugerir_cola_leo(br, job_id, **kw):
+    """Botones de LEO sobre la sugerencia de la cola (📌 portada, destino, 🤖 auto). El harness nuevo solo deja escribir a los
+    agentes sobre un job que sigue en 'cola' (así no le pisan el destino a Leo); Leo sí puede tocar uno que ya pasó a
+    'redaccion', y para eso se le pasa por_leo=True. Harness viejo (sin por_leo): como antes. Mira la firma, no atrapa TypeError."""
+    import inspect
+    try:
+        params = inspect.signature(br.set_cola_suggestion).parameters
+        con_por_leo = "por_leo" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        con_por_leo = False
+    if con_por_leo:
+        return br.set_cola_suggestion(job_id, por_leo=True, **kw)
+    return br.set_cola_suggestion(job_id, **kw)
 
 
 def _cola_no_cambio_txt(br, job_id) -> str:
@@ -8260,6 +8280,27 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    # ── Canal de WhatsApp: Leo pegó el resumen del día (harness agents/canal_wa.py, 17/11/2026) ──
+    if query.data.startswith("h_canalwa_ok:"):
+        import sys as _syscw
+        _syscw.path.insert(0, "/opt/me-harness"); _syscw.path.insert(0, "/opt/me-harness/agents")
+        try:
+            dia = query.data.split(":", 1)[1]
+            from agents import canal_wa as _cw
+            res = await asyncio.to_thread(_cw.marcar_publicado, dia)
+            if res.get("ok"):
+                base = query.message.text_html if query.message.text else ""
+                await query.edit_message_text(base + "\n\n✅ <b>Publicado en el Canal</b> (anotado)",
+                                              parse_mode="HTML", disable_web_page_preview=True)
+            else:
+                await query.answer(f"No pude anotarlo: {res.get('error')}", show_alert=True)
+        except Exception as e:
+            try:
+                await query.answer(f"Error: {str(e)[:150]}", show_alert=True)
+            except Exception:
+                pass
+        return
+
     # ── Eventos: armar la campaña de un evento propuesto (mínima/media/máxima) ──
     if query.data.startswith("h_evt_build:") or query.data.startswith("h_evt_no:"):
         import sys as _sysev
@@ -9086,7 +9127,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 (_js.dumps(cj), job_id))
                 # Si se activa portada → pub_dest=hoy_portada
                 if portada:
-                    _br_cola.set_cola_suggestion(job_id, pub_dest="hoy_portada",
+                    _sugerir_cola_leo(_br_cola, job_id, pub_dest="hoy_portada",
                                                   reasoning="Marcado como portada del día por Leo")
                 await query.answer("📌 Portada activada" if portada else "Portada desactivada",
                                    show_alert=False)
@@ -9199,7 +9240,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try: sg2 = _js.loads(job2["agent_suggestion"])
                         except Exception: pass
                     pub_dest = sg2.get("pub_dest") or "hoy_normal"
-                    _br_cola.set_cola_suggestion(job_id, pub_dest=pub_dest,
+                    _sugerir_cola_leo(_br_cola, job_id, pub_dest=pub_dest,
                                                   reasoning=sg2.get("reasoning",""))
                     await query.answer(f"🤖 {_DEST_LABELS.get(pub_dest, pub_dest)}", show_alert=False)
                     await query.data.__class__  # trigger h_cola_back inline
@@ -9216,7 +9257,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.answer(f"🤖 Auto → {_DEST_LABELS.get(pub_dest, pub_dest)}", show_alert=False)
                 else:
                     # Actualizar destino en la sugerencia SIN confirmar (no manda a redacción aún)
-                    _br_cola.set_cola_suggestion(job_id, pub_dest=pub_dest,
+                    _sugerir_cola_leo(_br_cola, job_id, pub_dest=pub_dest,
                                                   reasoning=f"Destino cambiado manualmente: {pub_dest}")
                     label = _DEST_LABELS.get(pub_dest, pub_dest)
                     await query.answer(f"✅ {label}", show_alert=False)

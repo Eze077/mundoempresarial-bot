@@ -329,6 +329,83 @@ def test_con_un_harness_viejo_las_acciones_de_leo_siguen_andando_como_antes():
     assert conf(br, 7, "finde", anchor_date="x") is None and br.llamadas == [(7, "finde")]
 
 
+def test_un_typeerror_de_adentro_de_confirm_cola_no_se_traga_ni_se_reintenta_sin_por_leo():
+    """Antes, cualquier TypeError (un bug real del harness nuevo) hacía reintentar SIN por_leo y tapaba el error. Ahora se mira
+    la firma: si por_leo está, se llama una sola vez y el error sube."""
+    conf, _ = _funciones_cola_de_main()
+
+    class _BrRoto:
+        def __init__(self):
+            self.llamadas = 0
+
+        def confirm_cola(self, job_id, dest, por_leo=False, **kw):
+            self.llamadas += 1
+            raise TypeError("unsupported operand: bug real adentro")
+
+    br = _BrRoto()
+    with pytest.raises(TypeError, match="bug real"):
+        conf(br, 7, "finde")
+    assert br.llamadas == 1
+
+
+def test_la_firma_con_kwargs_cuenta_como_harness_nuevo_y_la_que_no_se_puede_mirar_como_viejo(monkeypatch):
+    conf, _ = _funciones_cola_de_main()
+
+    class _BrKw:
+        def confirm_cola(self, job_id, dest, **kw):
+            self.kw = kw
+            return 1
+
+    br = _BrKw()
+    assert conf(br, 7, "finde") == 1 and br.kw == {"por_leo": True}
+
+    class _BrOpaco:                                              # firma que inspect no puede leer -> se trata como viejo
+        confirm_cola = staticmethod(lambda *a, **k: None)
+
+    import inspect
+
+    def _sin_firma(*a, **k):
+        raise ValueError("sin firma")
+
+    monkeypatch.setattr(inspect, "signature", _sin_firma)
+    assert conf(_BrOpaco(), 7, "finde") is None
+
+
+def _sugerir_cola_de_main():
+    import ast
+    src = open(os.path.join(RAIZ_BOT, "main.py"), encoding="utf-8").read()
+    nodo = [n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_sugerir_cola_leo"]
+    assert len(nodo) == 1
+    ns = {}
+    exec(compile(ast.Module(body=nodo, type_ignores=[]), "main_extracto", "exec"), ns)
+    return ns["_sugerir_cola_leo"]
+
+
+def test_los_botones_de_leo_sobre_la_sugerencia_piden_por_leo_si_el_harness_lo_entiende():
+    sug = _sugerir_cola_de_main()
+
+    class _Nuevo:
+        def set_cola_suggestion(self, job_id, pub_dest, reasoning="", por_leo=False):
+            self.v = (job_id, pub_dest, reasoning, por_leo)
+            return 1
+
+    class _Viejo:
+        def set_cola_suggestion(self, job_id, pub_dest, reasoning=""):
+            self.v = (job_id, pub_dest, reasoning)
+
+    n, v = _Nuevo(), _Viejo()
+    assert sug(n, 7, pub_dest="hoy_portada", reasoning="r") == 1 and n.v == (7, "hoy_portada", "r", True)
+    assert sug(v, 7, pub_dest="finde", reasoning="r") is None and v.v == (7, "finde", "r")
+
+
+def test_main_py_no_llama_set_cola_suggestion_a_ciegas():
+    """Los tres botones de la tarjeta de /coladepublicacion pasan por el helper (por_leo), nunca directo."""
+    import re
+    src = open(os.path.join(RAIZ_BOT, "main.py"), encoding="utf-8").read()
+    assert [l for l in src.splitlines() if re.search(r"_br_\w+\.set_cola_suggestion\(", l)] == []
+    assert src.count("_sugerir_cola_leo(_br_cola, job_id, pub_dest") == 3
+
+
 @pytest.mark.parametrize("etapa,frase", [("done", "ya se publicó"), ("rejected", "rechazada o frenada"),
                                          ("publicacion", "ya no está en la cola"), (None, "no encontré")])
 def test_si_no_cambio_nada_el_bot_dice_la_verdad(etapa, frase):
