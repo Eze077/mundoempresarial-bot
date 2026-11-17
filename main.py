@@ -20201,6 +20201,14 @@ def main():
                               pausado=lambda: BOT_PAUSED)
     except Exception as _e_agd:
         logger.warning(f"reunión de agenda no registrada: {_e_agd}")
+    # Directivas de Leo al Jefe de redacción durante el día (JEFE_DIRECTIVAS = 0 | dry | 1): reply a un mensaje del Jefe, «Jefe, …» o /jefe.
+    # Después de la reunión y antes de handle_link: solo coincide con lo que es para el Jefe; lo demás sigue su camino.
+    try:
+        import jefe_directivas_bot as _jefe_bot
+        _jefe_bot.registrar(app, transcribir=_whisper_from_file, fallback_texto=handle_link,
+                            fallback_media=handle_evento_media, pausado=lambda: BOT_PAUSED)
+    except Exception as _e_jefe:
+        logger.warning(f"directivas al Jefe no registradas: {_e_jefe}")
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))

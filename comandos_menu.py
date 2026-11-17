@@ -30,6 +30,7 @@ MENU = [
 OCULTOS = [
     ("fuentes", "Fuentes RSS del EDITOR (también: botón 📡 en /rutina) · /fuentes &lt;dominio&gt; = detalle"),
     ("ciclaje", "= /briefing auto: notas por corrida + horarios del briefing automático"),
+    ("jefe", "/jefe &lt;texto&gt; — decirle algo al Jefe de redacción (también: «Jefe, …» o contestar a un mensaje suyo, por texto o audio)"),
     ("editor", "Agenda temática, descubrimientos, living notes"),
     ("vivo", "Cobertura EN VIVO — nota + redes desde el bot (nunca probado con un evento real)"),
     ("input_evento", "Tandas EN VIVO — texto, audios y fotos para la crónica"),
