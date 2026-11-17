@@ -26,6 +26,7 @@ from telegram.ext import (
 import comandos_menu  # menú de Telegram, /help e informe de uso salen de una sola lista
 import fase1_robustez as _f1  # manejador de errores y días de los jobs
 import fuentes_extra as _fuentes_extra  # /fuentes escribe acá lo que lee la ingesta del harness
+import borrado_redes as _borrado  # /publicador → Borrar: todas las redes, con verificación (17/11/2026)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -63,6 +64,7 @@ LINKEDIN_ORG_TOKEN   = os.environ.get("LINKEDIN_ORG_TOKEN", "")
 LINKEDIN_TOKEN_STATE = os.environ.get("LINKEDIN_TOKEN_STATE", "/opt/me-harness/linkedin_org_token.json")
 _LAST_LINKEDIN_ERROR = ""
 _LAST_LINKEDIN_URN = ""
+_LAST_LINKEDIN_ORG_URN = ""   # URN del último post en la PÁGINA (para poder borrarlo después)
 _LINKEDIN_MEMBER_URN_CACHE: str | None = None
 _LAST_WP_ERROR = ""
 # Modo pausa: cuando True, el bot ignora links y scheduled posts
@@ -1711,11 +1713,14 @@ def publish_post(data: dict, image_id: int | None, destacado: bool = False,
     return None
 
 
-def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id: int = 0, li_urn: str = "") -> bool:
+def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id: int = 0, li_urn: str = "",
+                       **extra) -> bool:
     """
-    Agrega un HTML comment al final del post con los IDs de Twitter, Telegram y LinkedIn
-    para poder borrarlos después desde /editar.
-    Format: <!-- mebot:tweet_id=X;tg_msg=Y;li_urn=Z -->
+    Agrega un HTML comment al final del post con los IDs de lo publicado en redes, para poder borrarlo después
+    desde /publicador o /editar.
+    Format: <!-- mebot:tweet_id=X;tg_msg=Y;li_urn=Z;li_org_urn=…;ig_feed=…;ig_story=…;fb_post=… -->
+    Los de siempre (tweet_id, tg_msg, li_urn) son parámetros; el resto va por nombre en `extra`. Combina con lo ya
+    anotado: guardar un id nunca borra otro, ni siquiera uno que este código no conozca.
     """
     try:
         # Siempre fetchear contenido fresco de WP para no sobreescribir con versión cacheada/truncada
@@ -1735,23 +1740,18 @@ def append_social_meta(post_id: int, content: str, tweet_id: str = "", tg_msg_id
             logger.error(f"append_social_meta: contenido vacío en #{post_id}, no escribo (evita borrar la nota)")
             return False
         # Combinar con lo ya registrado: guardar el ID de TG no debe borrar el del tweet (y viceversa)
-        _prev = parse_social_meta(content)
-        tweet_id = tweet_id or _prev.get("tweet_id", "")
-        tg_msg_id = tg_msg_id or _prev.get("tg_msg", "")
-        li_urn = li_urn or _prev.get("li_urn", "")
+        meta = dict(_borrado.parse_meta(content))
+        nuevos = {"tweet_id": tweet_id, "tg_msg": tg_msg_id, "li_urn": li_urn}
+        nuevos.update(extra)
+        for k, v in nuevos.items():
+            if v:
+                meta[k] = str(v)
         # Remover comentarios previos si existen
         clean_content = re.sub(r'<!--\s*mebot:[^>]*-->', '', content)
-        meta_parts = []
-        if tweet_id:
-            meta_parts.append(f"tweet_id={tweet_id}")
-        if tg_msg_id:
-            meta_parts.append(f"tg_msg={tg_msg_id}")
-        if li_urn:
-            meta_parts.append(f"li_urn={li_urn}")
-        if not meta_parts:
+        meta_comment = _borrado.construir_meta(meta)
+        if not meta_comment:
             return True
-        meta_comment = f"\n<!-- mebot:{';'.join(meta_parts)} -->"
-        new_content = clean_content + meta_comment
+        new_content = clean_content + "\n" + meta_comment
         return update_post(post_id, {"content": new_content})
     except Exception as e:
         logger.error(f"append_social_meta: {e}")
@@ -2198,6 +2198,8 @@ def _get_org_token() -> str:
 
 def post_linkedin_org(data: dict, wp_url: str) -> str | None:
     """Publica en la PÁGINA de LinkedIn (organización). Independiente del posteo personal."""
+    global _LAST_LINKEDIN_ORG_URN
+    _LAST_LINKEDIN_ORG_URN = ""
     tok = _get_org_token()
     if not tok or not LINKEDIN_ORG_ID:
         logger.warning("post_linkedin_org: sin token org u org_id")
@@ -2223,6 +2225,7 @@ def post_linkedin_org(data: dict, wp_url: str) -> str | None:
         r = _li_request("POST", "https://api.linkedin.com/rest/posts", h, json=payload, timeout=15)
         if r.status_code in (200, 201):
             post_urn = r.headers.get("x-linkedin-id") or r.json().get("id", "")
+            _LAST_LINKEDIN_ORG_URN = post_urn
             post_url_li = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else tracked_url
             logger.info(f"LinkedIn ORG post OK: {post_url_li}")
             return post_url_li
@@ -5799,25 +5802,31 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not fp:
             await update.message.reply_text("Error: no hay frase pendiente (arrancá con /frases).")
             return
-        fp[campo] = await _ortografia_corto(update, text_in.strip())
-        await update.message.reply_text("🎨 Regenerando placa…")
-        try:
-            from frases_gen import generate_frase_image
-            img_bytes = await asyncio.to_thread(
-                generate_frase_image, fp["texto"], fp.get("kicker"), fp.get("tag"))
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error generando imagen: {e}")
+        # Leo está CORRIGIENDO: su texto sale tal cual. El corrector solo avisa (regla «lo de Leo no se corrige: flag»);
+        # si corrigiera solo, podía volver a meter el mismo error que Leo estaba sacando (frase #57490, 17/11/2026).
+        nuevo = await _ortografia_avisar(update, text_in.strip())
+        if not nuevo:
+            context.user_data["awaiting_frase_header"] = campo
+            await update.message.reply_text("Eso quedó vacío. Mandame el texto de nuevo.")
             return
-        fp["img_bytes"] = img_bytes
+        await update.message.reply_text("🎨 Regenerando placa…")
+        # La placa se genera con el valor CANDIDATO y recién si sale bien se guardan texto y placa JUNTOS: nunca queda
+        # un texto nuevo con la placa vieja (la que publicaría el error original en IG, X, Telegram y WP).
+        _viejo = fp.get(campo)
+        try:
+            await _frase_aplicar(fp, {campo: nuevo})
+        except Exception as e:
+            logger.warning(f"Frase: no pude regenerar la placa al cambiar {campo}: {type(e).__name__}; no cambió nada")
+            context.user_data["awaiting_frase_header"] = campo      # para que pueda reenviarlo
+            await update.message.reply_text(
+                f"❌ No pude generar la placa ({str(e)[:120]}). NO cambié nada: sigue el texto anterior. "
+                "Mandame el texto de nuevo o tocá ❌ Cancelar.")
+            return
         context.user_data["frase_pending"] = fp
-        bio = io.BytesIO(img_bytes)
-        bio.name = "frase.png"
-        await update.message.reply_photo(
-            photo=bio,
-            caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
-            parse_mode="Markdown",
-            reply_markup=_build_frase_kb(fp),
-        )
+        # El journal dice qué había y qué quedó (las frases son públicas): la próxima vez que algo salga distinto de lo
+        # corregido, esta línea muestra dónde se perdió.
+        logger.info(f"Frase: {campo} cambiado (versión {fp['rev']}): «{str(_viejo)[:160]}» → «{str(nuevo)[:160]}»; placa regenerada")
+        await _frase_mostrar_preview(context.bot, update.message, fp)
         return
 
     # ── Eventos: insumos del Editor para la nota principal → finalizar la campaña ──
@@ -6520,7 +6529,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post:
             await update.message.reply_text("No hay nota en edición.")
             return
-        new_title = await _ortografia_corto(update, text_in)
+        new_title = await _ortografia_avisar(update, text_in.strip())     # título que reescribe Leo: sale tal cual (manual gana)
         ok = await asyncio.to_thread(
             update_post, post["id"],
             {"title": new_title, "slug": url_slug(new_title)}
@@ -11924,6 +11933,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         fp = context.user_data.get("frase_pending")
 
+        # Vista previa vieja: cuando el texto se cambia sale una vista previa NUEVA y la anterior queda en el chat. Sus
+        # botones ya no valen (mostraban el texto y la placa de antes): se retiran en vez de operar sobre la frase de ahora.
+        if (fp and fp.get("preview") and query.message is not None
+                and query.data not in ("frase_tweet", "frase_no_tweet", "frase_change_ht")
+                and (query.message.chat_id, query.message.message_id) != tuple(fp["preview"])):
+            try:
+                await query.edit_message_caption(
+                    caption="↩️ Esta vista previa quedó vieja: no publiqué nada. Usá la última vista previa de la frase.")
+            except Exception:
+                pass
+            return
+
         if query.data.startswith("frase_toggle_"):
             if not fp:
                 await query.edit_message_caption(caption="Error: no hay frase pendiente.")
@@ -11959,6 +11980,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query.data == "frase_cancel":
             context.user_data.pop("frase_pending", None)
+            context.user_data.pop("awaiting_frase_header", None)    # que un «mandame el texto» no se coma el próximo mensaje
             await query.edit_message_caption(caption="Cancelado.")
             return
 
@@ -11967,15 +11989,29 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_caption(caption="Error: no hay frase pendiente.")
                 return
             await query.edit_message_caption(
-                caption=f"💬 *{md_escape(fp['texto'])}*\n\n_Elegí las redes y acción:_",
+                caption=_frase_caption(fp),
                 parse_mode="Markdown",
                 reply_markup=_build_frase_kb(fp),
             )
             return
 
+        if query.data in ("frase_pub", "frase_schedule") and fp and context.user_data.pop("awaiting_frase_header", None):
+            # Tocó ✏️ / 🏷 / 📅 y no mandó el texto: ese pedido queda anulado (si no, se comería su próximo mensaje) y no
+            # se publica a ciegas: la vista previa vuelve a mostrar exactamente lo que saldría.
+            await _frase_edit(
+                query,
+                caption=(_frase_caption(fp) + "\n\n⚠️ Habías tocado ✏️ y no mandaste el texto nuevo: "
+                         "lo cancelé. Si querés sacar ESTA versión, tocá de nuevo."),
+                parse_mode="Markdown", reply_markup=_build_frase_kb(fp))
+            return
+
         if query.data == "frase_pub":
             if not fp:
                 await query.edit_message_caption(caption="Error: no hay frase pendiente.")
+                return
+            _err_placa = await _frase_asegurar_placa(fp)     # la placa tiene que ser la del texto de ahora
+            if _err_placa:
+                await _frase_edit(query, caption=_err_placa, reply_markup=_build_frase_kb(fp))
                 return
             frase     = fp["texto"]
             img_bytes = fp.get("img_bytes")
@@ -11984,10 +12020,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             wp_on     = fp.get("wp_on", True)
             li_on     = fp.get("li_on", False)
             custom_ht = context.user_data.get("frase_custom_ht", "#Frases #MundoEmpresarial #Pymes")
+            logger.info(f"Frase: publicando versión {fp.get('rev', 1)} «{frase[:160]}» (placa {len(img_bytes or b'')} bytes)")
 
             post_url = ""
             post_id  = None
             res_lines = []
+            ids_redes = {}      # ids de lo publicado en cada red, para poder borrarlo después (/publicador → Borrar)
 
             if wp_on:
                 await query.edit_message_caption(caption="📤 Publicando…")
@@ -12004,8 +12042,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res_lines.append(f"✅ WP: {post_url}")
                     if _fr_result.get("tg_msg_id"):
                         res_lines.append("✅ Canal TG")
-                        # Registrar el mensaje de TG en la nota para poder borrarlo desde /editar
+                        # Registrar el mensaje de TG en la nota para poder borrarlo desde /editar y /publicador
                         await asyncio.to_thread(append_social_meta, post_id, "", "", _fr_result["tg_msg_id"])
+                        logger.info(f"Frase #{post_id}: canal TG mensaje {_fr_result['tg_msg_id']} (id guardado en la nota)")
                     if _fr_result.get("tweet_id"):
                         res_lines.append("✅ Twitter")
                     # Marcar como ya publicado en redes para no repetir abajo
@@ -12018,21 +12057,38 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 li_url = await asyncio.to_thread(post_linkedin, {"title": frase, "excerpt": ""}, post_url)
                 if li_url:
                     res_lines.append(f"✅ LinkedIn (personal): {li_url}")
+                    if _LAST_LINKEDIN_URN:
+                        ids_redes["li_urn"] = _LAST_LINKEDIN_URN
                 else:
                     res_lines.append(f"❌ LinkedIn (personal): {_LAST_LINKEDIN_ERROR[:80]}")
                 # Página Mundo Empresarial AR (org) — NUEVO
                 li_org_url = await asyncio.to_thread(post_linkedin_org, {"title": frase, "excerpt": ""}, post_url)
                 if li_org_url:
                     res_lines.append(f"✅ LinkedIn (página): {li_org_url}")
+                    if _LAST_LINKEDIN_ORG_URN:
+                        ids_redes["li_org_urn"] = _LAST_LINKEDIN_ORG_URN
                 else:
                     res_lines.append("❌ LinkedIn (página): ver logs")
 
             res_lines.extend(await _frase_ig_wa(
                 context, query.message.chat_id,
                 _frase_flag(fp, "igf_on"), _frase_flag(fp, "igs_on"), _frase_flag(fp, "wa_on"),
-                frase, img_bytes, post_url, custom_ht))
+                frase, img_bytes, post_url, custom_ht, ids=ids_redes))
 
-            res_text = "\n".join(res_lines)
+            # Los ids de LinkedIn e Instagram se anotan en la nota (hasta el 17/11 no se guardaban: el publicador no
+            # podía borrar esas redes). Una sola escritura, y el resultado queda en el journal.
+            if post_id and ids_redes:
+                _ok_ids = await asyncio.to_thread(
+                    append_social_meta, post_id, "", "", 0, ids_redes.get("li_urn", ""),
+                    **{k: v for k, v in ids_redes.items() if k != "li_urn"})
+                logger.info(f"Frase #{post_id}: ids de redes guardados en la nota ({', '.join(sorted(ids_redes))}) "
+                            f"→ {'ok' if _ok_ids else 'NO SE PUDO GUARDAR'}")
+                if not _ok_ids:
+                    res_lines.append("⚠️ No pude guardar los ids de las redes en la nota: /publicador no va a poder borrarlas")
+
+            # Lo que salió, tal cual (la vista previa y esto tienen que coincidir)
+            res_lines.insert(0, f"📝 Salió: «{frase[:300]}»")
+            res_text = "\n".join(res_lines)[:1000]
             await query.edit_message_caption(caption=res_text)
 
             if tw_on:
@@ -13401,7 +13457,7 @@ async def handle_edit_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 _PUBX_NETS_LINKS = ["wp", "telegram", "twitter", "facebook", "instagram", "linkedin", "whatsapp"]
 _PUBX_NETS_REP   = ["telegram", "twitter", "facebook", "instagram", "linkedin", "whatsapp"]
-_PUBX_NETS_DEL   = ["wp", "telegram", "twitter", "linkedin"]
+_PUBX_NETS_DEL   = list(_borrado.ORDEN)    # telegram, twitter, linkedin, li_pag, facebook, ig_feed, ig_story, wp
 
 _PUBX_NET_LABEL = {
     "wp": "WordPress", "telegram": "Telegram", "twitter": "Twitter",
@@ -13496,20 +13552,15 @@ def _build_pubx_hora_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _build_pubx_del_kb(sel: set, meta: dict) -> InlineKeyboardMarkup:
+def _build_pubx_del_kb(sel: set, reg: dict) -> InlineKeyboardMarkup:
+    """`reg` = {red: id} de lo que está registrado de esa nota (ver borrado_redes.registro_de_nota)."""
     rows = []
     for net in _PUBX_NETS_DEL:
-        avail = True
-        if net == "telegram" and not meta.get("tg_msg"):
-            avail = False
-        elif net == "twitter" and not meta.get("tweet_id"):
-            avail = False
-        elif net == "linkedin" and not meta.get("li_urn"):
-            avail = False
+        avail  = net == "wp" or bool(reg.get(net))
         icon   = "✅" if net in sel else "☐"
-        suffix = "" if avail else " (N/A)"
+        suffix = "" if avail else " (sin posteo registrado)"
         rows.append([InlineKeyboardButton(
-            f"{icon} {_PUBX_NET_LABEL[net]}{suffix}",
+            f"{icon} {_borrado.ETIQUETA[net]}{suffix}",
             callback_data=f"pubx_dt_{net}",
         )])
     rows.append([
@@ -13629,9 +13680,45 @@ async def cmd_publicador(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botones de /publicador. Telegram deja contestar UN solo answerCallbackQuery por toque: antes se contestaba arriba
+    y los avisos con alerta («Seleccioná al menos una red») fallaban con BadRequest. Ahora contesta una sola vez, en el
+    momento justo, y siempre (aunque el cuerpo falle)."""
     query = update.callback_query
-    await query.answer()
+    estado = {"hecho": False}
+
+    async def ans(texto=None, alerta=False):
+        if estado["hecho"]:
+            return
+        estado["hecho"] = True
+        try:
+            await query.answer(texto, show_alert=alerta)
+        except Exception as e:
+            logger.debug("pubx: answer: %s", e)
+
+    try:
+        await _pubx_button(update, context, query, ans)
+    finally:
+        await ans()
+
+
+async def _pubx_registro(post: dict) -> dict:
+    """{red: id} de lo registrado de la nota, con el contenido FRESCO de WordPress (el que guardó /publicador puede estar
+    viejo: los ids se anotan después de publicar) y la cola de Meta del harness."""
+    contenido = post.get("content", "")
+    try:
+        fresco = await asyncio.to_thread(find_post, str(post["id"]))
+        if fresco and fresco.get("content"):
+            contenido = fresco["content"]
+    except Exception as e:
+        logger.warning(f"pubx: no pude releer la nota #{post.get('id')}: {e}")
+    return await asyncio.to_thread(_borrado.registro_de_nota, contenido, post["id"])
+
+
+async def _pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE, query, ans):
     d = query.data
+    # Estos contestan ellos mismos (con alerta o después de validar); el resto, ya.
+    if not (d.startswith(("pubx_dt_", "pubx_hora_")) or d in ("pubx_links_send", "pubx_rep_now", "pubx_del_confirm")):
+        await ans()
 
     if d == "pubx_cancel":
         for k in ("pubx_post", "pubx_links_sel", "pubx_rep_sel", "pubx_del_sel"):
@@ -13681,8 +13768,9 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if d == "pubx_links_send":
         sel = context.user_data.get("pubx_links_sel", set())
         if not sel:
-            await query.answer("Seleccioná al menos una red", show_alert=True)
+            await ans("Seleccioná al menos una red", True)
             return
+        await ans()
         title   = post["title"]
         url     = post["link"].rstrip("/")
         excerpt = _pubx_excerpt(post)
@@ -13742,8 +13830,9 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if d.startswith("pubx_hora_"):
         sel = context.user_data.get("pubx_rep_sel", set())
         if not sel:
-            await query.answer("Seleccioná al menos una red primero", show_alert=True)
+            await ans("Seleccioná al menos una red primero", True)
             return
+        await ans()
         hour = int(d.split("_")[-1])
         from datetime import timezone, timedelta
         tz_arg = timezone(timedelta(hours=-3))
@@ -13769,8 +13858,9 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if d == "pubx_rep_now":
         sel = context.user_data.get("pubx_rep_sel", set())
         if not sel:
-            await query.answer("Seleccioná al menos una red", show_alert=True)
+            await ans("Seleccioná al menos una red", True)
             return
+        await ans()
         await query.edit_message_text("Publicando...")
         results = await _pubx_do_social(
             context, post, sel, chat_id=query.message.chat_id,
@@ -13779,78 +13869,104 @@ async def handle_pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # ── Borrar ───────────────────────────────────────────────────────────────
+    # Ofrece TODAS las redes donde salió la nota (ids del comentario mebot + cola de Meta del harness) y las borra con
+    # verificación: ver borrado_redes.py. Cada resultado queda en el journal.
 
     if d == "pubx_del":
-        meta = parse_social_meta(post.get("content", ""))
+        reg = await _pubx_registro(post)
+        context.user_data["pubx_del_reg"] = reg
         sel = context.user_data.get("pubx_del_sel") or set()
         if not sel:
-            sel = {"wp"}
-            if meta.get("tg_msg"):
-                sel.add("telegram")
-            if meta.get("tweet_id"):
-                sel.add("twitter")
-            if meta.get("li_urn"):
-                sel.add("linkedin")
+            sel = {"wp"} | set(reg)           # por defecto: todo lo que se sabe que salió, más la nota
             context.user_data["pubx_del_sel"] = sel
+        hay = ", ".join(_borrado.ETIQUETA[n] for n in _PUBX_NETS_DEL if n in reg) or "ninguna red registrada"
         await query.edit_message_text(
-            f"🗑️ *Borrar nota*\n\n_{md_escape(post['title'])}_\n\nSeleccioná de dónde borrar:",
+            f"🗑️ *Borrar nota*\n\n_{md_escape(post['title'])}_\n\n"
+            f"Registrado: {md_escape(hay)}\nSeleccioná de dónde borrar:",
             parse_mode="Markdown",
-            reply_markup=_build_pubx_del_kb(sel, meta),
+            reply_markup=_build_pubx_del_kb(sel, reg),
         )
         return
 
     if d.startswith("pubx_dt_"):
-        net  = d[len("pubx_dt_"):]
-        meta = parse_social_meta(post.get("content", ""))
-        if net == "telegram" and not meta.get("tg_msg"):
+        net = d[len("pubx_dt_"):]
+        reg = context.user_data.get("pubx_del_reg")
+        if reg is None:
+            reg = await _pubx_registro(post)
+            context.user_data["pubx_del_reg"] = reg
+        if net not in _PUBX_NETS_DEL:
+            await ans()
             return
-        if net == "twitter" and not meta.get("tweet_id"):
+        if net != "wp" and not reg.get(net):
+            # antes no pasaba nada y el botón parecía roto: ahora se dice por qué
+            await ans(f"{_borrado.ETIQUETA[net]}: no hay posteo registrado de esta nota.", True)
             return
-        if net == "linkedin" and not meta.get("li_urn"):
-            return
-        sel = context.user_data.get("pubx_del_sel", set()).copy()
+        sel = set(context.user_data.get("pubx_del_sel") or set())
         if net in sel:
             sel.discard(net)
         else:
             sel.add(net)
         context.user_data["pubx_del_sel"] = sel
-        await query.edit_message_reply_markup(reply_markup=_build_pubx_del_kb(sel, meta))
+        await ans()
+        await query.edit_message_reply_markup(reply_markup=_build_pubx_del_kb(sel, reg))
         return
 
     if d == "pubx_del_confirm":
-        sel = context.user_data.get("pubx_del_sel", set())
+        sel = set(context.user_data.get("pubx_del_sel") or set())
         if not sel:
-            await query.answer("Nada seleccionado", show_alert=True)
+            await ans("Nada seleccionado", True)
             return
-        await query.edit_message_text("Borrando...")
-        meta    = parse_social_meta(post.get("content", ""))
-        results = []
+        await ans()
+        await query.edit_message_text("Borrando… (verifico red por red, puede tardar un minuto)")
+        reg = await _pubx_registro(post)      # fresco: lo que se anotó después de abrir el menú también cuenta
+        logger.info(f"pubx borrar nota #{post['id']}: elegidas={sorted(sel)} registradas={sorted(reg)}")
 
-        if "twitter" in sel and meta.get("tweet_id"):
-            ok = await asyncio.to_thread(delete_tweet, meta["tweet_id"])
-            results.append("✅ Tweet borrado" if ok else "❌ Error borrando tweet")
+        def _wp():
+            return _pubx_wp_a_papelera(post["id"])
 
-        if "telegram" in sel and meta.get("tg_msg"):
-            try:
-                ok = await delete_from_channel(context.bot, int(meta["tg_msg"]))
-                results.append("✅ Mensaje TG borrado" if ok
-                               else "❌ Error borrando del canal TG")
-            except (ValueError, Exception) as e:
-                results.append(f"❌ Error TG: {e}")
+        resultados = await asyncio.to_thread(_borrado.borrar_nota, sel, reg, _wp)
+        dudosos = await asyncio.to_thread(_borrado.dudosos_de_cola, post["id"])
+        informe = _borrado.formatear(post.get("title", "")[:80], resultados, dudosos)
+        logger.info("pubx borrar nota #%s: terminado → %s", post["id"],
+                    {r: (x.estado if x else "no_elegida") for r, x, _ in resultados})
 
-        if "linkedin" in sel and meta.get("li_urn"):
-            ok = await asyncio.to_thread(delete_linkedin_post, meta["li_urn"])
-            results.append("✅ LinkedIn borrado" if ok else "❌ Error borrando LinkedIn")
-
-        if "wp" in sel:
-            ok = await asyncio.to_thread(trash_post, post["id"])
-            results.append("✅ WP → papelera" if ok else "❌ Error borrando de WP")
-
-        for k in ("pubx_post", "pubx_links_sel", "pubx_rep_sel", "pubx_del_sel"):
+        for k in ("pubx_post", "pubx_links_sel", "pubx_rep_sel", "pubx_del_sel", "pubx_del_reg"):
             context.user_data.pop(k, None)
 
-        await query.edit_message_text("\n".join(results) or "Nada que borrar.")
+        try:
+            await query.edit_message_text(informe[:4000], disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning(f"pubx: no pude editar el informe de borrado: {e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text=informe[:4000],
+                                           disable_web_page_preview=True)
         return
+
+
+def _wp_estado_post(post_id: int):
+    """Estado del post en WordPress ('publish', 'trash'…), o None si no se pudo leer."""
+    try:
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}?context=edit&_fields=status",
+                         headers=wp_auth(), proxies=_WP_PROXIES, timeout=20)
+        if r.status_code == 200:
+            return r.json().get("status")
+    except Exception as e:
+        logger.warning(f"_wp_estado_post #{post_id}: {type(e).__name__}")
+    return None
+
+
+def _pubx_wp_a_papelera(post_id: int):
+    """La nota a la papelera de WordPress (se restaura desde wp-admin), verificada leyendo el estado después."""
+    R = _borrado.Resultado
+    antes = _wp_estado_post(post_id)
+    if antes == "trash":
+        return R(_borrado.NO_HABIA, "ya estaba en la papelera")
+    trash_post(post_id)
+    despues = _wp_estado_post(post_id)
+    if despues == "trash":
+        return R(_borrado.BORRADO, "a la papelera (se restaura desde wp-admin)")
+    if despues is None:
+        return R(_borrado.DUDOSO, "mandé la papelera pero no pude leer el estado")
+    return R(_borrado.SIGUE, f"sigue en estado «{despues}»")
 
 
 def _apply_wm_to_featured(post: dict) -> bool:
@@ -15513,6 +15629,81 @@ def _build_frase_kb(fp: dict) -> InlineKeyboardMarkup:
     ])
 
 
+def _frase_clave_placa(fp: dict) -> tuple:
+    """Lo que dibuja la placa. Si cambia cualquiera de estos tres, la placa guardada en fp está vieja."""
+    return (fp.get("texto"), fp.get("kicker"), fp.get("tag"))
+
+
+async def _frase_aplicar(fp: dict, cambios: dict) -> bytes:
+    """Cambia texto / kicker / tag de la frase pendiente Y su placa, juntos. La placa se genera primero con los valores
+    nuevos; si falla (levanta), `fp` queda EXACTAMENTE como estaba. Sube la versión (`rev`) que ve Leo en la vista previa."""
+    from frases_gen import generate_frase_image
+    cand = {k: fp.get(k) for k in ("texto", "kicker", "tag")}
+    cand.update(cambios)
+    img = await asyncio.to_thread(generate_frase_image, cand["texto"], cand.get("kicker"), cand.get("tag"))
+    fp.update(cambios)
+    fp["img_bytes"] = img
+    fp["img_clave"] = _frase_clave_placa(fp)
+    fp["rev"] = int(fp.get("rev", 1)) + 1
+    return img
+
+
+async def _frase_asegurar_placa(fp: dict):
+    """Antes de publicar o programar: si la placa no corresponde al texto actual, se regenera. Devuelve None si está
+    todo bien o el texto del error (en ese caso NO se publica nada)."""
+    if fp.get("img_bytes") and fp.get("img_clave") == _frase_clave_placa(fp):
+        return None
+    try:
+        await _frase_aplicar(fp, {})
+        fp["rev"] = int(fp.get("rev", 2)) - 1       # regenerar sin cambios no es una versión nueva
+        return None
+    except Exception as e:
+        return f"❌ La placa no coincide con el texto y no pude regenerarla ({str(e)[:100]}). No publiqué nada."
+
+
+def _frase_caption(fp: dict, plano: bool = False) -> str:
+    """Pie de la vista previa: el texto FINAL tal cual va a salir (placa y texto) y la versión."""
+    rev = int(fp.get("rev", 1))
+    if plano:
+        return f"💬 {fp['texto']}\n\nEsto es lo que sale, versión {rev}. Elegí las redes y acción:"
+    return (f"💬 *{md_escape(fp['texto'])}*\n\n"
+            f"_Esto es lo que sale (placa y texto), versión {rev}. Elegí las redes y acción:_")
+
+
+async def _frase_retirar_preview(bot, fp: dict):
+    """La vista previa anterior deja de servir: sin botones y con el aviso. Así no se puede publicar desde una versión vieja."""
+    prev = fp.get("preview")
+    if not prev:
+        return
+    try:
+        await bot.edit_message_caption(chat_id=prev[0], message_id=prev[1],
+                                       caption="↩️ Versión anterior de la frase: ya no sirve, usá la última.")
+    except Exception as e:
+        logger.debug("frase: retirar vista previa: %s", e)
+        try:
+            await bot.edit_message_reply_markup(chat_id=prev[0], message_id=prev[1], reply_markup=None)
+        except Exception:
+            pass
+
+
+async def _frase_mostrar_preview(bot, message, fp: dict):
+    """Manda la vista previa ACTUAL (placa + texto final + teclado) y retira la anterior."""
+    await _frase_retirar_preview(bot, fp)
+    try:
+        bio = io.BytesIO(fp["img_bytes"])
+        bio.name = "frase.png"
+        msg = await message.reply_photo(photo=bio, caption=_frase_caption(fp), parse_mode="Markdown",
+                                        reply_markup=_build_frase_kb(fp))
+    except Exception as e:
+        logger.warning(f"frase: vista previa con Markdown falló ({e}); la mando en texto plano")
+        bio = io.BytesIO(fp["img_bytes"])
+        bio.name = "frase.png"
+        msg = await message.reply_photo(photo=bio, caption=_frase_caption(fp, plano=True),
+                                        reply_markup=_build_frase_kb(fp))
+    fp["preview"] = (msg.chat_id, msg.message_id)
+    return msg
+
+
 def _build_frase_sched_pre_ht_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -15860,20 +16051,20 @@ async def cmd_frases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "igf_on":   True,
         "igs_on":   True,
         "wa_on":    True,
+        "rev":      1,
     }
+    fp["img_clave"] = _frase_clave_placa(fp)
+    # una frase nueva anula la anterior: su vista previa y cualquier «mandame el texto» que haya quedado colgado
+    _vieja = context.user_data.get("frase_pending")
+    if _vieja:
+        await _frase_retirar_preview(context.bot, _vieja)
+    context.user_data.pop("awaiting_frase_header", None)
     context.user_data["frase_pending"] = fp
     context.user_data.pop("frase_custom_ht", None)
     context.user_data.pop("frase_sched_ht", None)
 
     await msg.delete()
-    bio = io.BytesIO(img_bytes)
-    bio.name = "frase.png"
-    await update.message.reply_photo(
-        photo=bio,
-        caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
-        parse_mode="Markdown",
-        reply_markup=_build_frase_kb(fp),
-    )
+    await _frase_mostrar_preview(context.bot, update.message, fp)
 
 
 async def _frase_edit(query, caption: str, parse_mode: str = None, reply_markup=None):
@@ -15888,11 +16079,12 @@ async def _frase_edit(query, caption: str, parse_mode: str = None, reply_markup=
 
 
 async def _frase_ig_wa(context, chat_id, igf_on, igs_on, wa_on,
-                       frase, img_bytes, post_url, custom_ht):
+                       frase, img_bytes, post_url, custom_ht, ids=None):
     """IG feed/story (Graph API vía redes del harness) + entrega WhatsApp manual.
     La placa master (cuadrada) se adapta con pad_placa: feed 3:4, story/estado 9:16.
     Devuelve las líneas de resultado (✅/❌ por destino). Todo en to_thread+timeout
-    — nada sync bloqueante en el loop del bot."""
+    — nada sync bloqueante en el loop del bot.
+    `ids` (dict, opcional): se le agregan ig_feed / ig_story con el id de cada publicación, para poder borrarla después."""
     lines = []
     if not img_bytes:
         return lines
@@ -15912,6 +16104,8 @@ async def _frase_ig_wa(context, chat_id, igf_on, igs_on, wa_on,
                     timeout=120)
                 lines.append("✅ IG feed" if r.get("ok")
                              else f"❌ IG feed: {str(r.get('error'))[:60]}")
+                if r.get("ok") and r.get("id") and ids is not None:
+                    ids["ig_feed"] = str(r["id"])
             if igs_on:
                 png = await asyncio.to_thread(pad_placa, img_bytes, 1080, 1920)
                 r = await asyncio.wait_for(
@@ -15920,6 +16114,8 @@ async def _frase_ig_wa(context, chat_id, igf_on, igs_on, wa_on,
                     timeout=120)
                 lines.append("✅ IG story" if r.get("ok")
                              else f"❌ IG story: {str(r.get('error'))[:60]}")
+                if r.get("ok") and r.get("id") and ids is not None:
+                    ids["ig_story"] = str(r["id"])
         except asyncio.TimeoutError:
             lines.append("❌ Instagram: timeout")
         except Exception as e:
@@ -15968,14 +16164,11 @@ async def _do_frase_schedule(query, context, target):
 
     await _frase_edit(query, caption=f"📤 Programando para {adjusted.strftime('%A %d/%m %H:%M')}{offset_msg}…")
 
-    if not img_bytes:
-        try:
-            from frases_gen import generate_frase_image
-            img_bytes = await asyncio.to_thread(
-                generate_frase_image, frase, fp.get("kicker"), fp.get("tag"))
-        except Exception as e:
-            await _frase_edit(query, caption=f"❌ Error generando imagen: {e}")
-            return
+    _err_placa = await _frase_asegurar_placa(fp)     # la placa tiene que ser la del texto de ahora
+    if _err_placa:
+        await _frase_edit(query, caption=_err_placa)
+        return
+    img_bytes = fp["img_bytes"]
 
     try:
         import sys as _sys_frs
@@ -16068,10 +16261,11 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             results.append(f"❌ Canal TG: {e}")
 
+    ids_redes = {}
     results.extend(await _frase_ig_wa(
         context, chat_id,
         job_data.get("igf_on", False), job_data.get("igs_on", False), job_data.get("wa_on", False),
-        frase, img_bytes, post_url, custom_ht))
+        frase, img_bytes, post_url, custom_ht, ids=ids_redes))
 
     if tw_on and chat_id and img_bytes:
         tweet_text = frase
@@ -16108,8 +16302,18 @@ async def _fire_frase_social(context: ContextTypes.DEFAULT_TYPE):
         li_url = await asyncio.to_thread(post_linkedin, {"title": frase, "excerpt": ""}, post_url)
         if li_url:
             results.append(f"✅ LinkedIn: {li_url}")
+            if _LAST_LINKEDIN_URN:
+                ids_redes["li_urn"] = _LAST_LINKEDIN_URN
         else:
             results.append(f"❌ LinkedIn: {_LAST_LINKEDIN_ERROR[:80]}")
+
+    # ids de lo publicado (LinkedIn, Instagram) en la nota, para poder borrarlo desde /publicador
+    if post_id and ids_redes:
+        _ok_ids = await asyncio.to_thread(
+            append_social_meta, post_id, "", "", 0, ids_redes.get("li_urn", ""),
+            **{k: v for k, v in ids_redes.items() if k != "li_urn"})
+        logger.info(f"Frase programada #{post_id}: ids de redes guardados en la nota ({', '.join(sorted(ids_redes))}) "
+                    f"→ {'ok' if _ok_ids else 'NO SE PUDO GUARDAR'}")
 
     if chat_id:
         await context.bot.send_message(chat_id=int(chat_id), text="\n".join(results))
@@ -17672,8 +17876,25 @@ def _ortografia_resumen(cambios: list, tope: int = 8) -> str:
         f"\n… y {len(cambios) - tope} más" if len(cambios) > tope else "")
 
 
+async def _ortografia_avisar(update, texto: str) -> str:
+    """Texto que Leo REESCRIBE (corrección de frase, título editado): devuelve SU texto tal cual y, si el corrector ve algo,
+    solo lo avisa. Nunca lo cambia: corregir solo lo que Leo acaba de corregir puede reintroducir el error."""
+    try:
+        cambios = await asyncio.to_thread(_ortografia_cambios, texto)
+    except Exception:
+        cambios = []
+    if cambios and _ortografia_aplicar(texto, cambios) != texto:
+        try:
+            await update.message.reply_text("💡 Lo dejé tal cual lo escribiste. El corrector sugiere (no lo apliqué):\n"
+                                            + _ortografia_resumen(cambios))
+        except Exception:
+            pass
+    return texto
+
+
 async def _ortografia_corto(update, texto: str) -> str:
-    """Frases / títulos / etiquetas: corrige solos y avisa qué cambió."""
+    """Frase nueva (/frases <texto>): corrige sola y avisa qué cambió. Si Leo después reescribe el texto, ese ya no se
+    toca (`_ortografia_avisar`)."""
     cambios = await asyncio.to_thread(_ortografia_cambios, texto)
     if not cambios:
         return texto
@@ -20113,19 +20334,17 @@ async def _agenda_frase_a_preview(message, context, frase: str):
         await msg.edit_text(f"❌ Error generando imagen: {e}")
         return
     fp = {"texto": frase, "img_bytes": img_bytes, "tw_on": True, "tg_on": True, "wp_on": True,
-          "igf_on": True, "igs_on": True, "wa_on": True}
+          "igf_on": True, "igs_on": True, "wa_on": True, "rev": 1}
+    fp["img_clave"] = _frase_clave_placa(fp)
+    _vieja = context.user_data.get("frase_pending")
+    if _vieja:
+        await _frase_retirar_preview(context.bot, _vieja)
+    context.user_data.pop("awaiting_frase_header", None)
     context.user_data["frase_pending"] = fp
     context.user_data.pop("frase_custom_ht", None)
     context.user_data.pop("frase_sched_ht", None)
     await msg.delete()
-    bio = io.BytesIO(img_bytes)
-    bio.name = "frase.png"
-    await message.reply_photo(
-        photo=bio,
-        caption=f"💬 *{md_escape(frase)}*\n\n_Elegí las redes y acción:_",
-        parse_mode="Markdown",
-        reply_markup=_build_frase_kb(fp),
-    )
+    await _frase_mostrar_preview(context.bot, message, fp)
 
 
 def main():
