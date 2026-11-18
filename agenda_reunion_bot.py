@@ -110,9 +110,8 @@ class FiltroReunion(filters.MessageFilter):
 
 # Claves de `user_data` con las que el bot espera que Leo conteste OTRA cosa en su próximo mensaje. `handle_link` usa
 # `awaiting_*` (65 claves) y `waiting_*` (waiting_for_frase_ht, waiting_for_frase_custom_hour, waiting_for_frase_sched_ht,
-# waiting_for_edit_title, waiting_for_edit_photo, waiting_for_new_source, waiting_eco_title, waiting_eco_bajada,
-# waiting_for_hashtags, waiting_for_custom_hour, waiting_for_manual_text, waiting_for_pre_sched_ht, waiting_for_title…):
-# todo lo que empiece así cuenta. Más estas, que se leen con pop() en el mismo handler.
+# waiting_for_edit_title, waiting_for_edit_photo, waiting_for_new_source; las del flujo de artículo viejo y del ECO se
+# borraron el 18/11/2026): todo lo que empiece así cuenta. Más estas, que se leen con pop() en el mismo handler.
 _PREFIJOS_OTRO_FLUJO = ("awaiting", "waiting")
 _CLAVES_OTRO_FLUJO = ("evento", "input_evento", "edito_rename_id", "edito_add_tema")
 
