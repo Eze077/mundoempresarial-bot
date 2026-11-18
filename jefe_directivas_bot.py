@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Leo le habla al Jefe de redacción durante todo el día — el lado del bot (v1.0, 17/11/2026).
+"""Leo le habla al Jefe de redacción durante todo el día — el lado del bot (v2.0, 17/11/2026).
 
 El Jefe (agents/jefe_directivas.py, en el harness) interpreta lo que Leo dice y lo reparte en acciones que ya existen: plan del
 día, veto («hoy nada de X»), enfoque para el redactor, una nota concreta (con clic), una regla permanente (con clic), frases.
+Desde la v2.0 el Jefe razona con Claude Opus, pregunta si duda y sigue el hilo: cuando Leo contesta con un reply, el bot le pasa el id y el
+texto del mensaje al que contesta (`hilo_kw`). Los botones nuevos (`jfd_otra`, `jfd_op`) entran por el mismo patrón `^jfd_`.
 Este módulo solo decide CUÁNDO un mensaje de Leo es para el Jefe, sin robarle mensajes a ningún otro flujo:
 
   (a) un texto o un audio que es una RESPUESTA (reply de Telegram) a un mensaje del Jefe (plan, parte de las 20:00, informe del
@@ -164,9 +166,27 @@ async def responder(message, res):
         _registrar(sent, res)
 
 
+def hilo_kw(message) -> dict:
+    """Si Leo contesta (reply) a un mensaje, el Jefe necesita saber a cuál para seguir el hilo de una pregunta abierta (v2.0): el id del
+    mensaje y su texto (por si el Jefe no lo tenía registrado: el parte de las 20:00, un informe). Nunca lanza."""
+    try:
+        rt = getattr(message, "reply_to_message", None)
+        if rt is None or not getattr(rt, "message_id", None):
+            return {}
+        return {"reply_a": rt.message_id, "reply_texto": (getattr(rt, "text", None) or getattr(rt, "caption", None) or "")[:900]}
+    except Exception:
+        return {}
+
+
 async def _procesar_y_responder(message, texto, tipo, canal) -> bool:
     """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino."""
-    res = await asyncio.to_thread(harness().dir.procesar, texto, tipo, canal)
+    kw = hilo_kw(message)
+    try:
+        res = await asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **kw)
+    except TypeError:
+        if not kw:
+            raise
+        res = await asyncio.to_thread(harness().dir.procesar, texto, tipo, canal)      # un harness anterior a la v2.0 no sigue hilos
     if not res.get("ok"):
         if res.get("motivo") == "vacio" and res.get("texto"):
             await message.reply_text(res["texto"], parse_mode="HTML")

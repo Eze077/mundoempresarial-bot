@@ -23,7 +23,7 @@ def run(coro):
 class FakeDir:
     """El módulo del harness, de mentira."""
     def __init__(self):
-        self.llamadas, self.registrados = [], []
+        self.llamadas, self.registrados, self.hilos = [], [], []
         self.del_jefe = {500}                                  # ids de mensajes del Jefe
         self.resp = {"ok": True, "texto": "<b>Entendí</b>", "botones": {"inline_keyboard": [[{"text": "↩️", "callback_data": "jfd_un:1:0"}]]},
                      "directiva_id": 7}
@@ -32,8 +32,9 @@ class FakeDir:
     def es_mensaje_del_jefe(self, msg_id, texto="", db=None):
         return msg_id in self.del_jefe or texto.startswith("Plan del día")
 
-    def procesar(self, texto, tipo="texto", canal="jefe", ahora=None, db=None, llm=None):
+    def procesar(self, texto, tipo="texto", canal="jefe", ahora=None, db=None, llm=None, reply_a=None, reply_texto="", directiva_id=None):
         self.llamadas.append(("procesar", texto, tipo, canal))
+        self.hilos.append((reply_a, reply_texto))
         return self.resp
 
     def boton(self, data, ahora=None, db=None, llm=None, fetch=None, enviar=None):
@@ -141,6 +142,29 @@ def test_un_reply_a_un_mensaje_del_jefe_va_al_jefe(h):
     assert B.FiltroTexto().filter(m) is True
     run(B.hacer_handler_texto(fb)(Upd(m), Ctx()))
     assert h.dir.llamadas == [("procesar", "mejor sacá la 2", "texto", "respuesta")] and fbs == []
+
+
+def test_el_reply_le_pasa_al_jefe_el_mensaje_al_que_contesta_para_seguir_el_hilo(h):
+    m = Msg("la del cierre", reply_a=del_bot("Entendí: … ¿Cuál: la del cierre o la de la inversión?", 500))
+    run(B.hacer_handler_texto(_fb()[0])(Upd(m), Ctx()))
+    assert h.dir.hilos == [(500, "Entendí: … ¿Cuál: la del cierre o la de la inversión?")]
+    h.dir.hilos.clear()
+    run(B.hacer_handler_texto(_fb()[0])(Upd(Msg("Jefe, hoy nada de Milei")), Ctx()))      # sin reply: sin hilo
+    assert h.dir.hilos == [(None, "")]
+
+
+def test_un_harness_anterior_a_la_v2_que_no_acepta_hilo_sigue_andando(h):
+    def viejo(texto, tipo="texto", canal="jefe"):
+        h.dir.llamadas.append(("procesar", texto, tipo, canal))
+        return h.dir.resp
+    h.dir.procesar = viejo
+    run(B.hacer_handler_texto(_fb()[0])(Upd(Msg("dale", reply_a=del_bot())), Ctx()))
+    assert h.dir.llamadas == [("procesar", "dale", "texto", "respuesta")]
+
+
+def test_los_botones_nuevos_de_la_v2_pasan_por_el_mismo_handler(h):
+    import re
+    assert re.match(r"^jfd_", "jfd_otra:3:0") and re.match(r"^jfd_", "jfd_op:3:0:1")
 
 
 def test_un_reply_a_un_mensaje_registrado_del_jefe_tambien(h):
