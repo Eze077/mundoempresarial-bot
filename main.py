@@ -54,10 +54,8 @@ TWITTER_SECRET     = os.environ.get("TW_TSECRET", "") or os.environ.get("TWITTER
 
 TELEGRAM_CHANNEL   = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
 
-LINKEDIN_TOKEN     = os.environ.get("LINKEDIN_TOKEN", "")   # member (perfil personal de Leo)
 LINKEDIN_CLIENT_ID = os.environ.get("LINKEDIN_CLIENT_ID", "77jyyt3btvsjwv")
 LINKEDIN_ORG_ID    = os.environ.get("LINKEDIN_ORG_ID", "67751917")
-LINKEDIN_MEMBER_ID = os.environ.get("LINKEDIN_MEMBER_ID", "")
 # Token org (página Mundo Empresarial AR). El harness lo auto-renueva y lo persiste
 # en LINKEDIN_TOKEN_STATE; el bot lo lee de ahí (fuente de verdad) o del env como fallback.
 LINKEDIN_ORG_TOKEN   = os.environ.get("LINKEDIN_ORG_TOKEN", "")
@@ -2084,30 +2082,23 @@ def post_tweet(data: dict, wp_url: str, hashtags_override: str = None) -> str | 
         return None
 
 
-def _get_linkedin_author_urn() -> str:
-    """Devuelve el URN del author: persona si LINKEDIN_MEMBER_ID está seteado, organización si no."""
+def _get_linkedin_author_urn(tok: str) -> str:
+    """URN del perfil de Leo para el token unificado, por /v2/me (el id de persona cambia según la app: el viejo
+    LINKEDIN_MEMBER_ID era de la app personal y con este token da 403). "" si no responde: entonces NO se publica
+    (antes caía a la página y la nota salía dos veces ahí)."""
     global _LINKEDIN_MEMBER_URN_CACHE
-    if LINKEDIN_MEMBER_ID:
-        return f"urn:li:person:{LINKEDIN_MEMBER_ID}"
     if _LINKEDIN_MEMBER_URN_CACHE:
         return _LINKEDIN_MEMBER_URN_CACHE
-    # Auto-detección vía OIDC userinfo (requiere scope openid+profile)
-    if LINKEDIN_TOKEN:
-        try:
-            r = requests.get(
-                "https://api.linkedin.com/v2/userinfo",
-                headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}"},
-                timeout=8,
-            )
-            if r.status_code == 200:
-                sub = r.json().get("sub", "")
-                if sub:
-                    _LINKEDIN_MEMBER_URN_CACHE = f"urn:li:person:{sub}"
-                    logger.info(f"LinkedIn member URN auto-detectado: {_LINKEDIN_MEMBER_URN_CACHE}")
-                    return _LINKEDIN_MEMBER_URN_CACHE
-        except Exception:
-            pass
-    return f"urn:li:organization:{LINKEDIN_ORG_ID}"
+    try:
+        r = requests.get("https://api.linkedin.com/v2/me", headers={"Authorization": f"Bearer {tok}"}, timeout=10)
+        if r.status_code == 200 and r.json().get("id"):
+            _LINKEDIN_MEMBER_URN_CACHE = f"urn:li:person:{r.json()['id']}"
+            logger.info(f"LinkedIn personal: perfil {_LINKEDIN_MEMBER_URN_CACHE}")
+            return _LINKEDIN_MEMBER_URN_CACHE
+        logger.warning(f"LinkedIn personal: /v2/me HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"LinkedIn personal: /v2/me {type(e).__name__}")
+    return ""
 
 
 # LinkedIn da de baja cada versión de la API a los ~12 meses (426 NONEXISTENT_VERSION). La fija «202503» venció
@@ -2134,22 +2125,27 @@ def _li_request(method: str, url: str, headers: dict, **kw):
 
 
 def post_linkedin(data: dict, wp_url: str) -> str | None:
-    """Publica en LinkedIn. Usa perfil personal si LINKEDIN_MEMBER_ID está seteado, organización si no."""
+    """Publica en el perfil PERSONAL de Leo. Desde el 17/11/2026 con el token unificado (app de la empresa, el mismo de
+    la página, que el harness renueva solo hasta 10/10/2027): se acabó el token de 60 días que vencía en silencio."""
     global _LAST_LINKEDIN_ERROR, _LAST_LINKEDIN_URN
     _LAST_LINKEDIN_ERROR = ""
     _LAST_LINKEDIN_URN = ""
-    if not LINKEDIN_TOKEN:
-        _LAST_LINKEDIN_ERROR = "LINKEDIN_TOKEN no configurado"
+    tok = _get_org_token()
+    if not tok:
+        _LAST_LINKEDIN_ERROR = "sin token de LinkedIn"
         return None
     try:
         tracked_url = utm_url(wp_url, "linkedin")
         title = (data.get("title") or "").strip()
         excerpt = (data.get("excerpt") or data.get("rewritten_excerpt") or "").strip()[:300]
         commentary = f"{title}\n\n{excerpt}\n\n🔗 {tracked_url}" if excerpt else f"{title}\n\n🔗 {tracked_url}"
-        author_urn = _get_linkedin_author_urn()
+        author_urn = _get_linkedin_author_urn(tok)
+        if not author_urn:
+            _LAST_LINKEDIN_ERROR = "LinkedIn no confirmó tu perfil (/v2/me)"
+            return None
 
         h = {
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+            "Authorization": f"Bearer {tok}",
             "Content-Type": "application/json",
         }
         payload = {
