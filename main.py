@@ -27,6 +27,7 @@ import comandos_menu  # menú de Telegram, /help e informe de uso salen de una s
 import fase1_robustez as _f1  # manejador de errores y días de los jobs
 import fuentes_extra as _fuentes_extra  # /fuentes escribe acá lo que lee la ingesta del harness
 import borrado_redes as _borrado  # /publicador → Borrar: todas las redes, con verificación (17/11/2026)
+import panel_bot as _panel  # /estado, /pausa (freno general) y botones h_bv2_/h_ea_ del harness (fase 4 v2.0)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -67,6 +68,20 @@ _LINKEDIN_MEMBER_URN_CACHE: str | None = None
 _LAST_WP_ERROR = ""
 # Modo pausa: cuando True, el bot ignora links y scheduled posts
 BOT_PAUSED = False
+
+
+def _pausado() -> bool:
+    """/STOP (en memoria, se pierde al reiniciar) o la pausa general de /pausa (persiste; solo con PAUSA_GENERAL=1).
+    Con la bandera apagada es exactamente BOT_PAUSED, como siempre."""
+    return BOT_PAUSED or _panel.pausa_activa()
+
+
+def _txt_pausado() -> str:
+    if not BOT_PAUSED and _panel.pausa_activa():
+        return "⏸ Pausa general puesta: no proceso links ni programados. /pausa off la saca."
+    return "⏸ Bot en pausa. Usá /RESUME para reactivar."
+
+
 # Chat ID del operador para reportes diarios (se detecta del primer mensaje)
 ADMIN_CHAT_ID      = os.environ.get("ADMIN_CHAT_ID", "")
 
@@ -4147,7 +4162,9 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reactiva el bot después de /STOP."""
     global BOT_PAUSED
     BOT_PAUSED = False
-    await update.message.reply_text("▶️ *Bot reactivado.* Listo para procesar links.", parse_mode="Markdown")
+    await update.message.reply_text("▶️ *Bot reactivado.* Listo para procesar links."
+                                    + (chr(10) + "Ojo: sigue la pausa general (/pausa off la saca)." if _panel.pausa_activa() else ""),
+                                    parse_mode="Markdown")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5524,8 +5541,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ignorar mensajes de canales (el bot es admin del canal; no debe procesar sus posts)
     if update.message and update.message.chat.type == "channel":
         return
-    if BOT_PAUSED:
-        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+    if _pausado():
+        await update.message.reply_text(_txt_pausado())
         return
     text_in = update.message.text.strip()
 
@@ -8564,6 +8581,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Edición semanal (esquema 14/9/2026): vista previa → OK / Ajustar / No sale ──
     if query.data.startswith("h_ed_"):
         await _edicion_callback(update, context, query)
+        return
+    # ── Botones que el harness emite y el bot solo despacha (fase 4 v2.0, panel_bot.py): «⛔ Frenar» del boletín v2
+    # (h_bv2_ → agents/boletin.callback) y el editor automático (h_ea_ → agents/editor_auto.callback). OJO: h_bol_ es el viejo.
+    if query.data.startswith(("h_bv2_", "h_ea_")):
+        await _panel.boton_harness(query)
         return
     # Botones del esquema viejo (armado conversacional, finde, «Enviar ahora» sin confirmar).
     # Quedan en mensajes viejos del chat: no hacen nada.
@@ -14132,7 +14154,7 @@ def _remove_scheduled_job(post_id: int):
 
 async def _fire_scheduled_social(context: ContextTypes.DEFAULT_TYPE):
     """Callback de job_queue.run_once: dispara canal TG + tweet automático."""
-    if BOT_PAUSED:
+    if _pausado():
         logger.info("_fire_scheduled_social: bot pausado, saltando job")
         return
     job_data = context.job.data
@@ -18022,8 +18044,8 @@ def _nm_espera(context, flag: str = None):
 
 
 async def cmd_notamanual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if BOT_PAUSED:
-        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+    if _pausado():
+        await update.message.reply_text(_txt_pausado())
         return
     _nm_espera(context)          # arrancar limpio: nada de flags colgados de una nota anterior
     context.user_data["awaiting_nota_manual"] = True
@@ -18583,8 +18605,8 @@ async def cmd_campania(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if BOT_PAUSED:
-        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+    if _pausado():
+        await update.message.reply_text(_txt_pausado())
         return
     nombre = " ".join(context.args).strip() if context.args else "Evento sin título"
     context.user_data["evento"] = {
@@ -18889,8 +18911,8 @@ def _iev_resumen(s: dict) -> str:
 
 
 async def cmd_input_evento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if BOT_PAUSED:
-        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+    if _pausado():
+        await update.message.reply_text(_txt_pausado())
         return
     import os as _os
     _os.makedirs(IEV_INBOX + "/fotos", exist_ok=True)
@@ -19138,8 +19160,8 @@ def _vv_kb(cfg: dict) -> dict:
 
 
 async def cmd_vivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if BOT_PAUSED:
-        await update.message.reply_text("⏸ Bot en pausa. Usá /RESUME para reactivar.")
+    if _pausado():
+        await update.message.reply_text(_txt_pausado())
         return
     args = context.args or []
     sub = args[0].lower() if args else ""
@@ -20151,6 +20173,7 @@ def main():
     app.add_handler(CommandHandler("desbloquear", cmd_desbloquear))
     app.add_handler(CommandHandler("STOP", cmd_stop))
     app.add_handler(CommandHandler("RESUME", cmd_resume))
+    _panel.registrar(app)   # /estado, /pausa y sus botones pz_ (fase 4 v2.0); antes del handle_button general
     app.add_handler(CommandHandler("comandos", cmd_comandos))
     app.add_handler(CommandHandler("help", cmd_comandos))
     app.add_handler(CommandHandler("borrar", cmd_borrar))
@@ -20194,7 +20217,7 @@ def main():
         import agenda_reunion_bot as _agenda_bot
         _agenda_bot.registrar(app, transcribir=_whisper_from_file, fallback_texto=handle_link,
                               fallback_media=handle_evento_media, frase_flow=_agenda_frase_a_preview,
-                              pausado=lambda: BOT_PAUSED)
+                              pausado=_pausado)
     except Exception as _e_agd:
         logger.warning(f"reunión de agenda no registrada: {_e_agd}")
     # Directivas de Leo al Jefe de redacción durante el día (JEFE_DIRECTIVAS = 0 | dry | 1): reply a un mensaje del Jefe, «Jefe, …» o /jefe.
@@ -20202,7 +20225,7 @@ def main():
     try:
         import jefe_directivas_bot as _jefe_bot
         _jefe_bot.registrar(app, transcribir=_whisper_from_file, fallback_texto=handle_link,
-                            fallback_media=handle_evento_media, pausado=lambda: BOT_PAUSED)
+                            fallback_media=handle_evento_media, pausado=_pausado)
     except Exception as _e_jefe:
         logger.warning(f"directivas al Jefe no registradas: {_e_jefe}")
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link))

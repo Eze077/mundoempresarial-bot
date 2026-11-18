@@ -47,6 +47,8 @@ OCULTOS = [
     ("desbloquear", "Desbloquear IPs de redaccion.mundoempresarial.ar"),
     ("coladepublicacion", "Cola de publicación, para ver (también /pipeline cola o el botón 🗂 en /pipeline)"),
     ("stats", "(viejo) redirige a /coladepublicacion"),
+    ("estado", "Tablero: pausa, pipeline, editor automático, boletín, colas de X y Meta, gasto, incidentes y banderas"),
+    ("pausa", "Freno general: frena bot, publicación, boletín y capa automática (persiste) · /pausa off la saca"),
     ("STOP", "Pausar el bot (no procesa links ni programados)"),
     ("RESUME", "Reactivar el bot después de /STOP"),
     ("help", "Este listado (también /comandos y /start)"),
