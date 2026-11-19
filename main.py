@@ -4805,6 +4805,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✏️ Título fijado y <b>bloqueado</b> — nota #{job_id}:\n<b>{new_title}</b>\n"
                 f"El redactor lo usa tal cual.", parse_mode="HTML")
+            await _titulo_orto_revisar(update, job_id, new_title)
         except Exception as _e:
             await update.message.reply_text(f"❌ Error: {_e}")
         return
@@ -5119,6 +5120,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"✏️ Detecté un título → fijado y <b>bloqueado</b>:\n<b>{_new_title}</b>\n"
                     f"Usá ✅ Publicar para aprobar.", parse_mode="HTML")
+                await _titulo_orto_revisar(update, job_id, _new_title)
             else:
                 await update.message.reply_text("📝 Instrucción guardada. Usá ✅ Publicar para aprobar.")
         except Exception as _e:
@@ -5495,6 +5497,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<i>Usá '↩ Restaurar original' en el menú para volver al título anterior.</i>",
                 parse_mode="HTML"
             )
+            await _titulo_orto_revisar(update, job_id, new_title)
         except Exception as _e_ct:
             await update.message.reply_text(f"❌ Error: {_e_ct}")
         return
@@ -15664,6 +15667,79 @@ async def _ortografia_corto(update, texto: str) -> str:
     return nuevo
 
 
+async def _titulo_orto_revisar(update, job_id, titulo: str) -> bool:
+    """Título que Leo escribe en una tarjeta (botón de título del briefing, instrucción «título: …», título de la cola): sale
+    TAL CUAL (manual gana) y, si el corrector ve un error, lo avisa con «✅ Aplicar corrección» (un clic). La sugerencia queda en
+    la nota (`content_json.orto_titulo`), así sobrevive a un reinicio del bot. Antes estos tres caminos no pasaban por el
+    corrector: «Diputados tratará la ley fe emergencia pyme» salió así a la web y a las redes (19/11/2026); el corrector, probado
+    después con ese título, marcaba «fe → de». Devuelve True si avisó. Nunca rompe el flujo que lo llama."""
+    import html as _h, json as _js, sqlite3 as _sq
+    try:
+        cambios = await asyncio.to_thread(_ortografia_cambios, titulo)
+        nuevo = _ortografia_aplicar(titulo, cambios) if cambios else titulo
+        if not cambios or nuevo == titulo:
+            return False
+        with _sq.connect(_HDB) as _c:
+            row = _c.execute("SELECT content_json FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+            if not row:
+                return False
+            cj = _js.loads(row[0] or "{}")
+            cj["orto_titulo"] = {"de": titulo, "a": nuevo}
+            _c.execute("UPDATE jobs SET content_json=? WHERE id=?", (_js.dumps(cj), int(job_id)))
+        await update.message.reply_text(
+            "💡 Lo dejé tal cual lo escribiste. El corrector sugiere:\n" + _h.escape(_ortografia_resumen(cambios))
+            + f"\n\nQuedaría: <b>{_h.escape(nuevo)}</b>", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Aplicar corrección",
+                                                                     callback_data=f"ortit:{int(job_id)}")]]))
+        return True
+    except Exception as e:
+        logger.warning(f"_titulo_orto_revisar #{job_id}: {type(e).__name__}: {e}")
+        return False
+
+
+def _titulo_orto_aplicar(job_id: int):
+    """Botón «✅ Aplicar corrección»: aplica la sugerencia guardada por `_titulo_orto_revisar` SOLO si el título de la nota sigue
+    siendo el que Leo escribió (si lo cambió después, la sugerencia ya no vale y no se toca nada). Si la nota ya salió, también
+    en la web: título y título SEO, sin tocar el slug (URL estable, ya está en redes). Devuelve (ok, texto en HTML)."""
+    import html as _h, json as _js, sqlite3 as _sq
+    with _sq.connect(_HDB) as _c:
+        row = _c.execute("SELECT title, content_json, wp_post_id, stage FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+        if not row:
+            return False, "No encontré la nota."
+        cj = _js.loads(row[1] or "{}")
+        sug = cj.get("orto_titulo") or {}
+        if not sug.get("a"):
+            return False, "Esa sugerencia ya no está (¿ya la aplicaste?)."
+        if (row[0] or "") != sug.get("de"):
+            return False, "El título cambió después de la sugerencia: no apliqué nada."
+        nuevo = sug["a"]
+        cj["title"], cj["title_locked"] = nuevo, True
+        cj.pop("orto_titulo", None)
+        _c.execute("UPDATE jobs SET title=?, content_json=?, updated_at=datetime('now') WHERE id=?",
+                   (nuevo, _js.dumps(cj), int(job_id)))
+        wp_pid, stage = row[2], row[3] or ""
+    web = ""
+    if wp_pid and stage == "done":
+        web = ("\n🌐 Corregido también en la web." if update_post(int(wp_pid), {"title": nuevo, "meta": {"rank_math_title": _meta_safe(nuevo)}})
+               else "\n⚠️ En la web NO se pudo: corregilo con /editar.")
+    return True, f"✅ Título corregido:\n<b>{_h.escape(nuevo)}</b>{web}"
+
+
+async def handle_ortit_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """«✅ Aplicar corrección» del aviso de `_titulo_orto_revisar` (callback `ortit:<job_id>`)."""
+    query = update.callback_query
+    try:
+        await query.answer()
+        ok, txt = await asyncio.to_thread(_titulo_orto_aplicar, int(query.data.split(":", 1)[1]))
+    except Exception as e:
+        logger.warning(f"handle_ortit_button: {type(e).__name__}: {e}")
+        ok, txt = False, "❌ No pude aplicar la corrección."
+    try:
+        await query.edit_message_text(txt, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 def _gpt_nota_manual_extract(raw_text: str):
     """GPT separa la columna cruda en campos. Preserva la voz del autor; no inventa."""
     if not OPENAI_API_KEY:
@@ -18225,6 +18301,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_vv_button, pattern="^vv"))
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
+    app.add_handler(CallbackQueryHandler(handle_ortit_button, pattern=r"^ortit:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
