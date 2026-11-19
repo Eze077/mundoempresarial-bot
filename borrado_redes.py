@@ -329,7 +329,7 @@ def borrar_linkedin(urn: str, tokens: list) -> Resultado:
     con_token = [(n, t) for n, t in tokens if t]
     if not con_token:
         return Resultado(DUDOSO, "no hay token de LinkedIn en el bot")
-    vistos, dueno = [], None
+    vistos, dueno, prohibidos = [], None, []
     for nombre, tok in con_token:
         try:
             r = _li("GET", urn, tok)
@@ -340,9 +340,23 @@ def borrar_linkedin(urn: str, tokens: list) -> Resultado:
             dueno = (nombre, tok)
             break
         vistos.append(404 if _li_gone(r) else r.status_code)
+        if r.status_code == 403:
+            prohibidos.append((nombre, tok))
     if not dueno:
         if vistos and all(v == 404 for v in vistos):
             return Resultado(NO_HABIA, "ya no estaba publicado")
+        # Los posts del perfil PERSONAL que el bot publica con el token unificado (desde el 17/11/2026) no se pueden LEER con ese
+        # token (403: falta r_member_social), pero sí borrar. 19/11/2026: el post personal de «ley fe emergencia» quedó «dudoso»
+        # sin que se mandara el DELETE; mandado a mano dio 204 y después 404. Se prueba el DELETE con cada token que dio 403 y
+        # solo cuenta como borrado si después el GET da 404 (verificado, como todo lo demás). El 401 (vencido) no se prueba.
+        for nombre, tok in prohibidos:
+            try:
+                _li("DELETE", urn, tok)
+                despues = _li("GET", urn, tok)
+            except requests.exceptions.RequestException:
+                continue
+            if _li_gone(despues):
+                return Resultado(BORRADO, "borrado y verificado (%s; LinkedIn no deja leerlo antes de borrar)" % nombre)
         return Resultado(DUDOSO, "no pude leerlo con ningún token (%s): vencido o sin permiso" % ", ".join(str(v) for v in vistos))
     nombre, tok = dueno
     try:

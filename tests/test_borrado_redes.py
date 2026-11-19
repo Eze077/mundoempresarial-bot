@@ -228,6 +228,22 @@ def test_linkedin_con_el_token_vencido_no_dice_que_borro(falso):
     assert "DELETE" not in [m for m, _ in falso.metodos()]
 
 
+def test_linkedin_personal_que_no_se_deja_leer_se_borra_igual_y_se_verifica(falso):
+    """19/11/2026: el post personal (token unificado) da 403 al leerlo pero se puede borrar: DELETE 204 y después 404."""
+    falso.ruta("GET", "/rest/posts/", Resp(403), Resp(404))
+    falso.ruta("DELETE", "/rest/posts/", Resp(204))
+    r = bd.borrar_linkedin(URN, [("página", "tok-unificado")])
+    assert r.estado == bd.BORRADO and "página" in r.detalle
+    assert [m for m, _ in falso.metodos()] == ["GET", "DELETE", "GET"]
+
+
+def test_linkedin_que_no_se_deja_leer_ni_borrar_queda_dudoso(falso):
+    falso.ruta("GET", "/rest/posts/", Resp(403))
+    falso.ruta("DELETE", "/rest/posts/", Resp(403))
+    r = bd.borrar_linkedin(URN, [("página", "a"), ("personal", "b")])
+    assert r.estado == bd.DUDOSO and "403" in r.detalle
+
+
 def test_linkedin_que_sigue_publicado_tras_el_delete(falso):
     falso.ruta("GET", "/rest/posts/", Resp(200, {"lifecycleState": "PUBLISHED"}))
     falso.ruta("DELETE", "/rest/posts/", Resp(204))
