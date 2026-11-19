@@ -15422,8 +15422,34 @@ async def on_finde_approval_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 # (publicador del harness vía stage='publicacion'). No inventa ni altera el contenido.
 # ════════════════════════════════════════════════════════════════════════════
 
+_PDF_MIN_TEXTO = 400      # por debajo de esto el PDF se toma como escaneado y se prueba el OCR
+
+
+def _pdf_ocr(path: str, max_paginas: int = 20) -> str:
+    """OCR de un PDF escaneado o armado con imágenes (sin texto seleccionable): pdftoppm (poppler-utils) pasa cada página
+    a imagen y tesseract la lee en castellano. '' si faltan las herramientas o algo falla. Instalado en el VPS el 19/11/2026
+    (apt: tesseract-ocr, tesseract-ocr-spa, poppler-utils)."""
+    import glob as _glob, shutil as _sh, subprocess as _sp, tempfile as _tf
+    if not (_sh.which("pdftoppm") and _sh.which("tesseract")):
+        return ""
+    try:
+        with _tf.TemporaryDirectory(prefix="nm_ocr_") as d:
+            _sp.run(["pdftoppm", "-r", "200", "-gray", "-png", "-l", str(max_paginas), path, os.path.join(d, "p")],
+                    check=True, timeout=180, capture_output=True)
+            partes = []
+            for img in sorted(_glob.glob(os.path.join(d, "p*.png"))):
+                r = _sp.run(["tesseract", img, "-", "-l", "spa"], capture_output=True, text=True, timeout=120)
+                if r.stdout.strip():
+                    partes.append(r.stdout.strip())
+            return "\n\n".join(partes).strip()
+    except Exception as e:
+        logger.warning(f"_pdf_ocr error: {type(e).__name__}: {str(e)[:200]}")
+        return ""
+
+
 def _pdf_to_text(path: str):
-    """Devuelve (texto, n_imagenes). texto=None si no hay librería; '' si falla."""
+    """Devuelve (texto, n_imagenes, via). texto=None si no hay librería; '' si falla. via = 'texto' (pypdf) u 'ocr' (el PDF
+    no tenía texto seleccionable y se leyó como imagen con _pdf_ocr)."""
     Reader = None
     try:
         from pypdf import PdfReader as Reader
@@ -15431,7 +15457,7 @@ def _pdf_to_text(path: str):
         try:
             from PyPDF2 import PdfReader as Reader
         except ImportError:
-            return None, 0
+            return None, 0, "texto"
     try:
         reader = Reader(path)
         text = "\n".join((pg.extract_text() or "") for pg in reader.pages).strip()
@@ -15441,10 +15467,15 @@ def _pdf_to_text(path: str):
                 nimg += len(getattr(pg, "images", []) or [])
         except Exception:
             nimg = 0
-        return text, nimg
     except Exception as e:
         logger.warning(f"_pdf_to_text error: {e}")
-        return "", 0
+        text, nimg = "", 0
+    if len(text) < _PDF_MIN_TEXTO:
+        ocr = _pdf_ocr(path)
+        if len(ocr) > len(text):
+            logger.info("_pdf_to_text: sin texto seleccionable, leído con OCR (%d caracteres)", len(ocr))
+            return ocr, nimg, "ocr"
+    return text, nimg, "texto"
 
 
 # Bio del autor para enlazar la firma de las columnas (antes la firma era texto plano y
@@ -16000,8 +16031,35 @@ async def _nm_from_audio(update, context, media):
     await _process_nota_manual(update, context, texto, status_msg=status)
 
 
+def _nm_es_columna(doc) -> bool:
+    """PDF o archivo de texto: lo que /notamanual sabe leer como columna."""
+    fn = (doc.file_name or "").lower()
+    mime = (doc.mime_type or "").lower()
+    return fn.endswith((".pdf", ".txt", ".md")) or mime == "application/pdf" or mime.startswith("text/")
+
+
+async def _nm_doc_sin_pedido(update, context):
+    """Un archivo que llega sin /notamanual. Antes se ignoraba en silencio (Leo, 19/11: «subí un pdf y no lo pudo leer»).
+    En el chat privado se ofrece usarlo como nota manual; en grupos y canales no se contesta nada."""
+    chat = update.effective_chat
+    m = update.message
+    if not chat or chat.type != "private" or not m or not m.document:
+        return
+    doc = m.document
+    if not _nm_es_columna(doc):
+        await m.reply_text("Recibí el archivo, pero solo sé usar PDF o .txt como columna. Para una nota manual usá /notamanual.")
+        return
+    import html as _h
+    context.user_data["nm_doc_pendiente"] = doc
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📝 Usarlo como nota manual", callback_data="nm_usardoc"),
+                                InlineKeyboardButton("✖️ No", callback_data="nm_cancel")]])
+    await m.reply_text("📄 Recibí <b>%s</b>. ¿Lo uso como nota manual (columna de autor)?" % _h.escape(doc.file_name or "el archivo"),
+                       parse_mode="HTML", reply_markup=kb)
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_nota_manual"):
+        await _nm_doc_sin_pedido(update, context)
         return
     doc = update.message.document
     fn = (doc.file_name or "").lower()
@@ -16010,6 +16068,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mime.startswith(("audio/", "video/")) or fn.endswith(_NM_AUDIO_EXT + _NM_VIDEO_EXT):
         await _nm_from_audio(update, context, doc)
         return
+    await _nm_documento(update, context, doc)
+
+
+async def _nm_documento(update, context, doc):
+    """PDF o .txt de la columna → texto → _process_nota_manual. `update` puede ser uno armado sobre el mensaje del bot
+    (botón «Usarlo como nota manual»): solo se usa `update.message.reply_text`."""
+    fn = (doc.file_name or "").lower()
+    mime = (doc.mime_type or "").lower()
     # Archivo de TEXTO (.txt/.md) → misma ruta que el texto pegado / el PDF
     if fn.endswith((".txt", ".md")) or mime.startswith("text/"):
         context.user_data.pop("awaiting_nota_manual", None)
@@ -16045,13 +16111,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML")
         return
     context.user_data.pop("awaiting_nota_manual", None)
-    msg = await update.message.reply_text("📄 Leyendo el PDF…")
+    msg = await update.message.reply_text("📄 Leyendo el PDF… (si es un escaneo lo leo como imagen: puede tardar un minuto)")
     import tempfile as _tmp, os as _os
     try:
         f = await doc.get_file()
         path = _os.path.join(_tmp.gettempdir(), f"nm_{doc.file_unique_id}.pdf")
         await f.download_to_drive(path)
-        text, pdf_imgs = await asyncio.to_thread(_pdf_to_text, path)
+        text, pdf_imgs, via = await asyncio.to_thread(_pdf_to_text, path)
         try: _os.remove(path)
         except Exception: pass
     except Exception as e:
@@ -16060,9 +16126,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text is None:
         await msg.edit_text("⚠️ No tengo lector de PDF instalado todavía. Pegá el texto de la columna directamente con /notamanual.")
         return
-    if not text or len(text) < 400:
-        await msg.edit_text("⚠️ No pude extraer texto suficiente del PDF (¿es escaneado/imagen?). Probá pegando el texto.")
+    if not text or len(text) < _PDF_MIN_TEXTO:
+        await msg.edit_text("⚠️ No pude extraer texto suficiente del PDF, ni leyéndolo como imagen. Probá pegando el texto.")
         return
+    if via == "ocr":
+        await update.message.reply_text("🔎 El PDF era una imagen (sin texto seleccionable): lo leí con OCR. "
+                                        "Revisá bien la vista previa antes de publicar: el OCR puede confundir letras o números.")
     await msg.edit_text("🧩 Procesando la columna…")
     await _process_nota_manual(update, context, text, status_msg=msg, pdf_images=pdf_imgs)
 
@@ -16214,9 +16283,22 @@ async def handle_notamanual_button(update: Update, context: ContextTypes.DEFAULT
     if act == "cancel":
         _nm_espera(context)
         context.user_data.pop("awaiting_nota_manual", None)
-        for _k in ("nota_manual", "nota_manual_ex", "nm_enfoque", "nm_capa", "nm_d"):
+        for _k in ("nota_manual", "nota_manual_ex", "nm_enfoque", "nm_capa", "nm_d", "nm_doc_pendiente"):
             context.user_data.pop(_k, None)
         await q.edit_message_text("✖️ Nota manual cancelada.")
+        return
+    if act == "usardoc":
+        # El archivo llegó sin /notamanual y Leo tocó «Usarlo como nota manual» (_nm_doc_sin_pedido)
+        doc = context.user_data.pop("nm_doc_pendiente", None)
+        if not doc:
+            await q.edit_message_text("⚠️ Se perdió el archivo (el bot se reinició). Mandalo de nuevo.")
+            return
+        _nm_espera(context)
+        context.user_data["awaiting_nota_manual"] = True
+        await q.edit_message_text("📝 Nota manual con «%s»." % (doc.file_name or "el archivo"))
+        import types as _types
+        shim = _types.SimpleNamespace(message=q.message, effective_chat=q.message.chat, effective_user=q.from_user)
+        await _nm_documento(shim, context, doc)
         return
     if act == "ortog":
         stash = context.user_data.get("nota_manual_ex")
