@@ -147,13 +147,14 @@ def test_estado_y_pausa_estan_en_el_menu():
     assert "estado" in nombres and "pausa" in nombres
 
 
-def test_registrar_agrega_los_dos_comandos_y_los_botones_pz():
+def test_registrar_agrega_los_comandos_y_los_botones_pz_y_h_pesos():
     from telegram.ext import Application, CallbackQueryHandler, CommandHandler
     app = Application.builder().token("1:x").build()
     B.registrar(app)
     hs = app.handlers[0]
-    assert [type(x) for x in hs] == [CommandHandler, CommandHandler, CallbackQueryHandler]
-    assert {c for x in hs[:2] for c in x.commands} == {"estado", "pausa"}
+    assert [type(x) for x in hs] == [CommandHandler, CommandHandler, CallbackQueryHandler, CommandHandler, CallbackQueryHandler]
+    assert {c for x in hs if isinstance(x, CommandHandler) for c in x.commands} == {"estado", "pausa", "pesos"}
+    assert [x.pattern.pattern for x in hs if isinstance(x, CallbackQueryHandler)] == ["^pz_", "^h_pesos"]
 
 
 # ═══ 2. /pausa con la bandera prendida ═══════════════════════════════════════════════════════════════════════════════

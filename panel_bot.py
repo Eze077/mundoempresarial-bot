@@ -13,7 +13,11 @@ Por qué existe
 · Botones que emite el harness y el bot solo despacha:
     h_bv2_…  «⛔ Frenar» del boletín v2  → agents/boletin.callback(data)   (el prefijo h_bol_ es del esquema viejo)
     h_ea_…   editor automático (Publicar una nota que espera, Revertir, Volver a vivo) → agents/editor_auto.callback(data)
-  Ninguno se emite hoy (BOLETIN_AUTO y EDITOR_AUTO no están en 1): no cambia nada de lo que existe.
+· /pesos (v1.1 · 19/11/2026, pedido de Leo: «poneme probabilidades … y dame la posibilidad de que yo lo cambie ese peso»): el
+  panel con los pesos del 🎯 «calza con ME» de las tarjetas del briefing y el piso del editor automático. TODO lo arma y lo
+  guarda el harness (agents/editor_auto.panel_pesos y .callback_pesos, tabla editor_auto_pesos); acá solo se pide el panel,
+  se despachan los botones h_pesos:… y se redibuja el mensaje. Con un harness viejo (sin editor_auto v1.2) /pesos avisa que
+  falta desplegarlo y no cambia nada.
 
 Sin claves ni datos personales: el repo del bot es público. Toda llamada al harness va en un hilo con tope de tiempo.
 """
@@ -25,8 +29,8 @@ import sys
 
 logger = logging.getLogger("panel_bot")
 
-VERSION = "v1.0"
-FECHA_VERSION = "18/11/2026"
+VERSION = "v1.1"
+FECHA_VERSION = "19/11/2026"
 HARNESS_DIR = os.environ.get("HARNESS_DIR", "/opt/me-harness")
 PLAZO_S = 25
 _PRENDIDA = {"1", "on", "si", "sí", "true", "vivo"}
@@ -58,6 +62,26 @@ class _Harness:
             from agents import editor_auto
             return editor_auto.callback(data, quien="leo")
         return None
+
+    def pesos_panel(self):
+        """/pesos: {'texto': html, 'teclado': inline_keyboard} que arma el harness."""
+        return _de_editor("panel_pesos")()
+
+    def pesos_boton(self, data):
+        """h_pesos:…: el harness guarda el cambio y devuelve el panel nuevo ({'texto', 'teclado', 'aviso'}) o None."""
+        return _de_editor("callback_pesos")(data, quien="leo")
+
+
+class HarnessSinPesos(Exception):
+    """El harness desplegado es anterior a editor_auto v1.2 (no tiene el panel de pesos)."""
+
+
+def _de_editor(nombre):
+    from agents import editor_auto
+    fn = getattr(editor_auto, nombre, None)
+    if fn is None:
+        raise HarnessSinPesos(nombre)
+    return fn
 
 
 _H = None
@@ -238,9 +262,55 @@ async def boton_harness(query) -> None:
         logger.debug("boton harness: no pude contestar: %s", e)
 
 
+# ── /pesos ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+_SIN_PESOS = "⚠️ El harness todavía no tiene el panel de pesos (falta desplegar editor_auto v1.2). No cambié nada."
+
+
+async def cmd_pesos(update, context):
+    """/pesos: el panel de pesos del 🎯 y del piso del editor automático (lo arma el harness)."""
+    msg = update.message
+    try:
+        r = await _hilo(harness().pesos_panel)
+    except HarnessSinPesos as e:
+        logger.warning("/pesos: harness sin %s", e)
+        await msg.reply_text(_SIN_PESOS)
+        return
+    except Exception as e:
+        logger.warning("/pesos: %s", e)
+        await msg.reply_text("⚠️ No pude armar el panel de pesos (%s). Probá de nuevo." % type(e).__name__)
+        return
+    await msg.reply_text(r["texto"], parse_mode="HTML", reply_markup=r.get("teclado"), disable_web_page_preview=True)
+
+
+async def boton_pesos(update, context):
+    """Botones h_pesos:… del panel: el harness guarda el cambio; acá se avisa en una línea y se redibuja el mismo mensaje."""
+    query = update.callback_query
+    try:
+        r = await _hilo(harness().pesos_boton, query.data or "")
+    except HarnessSinPesos as e:
+        logger.warning("boton pesos: harness sin %s", e)
+        await _responder(query, _SIN_PESOS, True)
+        return
+    except Exception as e:
+        logger.warning("boton pesos %s: %s", (query.data or "")[:30], e)
+        await _responder(query, "No pude cambiarlo (%s): probá de nuevo." % type(e).__name__, True)
+        return
+    if not r:
+        await _responder(query, "Este botón ya no hace nada.", True)
+        return
+    await _responder(query, r.get("aviso"))
+    try:
+        await query.edit_message_text(r["texto"], parse_mode="HTML", reply_markup=r.get("teclado"),
+                                      disable_web_page_preview=True)
+    except Exception as e:                       # p. ej. «message is not modified» si el botón no cambió nada
+        logger.debug("boton pesos: no pude redibujar: %s", e)
+
+
 def registrar(app):
-    """Registra /estado, /pausa y los botones pz_ (antes del handle_button general)."""
+    """Registra /estado, /pausa, /pesos y los botones pz_ y h_pesos (antes del handle_button general)."""
     from telegram.ext import CallbackQueryHandler, CommandHandler
     app.add_handler(CommandHandler("estado", cmd_estado))
     app.add_handler(CommandHandler("pausa", cmd_pausa))
     app.add_handler(CallbackQueryHandler(boton_pausa, pattern="^pz_"))
+    app.add_handler(CommandHandler("pesos", cmd_pesos))
+    app.add_handler(CallbackQueryHandler(boton_pesos, pattern="^h_pesos"))

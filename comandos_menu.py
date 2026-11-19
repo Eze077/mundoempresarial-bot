@@ -4,7 +4,8 @@ informe de uso (informe_uso.py). Antes el /help era un texto escrito a mano que 
 
 3/11/2026 (Leo): fuera del menú /stats (solo redirigía a /coladepublicacion), /ciclaje (= /briefing auto),
 /vivo e /input_evento (sin uso), /editor (sin uso desde junio) y /fuentes (pasa a un botón de /rutina).
-Entra /encuesta (se usaba y no estaba). Los que salen del menú siguen funcionando si se escriben."""
+Entra /encuesta (se usaba y no estaba). Los que salen del menú siguen funcionando si se escriben.
+19/11/2026 (Leo): entra /pesos (los pesos del 🎯 de las tarjetas del briefing y el piso del editor automático)."""
 
 # (grupo, comando, descripción). El orden es el del menú.
 MENU = [
@@ -13,6 +14,7 @@ MENU = [
     ("Pipeline editorial", "programadas", "Notas programadas — reprogramar o publicar ahora"),
     ("Pipeline editorial", "eventos", "Agenda — boletín semanal + efemérides que vienen"),
     ("Pipeline editorial", "briefing", "Briefing manual — /briefing (notas) · /briefing auto (config)"),
+    ("Pipeline editorial", "pesos", "Pesos del 🎯 «calza con ME» de las tarjetas y piso del editor automático"),
     ("Pipeline editorial", "ingesta", "Disparar ingesta manual de fuentes RSS"),
     ("Pipeline editorial", "nutricion", "Briefing de nutrición — alimentar living notes"),
     ("Contenido", "evento", "Cobertura de evento propio — audios, fotos y texto → nota"),
