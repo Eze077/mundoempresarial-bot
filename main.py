@@ -158,7 +158,9 @@ def _uso_anotar(tipo, clave):
         c.execute("INSERT INTO uso VALUES (datetime('now', '-3 hours'), ?, ?)", (tipo, clave))
 
 
-_ENV_FILE = "/etc/mundoempresarial-bot.env"
+# ME_BOT_ENV_FILE solo para las pruebas (tests/conftest.py): el 19/11 una prueba corrida como root en el VPS, con el
+# entorno vacío, pasó por _persist_admin_chat_id y pisó ADMIN_CHAT_ID en el archivo real de producción.
+_ENV_FILE = os.environ.get("ME_BOT_ENV_FILE") or "/etc/mundoempresarial-bot.env"
 
 def _persist_admin_chat_id(chat_id: str):
     """Guarda ADMIN_CHAT_ID en el env file para sobrevivir reinicios."""
