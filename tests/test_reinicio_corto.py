@@ -29,3 +29,11 @@ def test_reinicio_corto_procesa_lo_pendiente(M, tmp_path, monkeypatch):
 def test_sin_marca_descarta_como_antes(M, tmp_path, monkeypatch):
     monkeypatch.setattr(M, "_ULTIMO_VIVO", str(tmp_path / "no-existe"))
     assert M._soltar_pendientes() is True
+
+
+def test_lo_que_recibe_ptb_es_una_corutina(M):
+    """PTB espera corutinas en la JobQueue y en post_shutdown: una función común daba TypeError cada 30 s (20/11)."""
+    import inspect
+    assert inspect.iscoroutinefunction(M._job_vivo)
+    src = open(M.__file__, encoding="utf-8").read()
+    assert "run_repeating(_job_vivo" in src and ".post_shutdown(_job_vivo)" in src

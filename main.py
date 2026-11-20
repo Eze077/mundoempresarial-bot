@@ -13442,6 +13442,11 @@ def _marcar_vivo(*_a):
         logger.debug("marcar vivo: %s", e)
 
 
+async def _job_vivo(_context=None):
+    """Para la JobQueue y el post_shutdown de PTB, que esperan una corutina (una función común da TypeError al esperarla)."""
+    _marcar_vivo()
+
+
 def _soltar_pendientes(ahora=None) -> bool:
     """True = descartar lo que llegó mientras el bot estaba caído (caída larga o sin marca); False = procesarlo."""
     try:
@@ -18263,7 +18268,7 @@ def main():
     _wait_for_lock_release(soltar=soltar)
 
     app = (Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init)
-           .post_shutdown(lambda _app: _marcar_vivo()).build())
+           .post_shutdown(_job_vivo).build())
     # Control de acceso GLOBAL: corre antes que todo (group=-1). Solo el operador pasa;
     # a cualquier otro le frena la cadena entera de handlers. Ver _solo_admin.
     if not _admin_ids():
@@ -18393,7 +18398,7 @@ def main():
         logger.warning(f"restore_scheduled_jobs: {e}")
 
     try:
-        app.job_queue.run_repeating(_marcar_vivo, interval=30, first=1, name="ultimo_vivo")
+        app.job_queue.run_repeating(_job_vivo, interval=30, first=1, name="ultimo_vivo")
     except Exception as e:
         logger.warning(f"ultimo_vivo: {e}")
     logger.info("Bot iniciado y esperando links...")
