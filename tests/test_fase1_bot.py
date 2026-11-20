@@ -186,4 +186,6 @@ def test_handler_de_texto_excluye_ediciones_y_no_hay_filtro_de_botones_viejos():
     src = _fuente()
     assert "filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link" in src
     assert "boton_es_viejo" not in src and "registrar_arranque" not in src
-    assert src.count('"drop_pending_updates": True') == 1 and "drop_pending_updates=True," in src
+    # 20/11/2026: lo pendiente se descarta SOLO tras una caída larga (_soltar_pendientes); un reinicio corto lo procesa
+    assert '"drop_pending_updates": bool(soltar)' in src and "drop_pending_updates=soltar," in src
+    assert "drop_pending_updates=True" not in src and '"drop_pending_updates": True' not in src

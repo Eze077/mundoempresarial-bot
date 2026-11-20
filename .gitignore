@@ -49,3 +49,6 @@ sword:
 # /fuentes: lo que lee la ingesta del harness (estado de runtime)
 fuentes_extra.json
 fuentes_extra.json.tmp
+
+# Marca de «sigo vivo» del bot (reinicios cortos procesan lo pendiente, 20/11/2026)
+.ultimo_vivo

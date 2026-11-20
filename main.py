@@ -7,6 +7,7 @@ import asyncio
 import base64
 import unicodedata
 import uuid
+import time
 from datetime import datetime, time as dtime
 import requests
 from requests_oauthlib import OAuth1
@@ -13423,18 +13424,47 @@ async def _learn_hashtags_daily(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def _wait_for_lock_release(max_wait: int = 20):
+# ── Lo que llega durante un reinicio (20/11/2026) ─────────────────────────────────────────────────────────────────────
+# Cada despliegue reinicia el bot (5-10 s) y el arranque DESCARTABA todo lo pendiente: un texto o un toque de ⛔ Frenar /
+# ✅ Publicar mandado en esos segundos se perdía sin aviso (si se pierde un Frenar, la nota sigue). Ahora el bot anota
+# «sigo vivo» cada 30 s y al apagarse; al arrancar, si estuvo caído MENOS de BOT_REINICIO_CORTO_S (despliegue o reinicio
+# normal) procesa lo que llegó mientras tanto; si estuvo caído más (caída, corte largo) lo descarta como siempre, para no
+# ejecutar botones viejos. Sin marca (primer arranque con esto): descarta, como antes.
+_ULTIMO_VIVO = os.environ.get("BOT_ULTIMO_VIVO") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ultimo_vivo")
+REINICIO_CORTO_S = int(os.environ.get("BOT_REINICIO_CORTO_S", "180"))
+
+
+def _marcar_vivo(*_a):
+    try:
+        with open(_ULTIMO_VIVO, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception as e:
+        logger.debug("marcar vivo: %s", e)
+
+
+def _soltar_pendientes(ahora=None) -> bool:
+    """True = descartar lo que llegó mientras el bot estaba caído (caída larga o sin marca); False = procesarlo."""
+    try:
+        with open(_ULTIMO_VIVO) as f:
+            t = int(f.read().strip())
+    except Exception:
+        return True
+    return ((ahora or time.time()) - t) > REINICIO_CORTO_S
+
+
+def _wait_for_lock_release(max_wait: int = 20, soltar: bool = True):
     """
     Al iniciar, espera a que la otra instancia (contenedor viejo de Railway)
     libere el getUpdates lock. Si pasa más del tiempo, forzamos webhook delete.
+    `soltar=False` (reinicio corto): no descarta lo pendiente.
     """
     import time
     for attempt in range(max_wait):
         try:
-            # deleteWebhook con drop_pending_updates libera el polling lock
+            # deleteWebhook libera el polling lock; solo descarta lo pendiente si el bot estuvo caído mucho
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
-                json={"drop_pending_updates": True},
+                json={"drop_pending_updates": bool(soltar)},
                 timeout=10,
             )
             if r.status_code == 200:
@@ -18227,10 +18257,13 @@ async def _agenda_frase_a_preview(message, context, frase: str):
 
 
 def main():
+    soltar = _soltar_pendientes()
+    logger.info("arranque: %s lo que llegó mientras el bot estaba caído", "descarto" if soltar else "proceso")
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
-    _wait_for_lock_release()
+    _wait_for_lock_release(soltar=soltar)
 
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
+    app = (Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init)
+           .post_shutdown(lambda _app: _marcar_vivo()).build())
     # Control de acceso GLOBAL: corre antes que todo (group=-1). Solo el operador pasa;
     # a cualquier otro le frena la cadena entera de handlers. Ver _solo_admin.
     if not _admin_ids():
@@ -18359,9 +18392,13 @@ def main():
     except Exception as e:
         logger.warning(f"restore_scheduled_jobs: {e}")
 
+    try:
+        app.job_queue.run_repeating(_marcar_vivo, interval=30, first=1, name="ultimo_vivo")
+    except Exception as e:
+        logger.warning(f"ultimo_vivo: {e}")
     logger.info("Bot iniciado y esperando links...")
     app.run_polling(
-        drop_pending_updates=True,
+        drop_pending_updates=soltar,
         allowed_updates=["message", "callback_query", "my_chat_member", "edited_message"],
     )
 
