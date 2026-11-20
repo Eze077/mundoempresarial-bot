@@ -438,3 +438,33 @@ def formatear(titulo: str, resultados: list, dudosos: list = None) -> str:
         lineas.append("↻ Lo que sigue arriba se puede reintentar con /publicador <id> → Borrar.")
     lineas.append("Si algo salió en una red antes de que el bot guardara su id (frases hasta el 17/11), no lo veo: borralo a mano.")
     return "\n".join(lineas)
+
+
+# ── posteos reemplazados (20/11/2026) ─────────────────────────────────────────
+# Cuando el Jefe de redacción re-publica una nota en una red (harness agents/redes._anotar_ids, 19/11), el id del posteo viejo
+# no se pierde: queda en «<clave>_ant» (lista con comas) del comentario mebot. Acá se leen y se borran junto con el actual, para
+# que /publicador → Borrar no deje publicado el posteo anterior.
+
+def anteriores_de_nota(contenido_wp: str) -> dict:
+    """{red: [ids]} de los posteos reemplazados al re-publicar («<clave>_ant»)."""
+    meta = parse_meta(contenido_wp)
+    out = {}
+    for red, k in CLAVE_META.items():
+        ids = [x.strip() for x in (meta.get(k + "_ant") or "").split(",") if x.strip()]
+        if ids:
+            out[red] = ids
+    return out
+
+
+def borrar_anteriores(seleccion, anteriores: dict) -> list:
+    """[(red, Resultado, id)] borrando los posteos anteriores de las redes elegidas (verificado, como el resto)."""
+    sel = set(seleccion or ())
+    out = []
+    for red in ORDEN:
+        if red == "wp" or red not in sel:
+            continue
+        for oid in (anteriores or {}).get(red, []):
+            res = borrar_red(red, oid)
+            log.info("borrado anterior %s id=%s: %s — %s", red, oid, res.estado, res.detalle)
+            out.append((red, Resultado(res.estado, "posteo anterior · " + res.detalle), oid))
+    return out

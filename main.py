@@ -11713,9 +11713,9 @@ async def _pubx_abrir_borrar(context, post: dict, editar):
     await _pubx_pantalla_borrar(context, post, editar)
 
 
-async def _pubx_registro(post: dict) -> dict:
-    """{red: id} de lo registrado de la nota, con el contenido FRESCO de WordPress (el que guardó /publicador puede estar
-    viejo: los ids se anotan después de publicar) y la cola de Meta del harness."""
+async def _pubx_contenido(post: dict) -> str:
+    """El contenido FRESCO de la nota en WordPress (el que guardó /publicador puede estar viejo: los ids se anotan después de
+    publicar)."""
     contenido = post.get("content", "")
     try:
         fresco = await asyncio.to_thread(find_post, str(post["id"]))
@@ -11723,6 +11723,13 @@ async def _pubx_registro(post: dict) -> dict:
             contenido = fresco["content"]
     except Exception as e:
         logger.warning(f"pubx: no pude releer la nota #{post.get('id')}: {e}")
+    return contenido
+
+
+async def _pubx_registro(post: dict, contenido: str = None) -> dict:
+    """{red: id} de lo registrado de la nota (contenido fresco + la cola de Meta del harness)."""
+    if contenido is None:
+        contenido = await _pubx_contenido(post)
     return await asyncio.to_thread(_borrado.registro_de_nota, contenido, post["id"])
 
 
@@ -11918,13 +11925,17 @@ async def _pubx_button(update: Update, context: ContextTypes.DEFAULT_TYPE, query
             return
         await ans()
         await query.edit_message_text("Borrando… (verifico red por red, puede tardar un minuto)")
-        reg = await _pubx_registro(post)      # fresco: lo que se anotó después de abrir el menú también cuenta
-        logger.info(f"pubx borrar nota #{post['id']}: elegidas={sorted(sel)} registradas={sorted(reg)}")
+        contenido = await _pubx_contenido(post)
+        reg = await _pubx_registro(post, contenido)      # fresco: lo que se anotó después de abrir el menú también cuenta
+        ant = _borrado.anteriores_de_nota(contenido)     # posteos reemplazados al re-publicar desde el Jefe (20/11/2026)
+        logger.info(f"pubx borrar nota #{post['id']}: elegidas={sorted(sel)} registradas={sorted(reg)} anteriores={sorted(ant)}")
 
         def _wp():
             return _pubx_wp_a_papelera(post["id"])
 
         resultados = await asyncio.to_thread(_borrado.borrar_nota, sel, reg, _wp)
+        if ant:
+            resultados += await asyncio.to_thread(_borrado.borrar_anteriores, sel, ant)
         dudosos = await asyncio.to_thread(_borrado.dudosos_de_cola, post["id"])
         informe = _borrado.formatear(post.get("title", "")[:80], resultados, dudosos)
         logger.info("pubx borrar nota #%s: terminado → %s", post["id"],
@@ -18302,6 +18313,12 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
     app.add_handler(CallbackQueryHandler(handle_ortit_button, pattern=r"^ortit:\d+$"))
+    # Botones del harness que nadie atendía (20/11/2026): fpd_ (versión retenida de una ficha) y pfc_ (cuenta dudosa de un perfil)
+    try:
+        import botones_harness_bot as _bhb
+        _bhb.registrar(app)
+    except Exception as _e_bhb:
+        logger.warning(f"botones fpd_/pfc_ no registrados: {_e_bhb}")
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
