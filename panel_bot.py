@@ -238,6 +238,16 @@ async def cmd_estado(update, context):
 
 
 # ── botones del harness ───────────────────────────────────────────────────────────────────────────────────────────────
+async def _avisar(query, texto):
+    """Un aviso que Leo SIEMPRE ve. handle_button (main.py) ya contestó el callback al entrar y Telegram rechaza un segundo
+    answer(): el error de «Frenar» se perdía en el log (hallazgo del 21/11). Va como mensaje aparte."""
+    await _responder(query)
+    try:
+        await query.message.reply_text(texto, disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning("boton harness: no pude avisar: %s", e)
+
+
 async def boton_harness(query) -> None:
     """h_bv2_… y h_ea_…: le pasa el callback al harness y le dice a Leo lo que el harness contestó (no lo que se esperaba).
     Saca el teclado del mensaje para que no se toque dos veces."""
@@ -246,10 +256,10 @@ async def boton_harness(query) -> None:
         texto = await _hilo(harness().callback, data)
     except Exception as e:
         logger.warning("boton harness %s: %s", data[:20], e)
-        await _responder(query, "No pude hacerlo ahora (%s): probá de nuevo." % type(e).__name__, True)
+        await _avisar(query, "⚠️ No pude hacerlo ahora (%s): probá de nuevo." % type(e).__name__)
         return
     if texto is None:
-        await _responder(query, "Este botón ya no hace nada.", True)
+        await _avisar(query, "Este botón ya no hace nada.")
         return
     await _responder(query)
     try:

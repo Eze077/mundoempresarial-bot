@@ -227,11 +227,23 @@ def test_un_boton_que_nadie_atiende_o_que_falla_no_rompe(h):
     h.callback = lambda data: None
     q = Consulta("h_ea_raro:1")
     run(B.boton_harness(q))
-    assert q.respuestas == [("Este botón ya no hace nada.", True)] and q.teclados == []
+    assert q.message.enviados[0][0] == "Este botón ya no hace nada." and q.teclados == []
     h.callback = lambda data: (_ for _ in ()).throw(RuntimeError("base bloqueada"))
     q = Consulta("h_bv2_frenar:1")
     run(B.boton_harness(q))
-    assert q.respuestas[0][1] is True and "probá de nuevo" in q.respuestas[0][0] and q.teclados == []
+    assert "probá de nuevo" in q.message.enviados[0][0] and "RuntimeError" in q.message.enviados[0][0] and q.teclados == []
+
+
+def test_si_el_callback_ya_se_contesto_el_error_igual_le_llega_a_leo(h):
+    """21/11: handle_button contesta el callback al entrar; Telegram rechaza un segundo answer(). Antes el aviso de error de
+    «Frenar» iba por ese segundo answer y se perdía. Ahora va como mensaje aparte."""
+    class YaContestada(Consulta):
+        async def answer(self, texto=None, show_alert=False):
+            raise RuntimeError("Query is too old or already answered")
+    h.callback = lambda data: (_ for _ in ()).throw(TimeoutError("harness lento"))
+    q = YaContestada("h_bv2_frenar:3")
+    run(B.boton_harness(q))
+    assert q.message.enviados and "probá de nuevo" in q.message.enviados[0][0]
 
 
 def test_callback_data_de_los_botones_entra_en_64_bytes():
