@@ -85,7 +85,10 @@ def _llamar(prefijo, mod, data):
 def hacer_handler(prefijo, cargar_fn=None):
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        await q.answer()
+        try:
+            await q.answer()
+        except Exception as e:      # clic tardío tras un reinicio («query is too old»): igual se atiende (revisión 21/11)
+            logger.debug("botón %s: answer: %s", q.data, e)
         try:
             mod = (cargar_fn or cargar)(MODULOS[prefijo])
             r = await asyncio.wait_for(asyncio.to_thread(_llamar, prefijo, mod, q.data), PLAZO_S[prefijo])
@@ -100,9 +103,11 @@ def hacer_handler(prefijo, cargar_fn=None):
         if not texto:
             return
         nuevo = ((q.message.text_html or "") + "\n\n" + texto).strip()
+        # si el harness dijo que NO se hizo (ok False), el botón queda para reintentar; si se hizo, se saca (un solo uso)
+        teclado = getattr(q.message, "reply_markup", None) if (r or {}).get("ok") is False else None
         if len(nuevo) <= LIMITE_TG:
             try:
-                await q.edit_message_text(nuevo, parse_mode="HTML", disable_web_page_preview=True)   # sin teclado: un solo uso
+                await q.edit_message_text(nuevo, parse_mode="HTML", disable_web_page_preview=True, reply_markup=teclado)
                 return
             except Exception as e:
                 logger.debug("botón %s: no pude editar: %s", q.data, e)

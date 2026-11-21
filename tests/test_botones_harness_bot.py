@@ -278,3 +278,43 @@ def test_borrar_anteriores_solo_las_redes_elegidas(monkeypatch):
     monkeypatch.setattr(R, "borrar_red", lambda red, oid: vistos.append((red, oid)) or R.Resultado(R.BORRADO, "verificado"))
     out = R.borrar_anteriores({"twitter"}, {"twitter": ["111"], "li_pag": ["urn:li:share:9"]})
     assert vistos == [("twitter", "111")] and out[0][1].detalle == "posteo anterior · verificado"
+
+
+# ── Revisión adversarial del 21/11 ─────────────────────────────────────────────────────────────────────────────────────
+class QConTeclado(Q):
+    def __init__(self, data, answer_falla=False):
+        super().__init__(data, html="⚠️ Cotizaciones: el MEP llegó dos días con el mismo salto")
+        self.message.reply_markup = {"inline_keyboard": [[{"text": "✅ Aceptar", "callback_data": data}]]}
+        self.kw, self._answer_falla = None, answer_falla
+
+    async def answer(self, *a, **k):
+        if self._answer_falla:
+            raise RuntimeError("Query is too old and response timeout expired")
+        self.contestado = True
+
+    async def edit_message_text(self, t, **kw):
+        self.editado, self.kw = t, kw
+
+
+def test_si_el_harness_no_lo_hizo_el_boton_queda_para_reintentar():
+    mod = types.SimpleNamespace(aceptar_salto=lambda a, d: {"ok": False, "motivo": "la base no tomó la aceptación"},
+                                ACTIVOS={"mep": {"nombre": "dólar MEP"}})
+    q = QConTeclado("h_coti_salto:mep:20261120")
+    _correr("h_coti_salto:", q, mod)
+    assert "No acepté el salto" in q.editado and q.kw["reply_markup"] == q.message.reply_markup
+
+
+def test_si_el_harness_lo_hizo_el_boton_se_saca():
+    mod = types.SimpleNamespace(aceptar_salto=lambda a, d: {"ok": True, "aceptadas": 2, "valor": 1500.0},
+                                ACTIVOS={"mep": {"nombre": "dólar MEP"}}, fmt_valor=lambda x: "$1.500")
+    q = QConTeclado("h_coti_salto:mep:20261120")
+    _correr("h_coti_salto:", q, mod)
+    assert "Aceptado como movimiento real" in q.editado and q.kw["reply_markup"] is None
+
+
+def test_un_clic_tardio_igual_se_atiende():
+    vistos = []
+    mod = types.SimpleNamespace(boton=lambda d: vistos.append(d) or {"ok": True, "texto": "✅ Listo."})
+    q = QConTeclado("fpd_si:12", answer_falla=True)
+    _correr("fpd_", q, mod)
+    assert vistos == ["fpd_si:12"] and "✅ Listo." in q.editado
