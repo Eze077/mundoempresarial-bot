@@ -18351,12 +18351,13 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_efem_button, pattern="^efem_"))
     app.add_handler(CallbackQueryHandler(handle_desbloq_button, pattern="^desbloq_"))
     app.add_handler(CallbackQueryHandler(handle_ortit_button, pattern=r"^ortit:\d+$"))
-    # Botones del harness que nadie atendía (20/11/2026): fpd_ (versión retenida de una ficha) y pfc_ (cuenta dudosa de un perfil)
+    # Botones del harness que nadie atendía (20/11/2026): fpd_ (versión retenida de una ficha), pfc_ (cuenta dudosa de un perfil)
+    # y, desde el 21/11, h_coti_salto: («Aceptar como movimiento real» de cotizaciones, bandera COTI_BOTON_SALTO del harness).
     try:
         import botones_harness_bot as _bhb
         _bhb.registrar(app)
     except Exception as _e_bhb:
-        logger.warning(f"botones fpd_/pfc_ no registrados: {_e_bhb}")
+        logger.warning(f"botones fpd_/pfc_/h_coti_salto no registrados: {_e_bhb}")
     app.add_handler(CallbackQueryHandler(handle_button))
 
     # Programar tareas automáticas en Argentina (UTC-3)
