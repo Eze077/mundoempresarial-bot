@@ -319,7 +319,7 @@ async def boton_guardia(query) -> None:
 
 
 # ── /pesos ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-_SIN_PESOS ="⚠️ El harness todavía no tiene el panel de pesos (falta desplegar editor_auto v1.2). No cambié nada."
+_SIN_PESOS = "⚠️ El harness todavía no tiene el panel de pesos (falta desplegar editor_auto v1.2). No cambié nada."
 
 
 async def cmd_pesos(update, context):

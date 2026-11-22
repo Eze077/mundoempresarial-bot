@@ -138,7 +138,7 @@ def test_integracion_con_el_harness_real(tmp_path):
         print(json.dumps({"mejora": h.callback("h_gd_ap:999"), "aviso": h.callback("h_gd_run:999"),
                           "raro": h.callback("h_gd_ap:x"), "ajeno": h.callback("h_cur_frenar:1")}))
     """) % {"bot": RAIZ_BOT, "harness": HARNESS}
-    env = dict(os.environ, HARNESS_DB=str(tmp_path / "h.db"), HARNESS_DIR=str(tmp_path), OPENAI_API_KEY="x",
+    env = dict(os.environ, HARNESS_DB=str(tmp_path / "h.db"), HARNESS_DIR=str(tmp_path), OPENAI_API_KEY="x", GUARDIA="1",
                GUARDIA_MEJORAS_PATH=str(tmp_path / "mejoras.md"), PYTHONIOENCODING="utf-8")
     p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=HARNESS, timeout=120,
                        encoding="utf-8")
@@ -147,3 +147,9 @@ def test_integracion_con_el_harness_real(tmp_path):
     out = json.loads(p.stdout.strip().splitlines()[-1])
     assert out == {"mejora": "No encontré esa mejora.", "aviso": "No encontré ese aviso.", "raro": "Botón inválido.",
                    "ajeno": None}
+    env["GUARDIA"] = "0"                                                     # apagada: el botón lo dice y no anota nada
+    p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=HARNESS, timeout=120,
+                       encoding="utf-8")
+    assert p.returncode == 0, p.stderr[-2000:]
+    out = json.loads(p.stdout.strip().splitlines()[-1])
+    assert "apagada" in out["mejora"] and "apagada" in out["aviso"] and out["ajeno"] is None

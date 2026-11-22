@@ -29,6 +29,10 @@ import fase1_robustez as _f1  # manejador de errores y días de los jobs
 import fuentes_extra as _fuentes_extra  # /fuentes escribe acá lo que lee la ingesta del harness
 import borrado_redes as _borrado  # /publicador → Borrar: todas las redes, con verificación (17/11/2026)
 import panel_bot as _panel  # /estado, /pausa (freno general) y botones h_bv2_/h_ea_ del harness (fase 4 v2.0)
+try:   # Guardia (22/11/2026): lo que el bot manda y lo que le escribe el operador, a tg_registro del harness (GUARDIA apagada: nada)
+    import registro_tg_bot as _rtg
+except Exception:  # pragma: no cover — sin el módulo el bot arranca igual, sin registrar
+    _rtg = None
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -18292,13 +18296,19 @@ def main():
     # Esperar a que la instancia anterior libere el lock (evita 409 Conflict)
     _wait_for_lock_release(soltar=soltar)
 
-    app = (Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init)
-           .post_shutdown(_job_vivo).build())
+    _constructor = (Application.builder().token(TELEGRAM_TOKEN).post_init(_post_init)
+                    .post_shutdown(_job_vivo))
+    _req_registro = _rtg.request() if _rtg is not None else None   # Guardia: mismo request de PTB que además anota lo que sale
+    if _req_registro is not None:
+        _constructor = _constructor.request(_req_registro)
+    app = _constructor.build()
     # Control de acceso GLOBAL: corre antes que todo (group=-1). Solo el operador pasa;
     # a cualquier otro le frena la cadena entera de handlers. Ver _solo_admin.
     if not _admin_ids():
         logger.warning("⚠️ ADMIN_CHAT_ID vacío — el guard bloqueará a TODOS (fail-closed).")
     app.add_handler(TypeHandler(Update, _solo_admin), group=-1)
+    if _rtg is not None:   # Guardia: solo lectura, grupo -2 (antes del control); anota lo que escribe y toca el operador, nada más
+        _rtg.registrar_entrantes(app, lambda u: getattr(getattr(u, "effective_user", None), "id", None) in _admin_ids())
     app.add_error_handler(_f1.crear_manejador_errores(lambda: ADMIN_CHAT_ID, logger))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("desbloquear", cmd_desbloquear))
