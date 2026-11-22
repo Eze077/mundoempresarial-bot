@@ -7220,6 +7220,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith(("h_bv2_", "h_ea_")):
         await _panel.boton_harness(query)
         return
+    # ── Botones de la Guardia (22/11/2026; panel_bot.boton_guardia → agents/guardia.callback): ▶️ ✅ 🔕 de un aviso y ✅ ❌ 📦 de
+    # cada mejora del parte diario. El bot solo anota la decisión: el slot pedido lo corre el harness en su vuelta siguiente.
+    if query.data.startswith("h_gd_"):
+        await _panel.boton_guardia(query)
+        return
     # Botones del esquema viejo (armado conversacional, finde, «Enviar ahora» sin confirmar).
     # Quedan en mensajes viejos del chat: no hacen nada.
     if query.data.startswith("h_bol_"):

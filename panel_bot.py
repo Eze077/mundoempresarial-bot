@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""panel_bot.py — /estado, /pausa y los botones del harness que el bot solo despacha (fase 4 v2.0, Anexo O). v1.0 · 18/11/2026
+"""panel_bot.py — /estado, /pausa y los botones del harness que el bot solo despacha (fase 4 v2.0, Anexo O). v1.2 · 22/11/2026 (v1.0 · 18/11/2026)
 
 Por qué existe
 --------------
@@ -13,6 +13,9 @@ Por qué existe
 · Botones que emite el harness y el bot solo despacha:
     h_bv2_…  «⛔ Frenar» del boletín v2  → agents/boletin.callback(data)   (el prefijo h_bol_ es del esquema viejo)
     h_ea_…   editor automático (Publicar una nota que espera, Revertir, Volver a vivo) → agents/editor_auto.callback(data)
+    h_gd_…   la Guardia (v1.2 · 22/11/2026) → agents/guardia.callback(data): ▶️ correr / ✅ dejarlo así / 🔕 no avisar más de un
+             aviso (se saca todo el teclado) y ✅ aprobar / ❌ descartar / 📦 al próximo parche de cada mejora del parte diario (se
+             saca solo la fila tocada). El bot solo anota la decisión: el slot pedido lo corre el harness, nunca el bot.
 · /pesos (v1.1 · 19/11/2026, pedido de Leo: «poneme probabilidades … y dame la posibilidad de que yo lo cambie ese peso»): el
   panel con los pesos del 🎯 «calza con ME» de las tarjetas del briefing y el piso del editor automático. TODO lo arma y lo
   guarda el harness (agents/editor_auto.panel_pesos y .callback_pesos, tabla editor_auto_pesos); acá solo se pide el panel,
@@ -29,8 +32,8 @@ import sys
 
 logger = logging.getLogger("panel_bot")
 
-VERSION = "v1.1"
-FECHA_VERSION = "19/11/2026"
+VERSION = "v1.2"
+FECHA_VERSION = "22/11/2026"
 HARNESS_DIR = os.environ.get("HARNESS_DIR", "/opt/me-harness")
 PLAZO_S = 25
 _PRENDIDA = {"1", "on", "si", "sí", "true", "vivo"}
@@ -61,6 +64,9 @@ class _Harness:
         if data.startswith("h_ea_"):
             from agents import editor_auto
             return editor_auto.callback(data, quien="leo")
+        if data.startswith("h_gd_"):
+            from agents import guardia
+            return guardia.callback(data, quien="leo")
         return None
 
     def pesos_panel(self):
@@ -272,8 +278,48 @@ async def boton_harness(query) -> None:
         logger.debug("boton harness: no pude contestar: %s", e)
 
 
+_AVISO_GUARDIA = ("h_gd_run:", "h_gd_ok:", "h_gd_mute:")
+
+
+def _teclado_sin_la_fila(query, data):
+    """Un aviso de la Guardia es UNA decisión (▶️ ✅ 🔕): se saca todo el teclado. En el parte diario cada mejora tiene su fila
+    (✅ ❌ 📦): se saca solo la fila tocada, para que Leo siga con las otras. None = sin teclado."""
+    if data.startswith(_AVISO_GUARDIA):
+        return None
+    filas = getattr(getattr(getattr(query, "message", None), "reply_markup", None), "inline_keyboard", None) or ()
+    quedan = [tuple(f) for f in filas if not any(getattr(b, "callback_data", None) == data for b in f)]
+    if not quedan:
+        return None
+    from telegram import InlineKeyboardMarkup
+    return InlineKeyboardMarkup(quedan)
+
+
+async def boton_guardia(query) -> None:
+    """h_gd_…: los botones de la Guardia (agents/guardia.callback, en un hilo con tope de tiempo). Como boton_harness: Leo ve lo
+    que el harness contestó, no lo que se esperaba; el harness solo anota la decisión (un slot pedido lo corre él mismo)."""
+    data = query.data or ""
+    try:
+        texto = await _hilo(harness().callback, data)
+    except Exception as e:
+        logger.warning("boton guardia %s: %s", data[:20], e)
+        await _avisar(query, "⚠️ No pude hacerlo ahora (%s): probá de nuevo." % type(e).__name__)
+        return
+    if texto is None:
+        await _avisar(query, "Este botón ya no hace nada.")
+        return
+    await _responder(query)
+    try:
+        await query.edit_message_reply_markup(reply_markup=_teclado_sin_la_fila(query, data))
+    except Exception as e:
+        logger.debug("boton guardia: no pude cambiar el teclado: %s", e)
+    try:
+        await query.message.reply_text(str(texto)[:3500], disable_web_page_preview=True)
+    except Exception as e:
+        logger.debug("boton guardia: no pude contestar: %s", e)
+
+
 # ── /pesos ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-_SIN_PESOS = "⚠️ El harness todavía no tiene el panel de pesos (falta desplegar editor_auto v1.2). No cambié nada."
+_SIN_PESOS ="⚠️ El harness todavía no tiene el panel de pesos (falta desplegar editor_auto v1.2). No cambié nada."
 
 
 async def cmd_pesos(update, context):
