@@ -22,7 +22,9 @@ def main(monkeypatch):
 
 @pytest.mark.parametrize("url", ["https://mundoempresarial.ar/wp-content/uploads/2026/11/nota-1.jpg",
                                  "https://www.mundoempresarial.ar/wp-content/uploads/2026/11/nota-1-300x200.jpg",
-                                 "http://MundoEmpresarial.ar/wp-content/uploads/2026/07/ficha.png"])
+                                 "http://MundoEmpresarial.ar/wp-content/uploads/2026/07/ficha.png",
+                                 "https://mundoempresarial.com.ar/wp-content/uploads/2026/11/nota-1.jpg",
+                                 "https://www.mundoempresarial.com.ar/wp-content/uploads/2026/11/nota-1.jpg"])
 def test_a_nuestro_sitio_no_le_pide_webp(main, url):
     h = main.headers_imagen(url)
     assert "image/webp" not in h["Accept"] and "image/avif" not in h["Accept"]
@@ -31,6 +33,7 @@ def test_a_nuestro_sitio_no_le_pide_webp(main, url):
 
 
 @pytest.mark.parametrize("url", ["https://www.infobae.com/resizer/foto.jpg", "https://mundoempresarial.ar.evil.example/x.jpg",
+                                 "https://mundoempresarial.com.ar.evil.example/x.jpg", "https://falsomundoempresarial.com.ar/x.jpg",
                                  "", "no es una url"])
 def test_a_otros_sitios_los_headers_de_siempre(main, url):
     assert main.headers_imagen(url) is main.HEADERS_BROWSER

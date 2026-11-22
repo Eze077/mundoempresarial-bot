@@ -235,7 +235,8 @@ def headers_imagen(url: str) -> dict:
         propio = (urlparse(WP_URL).hostname or "").lower()
     except ValueError:
         return HEADERS_BROWSER
-    if host and (host in ("mundoempresarial.ar", propio) or host.endswith(".mundoempresarial.ar")):
+    propios = ("mundoempresarial.ar", "mundoempresarial.com.ar")      # el .com.ar también es nuestro
+    if host and (host in propios + (propio,) or host.endswith(tuple("." + d for d in propios))):
         return {**HEADERS_BROWSER, "Accept": ACCEPT_IMAGEN_PROPIA, "Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"}
     return HEADERS_BROWSER
 
