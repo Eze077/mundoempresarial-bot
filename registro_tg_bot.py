@@ -10,6 +10,8 @@ su puerta (tg_api); esto suma lo que el bot hace por su cuenta, con el MISMO mó
     botones): después de cada pedido llama a tg_registro.anotar con el método, los parámetros, lo que contestó Telegram y el
     token de la URL (que tg_registro solo compara con el del bot de ME y tapa al limpiar: nunca se guarda). getUpdates va por
     otro request (el de la Application): no pasa por acá y tampoco lo anotaría (solo send*, edit*, delete*…).
+  · Los requests.post directos al API que quedan en el bot (alert_admin_sync de main.py, el borrado del canal en
+    borrado_redes.py): `anotar_post(url, payload, respuesta|error)`, con el mismo filtro (solo el token del bot de ME).
   · Entrante: `manejador_entrante(es_operador)`, un TypeHandler de solo lectura para el grupo -2 (antes del control de acceso,
     que va en el -1): anota lo que el OPERADOR le escribe al bot y los botones que toca (del botón, solo el prefijo del
     callback_data). No corta la cadena de handlers ni contesta nada. Lo de un extraño no se anota.
@@ -87,6 +89,21 @@ class RequestConRegistro(HTTPXRequest):
             raise
         _anotar(url, request_data, respuesta=res)
         return res
+
+
+def anotar_post(url, payload, respuesta=None, error=None):
+    """Para los requests.post directos al API de Telegram que quedan en el bot (alert_admin_sync de main.py, el borrado del
+    canal): anota igual que el request de PTB, solo si es el token del bot de ME (lo decide tg_registro). Nunca lanza."""
+    try:
+        r = _registro()
+        if r is None:
+            return
+        u = str(url or "")
+        m = _RE_TOKEN_URL.search(u)
+        r.anotar(u.rstrip("/").rsplit("/", 1)[-1], payload if isinstance(payload, dict) else {}, respuesta=respuesta,
+                 error=error, token=m.group(1) if m else "")
+    except Exception:
+        pass
 
 
 def request():

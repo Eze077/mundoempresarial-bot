@@ -69,6 +69,11 @@ class _Harness:
             return guardia.callback(data, quien="leo")
         return None
 
+    def guardia_activa(self):
+        """¿La bandera GUARDIA está prendida? (la misma lectura que hace el harness)."""
+        from core import flags
+        return flags.activa("GUARDIA")
+
     def pesos_panel(self):
         """/pesos: {'texto': html, 'teclado': inline_keyboard} que arma el harness."""
         return _de_editor("panel_pesos")()
@@ -309,9 +314,14 @@ async def boton_guardia(query) -> None:
         return
     await _responder(query)
     try:
-        await query.edit_message_reply_markup(reply_markup=_teclado_sin_la_fila(query, data))
-    except Exception as e:
-        logger.debug("boton guardia: no pude cambiar el teclado: %s", e)
+        activa = getattr(harness(), "guardia_activa", lambda: True)()
+    except Exception:
+        activa = True
+    if activa:            # con la Guardia apagada el botón no hizo nada: el teclado queda para cuando se prenda
+        try:
+            await query.edit_message_reply_markup(reply_markup=_teclado_sin_la_fila(query, data))
+        except Exception as e:
+            logger.debug("boton guardia: no pude cambiar el teclado: %s", e)
     try:
         await query.message.reply_text(str(texto)[:3500], disable_web_page_preview=True)
     except Exception as e:

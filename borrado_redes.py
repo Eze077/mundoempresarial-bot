@@ -199,6 +199,15 @@ def _tg_embed_existe(msg_id: str):
     return "Post not found" not in r.text
 
 
+def _anotar_post(url, payload, respuesta=None, error=None):
+    """Guardia: el borrado del canal también queda en tg_registro (registro_tg_bot.anotar_post; solo el token de ME). Nunca lanza."""
+    try:
+        import registro_tg_bot
+        registro_tg_bot.anotar_post(url, payload, respuesta=respuesta, error=error)
+    except Exception:
+        pass
+
+
 def borrar_telegram(msg_id: str) -> Resultado:
     token = os.environ.get("TELEGRAM_TOKEN", "")
     canal = os.environ.get("TELEGRAM_CHANNEL", "@MundoEmpresarial_AR")
@@ -206,11 +215,13 @@ def borrar_telegram(msg_id: str) -> Resultado:
         return Resultado(DUDOSO, "falta TELEGRAM_TOKEN en el bot")
     if not _RE_ID_NUM.match(msg_id or ""):
         return Resultado(DUDOSO, "el id anotado no es un número de mensaje")
+    url, payload = "https://api.telegram.org/bot%s/deleteMessage" % token, {"chat_id": canal, "message_id": int(msg_id)}
     try:
-        r = requests.post("https://api.telegram.org/bot%s/deleteMessage" % token,
-                          json={"chat_id": canal, "message_id": int(msg_id)}, timeout=15)
+        r = requests.post(url, json=payload, timeout=15)
+        _anotar_post(url, payload, respuesta=r)
         j = r.json()
-    except (requests.exceptions.RequestException, ValueError):
+    except (requests.exceptions.RequestException, ValueError) as e:
+        _anotar_post(url, payload, error=e)
         j = {}
     if j.get("ok") and j.get("result"):
         return Resultado(BORRADO, "mensaje borrado del canal")

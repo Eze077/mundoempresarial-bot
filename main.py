@@ -1602,17 +1602,19 @@ def alert_admin_sync(message: str):
     if not ADMIN_CHAT_ID or not TELEGRAM_TOKEN:
         logger.warning(f"alert_admin sin destino: {message[:100]}")
         return
+    _url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    _payload = {
+        "chat_id":    int(ADMIN_CHAT_ID),
+        "text":       f"🚨 *ALERTA*\n\n{message}",
+        "parse_mode": "Markdown",
+    }
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id":    int(ADMIN_CHAT_ID),
-                "text":       f"🚨 *ALERTA*\n\n{message}",
-                "parse_mode": "Markdown",
-            },
-            timeout=10,
-        )
+        _r = requests.post(_url, json=_payload, timeout=10)
+        if _rtg is not None:   # Guardia: también lo que sale por acá (solo el token de ME; nunca se guarda)
+            _rtg.anotar_post(_url, _payload, respuesta=_r)
     except Exception as e:
+        if _rtg is not None:
+            _rtg.anotar_post(_url, _payload, error=e)
         logger.error(f"alert_admin_sync: {e}")
 
 

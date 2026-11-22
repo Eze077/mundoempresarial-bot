@@ -153,3 +153,12 @@ def test_integracion_con_el_harness_real(tmp_path):
     assert p.returncode == 0, p.stderr[-2000:]
     out = json.loads(p.stdout.strip().splitlines()[-1])
     assert "apagada" in out["mejora"] and "apagada" in out["aviso"] and out["ajeno"] is None
+
+
+def test_con_la_guardia_apagada_el_teclado_del_aviso_queda(h):
+    h.guardia_activa = lambda: False
+    h.callback = lambda data: "🛡 La Guardia está apagada (GUARDIA=0): no anoté nada."
+    aviso = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Correrlo ahora", callback_data="h_gd_run:3")]])
+    q = Consulta("h_gd_run:3", aviso)
+    run(B.boton_guardia(q))
+    assert q.teclados == [] and "apagada" in q.message.enviados[0][0]       # no se tocó el teclado

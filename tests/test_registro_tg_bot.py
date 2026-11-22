@@ -166,7 +166,23 @@ def test_integracion_con_el_harness_real(tmp_path):
     filas = json.loads(p.stdout.strip().splitlines()[-1])
     assert filas == [
         {"direccion": "saliente", "metodo": "sendMessage", "emisor": "bot:main", "funcion": "handle_button",
-         "botones": "h_cur_ok", "texto": "Listo llamá al <tel>", "ok": 1, "message_id": 9},
+         "botones": "h_cur_ok", "texto": "«Listo» llamá al <tel>", "ok": 1, "message_id": 9},
         {"direccion": "entrante", "metodo": "callback", "emisor": "leo", "funcion": "h_cur_frenar", "botones": "h_cur_frenar",
          "texto": "", "ok": 1, "message_id": None}]                               # el otro bot no se anotó; el token, nunca
     assert TOKEN.split(":")[1] not in p.stdout and otro.split(":")[1] not in p.stdout
+
+
+def test_los_posts_directos_al_api_tambien_se_anotan(registro):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 8}}
+    R.anotar_post(URL, {"chat_id": 1, "text": "🚨 alerta"}, respuesta=_Resp())
+    R.anotar_post(URL.replace("sendMessage", "deleteMessage"), {"chat_id": 1, "message_id": 3}, error=TimeoutError("x"))
+    assert registro.salientes == [("sendMessage", {"chat_id": 1, "text": "🚨 alerta"}, {"ok": True, "result": {"message_id": 8}},
+                                   None, TOKEN), ("deleteMessage", {"chat_id": 1, "message_id": 3}, None, "TimeoutError", TOKEN)]
+    src = open(os.path.join(RAIZ_BOT, "main.py"), encoding="utf-8").read()
+    i = src.index("def alert_admin_sync(")
+    assert "_rtg.anotar_post(_url, _payload, respuesta=_r)" in src[i:i + 1200]
+    assert "_anotar_post(url, payload, respuesta=r)" in open(os.path.join(RAIZ_BOT, "borrado_redes.py"), encoding="utf-8").read()
