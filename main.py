@@ -221,6 +221,25 @@ HEADERS_BROWSER = {
     "Cache-Control": "max-age=0",
 }
 
+# WebP propio (22/11/2026): el sitio va a servir «imagen.jpg.webp» en la MISMA URL a quien mande «image/webp» en el Accept
+# (me-harness/wp/uploads.htaccess). Al bajar una imagen PROPIA el bot no lo pide: si no, la marca de agua recodificaría un
+# WebP a JPEG con pérdida y upload_image volvería a subir nuestras fotos como «.webp». Las de otros sitios, como siempre.
+ACCEPT_IMAGEN_PROPIA = "image/jpeg,image/png,image/gif,image/*;q=0.8,*/*;q=0.5"
+
+
+def headers_imagen(url: str) -> dict:
+    """Headers para BAJAR una imagen: los del navegador, salvo el Accept si la imagen es de nuestro sitio."""
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+        propio = (urlparse(WP_URL).hostname or "").lower()
+    except ValueError:
+        return HEADERS_BROWSER
+    if host and (host in ("mundoempresarial.ar", propio) or host.endswith(".mundoempresarial.ar")):
+        return {**HEADERS_BROWSER, "Accept": ACCEPT_IMAGEN_PROPIA, "Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"}
+    return HEADERS_BROWSER
+
+
 # Palabras vacías en español para extracción de keywords
 STOP_WORDS = {
     "el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "o", "a",
@@ -1185,7 +1204,7 @@ def get_or_create_tags(names: list) -> list:
 
 def upload_image(image_url: str, alt: str = "", watermark: bool = False) -> int | None:
     try:
-        img = requests.get(image_url, headers=HEADERS_BROWSER, timeout=15)
+        img = requests.get(image_url, headers=headers_imagen(image_url), timeout=15)
         img.raise_for_status()
         ctype = img.headers.get("Content-Type", "image/jpeg").split(";")[0]
         ext = ctype.split("/")[-1]
@@ -1535,7 +1554,7 @@ def upload_twitter_media(image_url: str, auth: OAuth1) -> str | None:
     """
     try:
         # Descargar imagen
-        img_resp = requests.get(image_url, headers=HEADERS_BROWSER, timeout=15)
+        img_resp = requests.get(image_url, headers=headers_imagen(image_url), timeout=15)
         img_resp.raise_for_status()
         img_bytes = img_resp.content
 
@@ -11992,7 +12011,7 @@ def _apply_wm_to_featured(post: dict) -> bool:
         src = (r.json() or {}).get("source_url") if r.ok else None
         if not src:
             return False
-        dl = requests.get(src, headers=HEADERS_BROWSER, timeout=20)
+        dl = requests.get(src, headers=headers_imagen(src), timeout=20)
         if not dl.ok:
             return False
         import sys as _sw
