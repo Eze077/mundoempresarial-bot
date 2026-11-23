@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""botones_harness_bot.py v1.1 · 21/11/2026 — botones del harness que el bot no atendía.
+"""botones_harness_bot.py v1.2 · 23/11/2026 — botones del harness que el bot no atendía.
 
 Leo (20/11): «1 2 3 si» (los arreglos del bot del plan v2.0). Sin estos handlers los botones no hacían nada:
-  · fpd_si:<id> / fpd_no:<id>  versión retenida de una ficha (harness agents/ficha_pendiente.boton, fase 5, FICHA_REGIMEN):
-                               publicarla tal cual o descartarla.
+  · fpd_si:<id>:<rev> / fpd_no:<id>:<rev>  versión retenida de una ficha (harness agents/ficha_pendiente.boton, fase 5,
+                               FICHA_REGIMEN): publicarla tal cual o descartarla. (v1.2, 23/11) El botón lleva la revisión de la
+                               versión: el harness contesta «ya fue reemplazada» si no es la última. Los de antes, sin `:<rev>`,
+                               se siguen atendiendo (el harness los toma como revisión 1). Este patrón va desplegado ANTES que el
+                               harness que manda `:<rev>`: si no, esos botones caen al handle_button.
   · pfc_si:<id> / pfc_no:<id>  cuenta «dudosa» de un perfil (harness agents/perfiles_botones.boton, fase 5b): confirmarla o
                                rechazarla.
   · h_coti_salto:<activo>:<AAAAMMDD>  (v1.1, 21/11) «✅ Aceptar como movimiento real» del aviso de un salto de cotización que
@@ -36,7 +39,7 @@ COTI = "h_coti_salto:"
 MODULOS = {"fpd_": "ficha_pendiente", "pfc_": "perfiles_botones", COTI: "cotizaciones"}
 # publicar una ficha relee y escribe WordPress; confirmar una cuenta y aceptar un salto son locales (sqlite)
 PLAZO_S = {"fpd_": 90, "pfc_": 60, COTI: 30}
-PATRONES = {"fpd_": r"^fpd_(si|no):\d+$",
+PATRONES = {"fpd_": r"^fpd_(si|no):\d+(?::\d+)?$",
             "pfc_": r"^pfc_(si|no):\d+$",
             COTI: r"^h_coti_salto:[a-z0-9_]{1,20}:\d{8}$"}     # el activo es una clave de cotizaciones.ACTIVOS
 LIMITE_TG = 4000

@@ -52,6 +52,25 @@ def test_fpd_publica_y_suma_el_resultado_al_mensaje():
     assert vistos == ["fpd_si:12"] and q.contestado and q.editado == "Ficha retenida\n\n✅ Publiqué la versión retenida."
 
 
+@pytest.mark.parametrize("data", ["fpd_si:12:3", "fpd_no:12:3", "fpd_si:12", "fpd_no:1", "fpd_si:123456:99"])
+def test_el_patron_de_fpd_toma_el_boton_con_y_sin_revision(data):
+    """(v1.2, 23/11) El harness manda `fpd_si:<id>:<rev>`; los botones de antes, sin la revisión, siguen llegando al harness."""
+    assert _patron("fpd_").match(data) and len(data.encode()) <= 64
+
+
+@pytest.mark.parametrize("data", ["fpd_si:12:3:4", "fpd_si:", "fpd_si:12:", "fpd_si::3", "fpd_ok:12:3", "fpd_si:a:3", "xfpd_si:12:3"])
+def test_el_patron_de_fpd_no_toma_otros(data):
+    assert not _patron("fpd_").match(data)
+
+
+def test_fpd_con_revision_llega_entera_al_harness():
+    vistos = []
+    mod = types.SimpleNamespace(boton=lambda d: vistos.append(d) or {"ok": False, "texto": "🔁 Esta versión ya fue reemplazada."})
+    q = Q("fpd_si:12:3")
+    _correr("fpd_", q, mod)
+    assert vistos == ["fpd_si:12:3"] and q.editado == "Ficha retenida\n\n🔁 Esta versión ya fue reemplazada."
+
+
 def test_pfc_usa_el_modulo_de_perfiles():
     assert B.MODULOS["pfc_"] == "perfiles_botones" and B.MODULOS["fpd_"] == "ficha_pendiente"
     mod = types.SimpleNamespace(boton=lambda d: {"ok": True, "texto": "Cuenta confirmada."})
@@ -72,7 +91,8 @@ def test_registrar_pone_los_tres_patrones_en_el_grupo_normal():
     agregados = []
     app = types.SimpleNamespace(add_handler=lambda h, *a, **k: agregados.append((h.pattern.pattern, a, k)))
     B.registrar(app)
-    assert [p for p, _, _ in agregados] == [r"^fpd_(si|no):\d+$", r"^pfc_(si|no):\d+$", r"^h_coti_salto:[a-z0-9_]{1,20}:\d{8}$"]
+    assert [p for p, _, _ in agregados] == [r"^fpd_(si|no):\d+(?::\d+)?$", r"^pfc_(si|no):\d+$",
+                                            r"^h_coti_salto:[a-z0-9_]{1,20}:\d{8}$"]
     # grupo 0 (sin `group`): el filtro de admin del grupo -1 corre antes y frena a cualquier otro
     assert all(a == () and k == {} for _, a, k in agregados)
 
