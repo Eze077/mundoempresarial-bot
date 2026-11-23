@@ -13184,38 +13184,53 @@ async def cmd_inst(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Reporte diario programado ────────────────────────────────────────────────
 
 def _ga4_fetch_data() -> dict:
-    """Consulta GA4 y devuelve métricas de la última semana. Requiere GA4_SA_PATH y GA4_PROPERTY_ID."""
+    """Consulta GA4 y devuelve métricas de la última semana. Requiere GA4_SA_PATH y GA4_PROPERTY_ID.
+    GA4_SOLO_AR (22/11/2026, ga4_personas_bot.py): los cinco pedidos cuentan solo Argentina (country en AND) y, con la
+    bandera prendida, UN pedido más —el de usuarios por día sin el filtro de país— queda en `daily_sin_filtrar` para la nota
+    al pie del informe. Con la bandera apagada, los pedidos y el dict son byte a byte los de antes."""
     from google.analytics.data_v1beta import BetaAnalyticsDataClient
     from google.analytics.data_v1beta.types import (
         RunReportRequest, Dimension, Metric, DateRange, OrderBy,
     )
     import os as _os
+    import ga4_personas_bot as _G
     _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GA4_SA_PATH
     client = BetaAnalyticsDataClient()
     prop = f"properties/{GA4_PROPERTY_ID}"
 
     # 1. Usuarios por día (últimos 7 días)
-    r_daily = client.run_report(RunReportRequest(
+    req_daily = RunReportRequest(
         property=prop,
         dimensions=[Dimension(name="date")],
         metrics=[Metric(name="totalUsers"), Metric(name="sessions")],
         date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
-    ))
+    )
+    r_daily = client.run_report(_G.pedido(req_daily))
     daily = [
         {"date": row.dimension_values[0].value,
          "users": int(row.metric_values[0].value),
          "sessions": int(row.metric_values[1].value)}
         for row in r_daily.rows
     ]
+    solo_ar = _G.activo()
+    daily_sf = None
+    if solo_ar:                    # nota al pie: el mismo pedido de usuarios por día, sin el filtro de país
+        try:
+            r_sf = client.run_report(_G.sin_filtrar(req_daily))
+            daily_sf = [{"date": row.dimension_values[0].value, "users": int(row.metric_values[0].value),
+                         "sessions": int(row.metric_values[1].value)} for row in r_sf.rows]
+        except Exception as e:
+            logger.warning(f"_ga4_fetch_data sin filtrar: {e}")
+            daily_sf = {"error": str(e)[:120]}
 
     # 2. Tráfico por hora (últimos 7 días)
-    r_hourly = client.run_report(RunReportRequest(
+    r_hourly = client.run_report(_G.pedido(RunReportRequest(
         property=prop,
         dimensions=[Dimension(name="hour")],
         metrics=[Metric(name="sessions")],
         date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
         order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
-    ))
+    )))
     hourly = [
         {"hour": int(row.dimension_values[0].value),
          "sessions": int(row.metric_values[0].value)}
@@ -13223,14 +13238,14 @@ def _ga4_fetch_data() -> dict:
     ]
 
     # 3. Fuentes de tráfico
-    r_sources = client.run_report(RunReportRequest(
+    r_sources = client.run_report(_G.pedido(RunReportRequest(
         property=prop,
         dimensions=[Dimension(name="sessionSource"), Dimension(name="sessionMedium")],
         metrics=[Metric(name="sessions")],
         date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
         order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
         limit=8,
-    ))
+    )))
     sources = [
         {"source": row.dimension_values[0].value,
          "medium": row.dimension_values[1].value,
@@ -13239,14 +13254,14 @@ def _ga4_fetch_data() -> dict:
     ]
 
     # 4. Top páginas
-    r_pages = client.run_report(RunReportRequest(
+    r_pages = client.run_report(_G.pedido(RunReportRequest(
         property=prop,
         dimensions=[Dimension(name="pageTitle")],
         metrics=[Metric(name="screenPageViews")],
         date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
         order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="screenPageViews"), desc=True)],
         limit=5,
-    ))
+    )))
     pages = [
         {"title": row.dimension_values[0].value[:60],
          "views": int(row.metric_values[0].value)}
@@ -13254,15 +13269,18 @@ def _ga4_fetch_data() -> dict:
     ]
 
     # 5. Dispositivos
-    r_dev = client.run_report(RunReportRequest(
+    r_dev = client.run_report(_G.pedido(RunReportRequest(
         property=prop,
         dimensions=[Dimension(name="deviceCategory")],
         metrics=[Metric(name="sessions")],
         date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
-    ))
+    )))
     devices = {row.dimension_values[0].value: int(row.metric_values[0].value) for row in r_dev.rows}
 
-    return {"daily": daily, "hourly": hourly, "sources": sources, "pages": pages, "devices": devices}
+    out = {"daily": daily, "hourly": hourly, "sources": sources, "pages": pages, "devices": devices}
+    if solo_ar:
+        out["daily_sin_filtrar"] = daily_sf
+    return out
 
 
 def _ga4_best_slots(hourly: list) -> list[int]:
@@ -13336,7 +13354,7 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         prompt = (
             f"Sos el analista digital de MundoEmpresarial.ar, medio de noticias económicas para pymes argentinas.\n"
             f"OBJETIVO MASTER: llegar a 1000 usuarios únicos por día.\n\n"
-            f"Datos de la última semana:\n"
+            f"Datos de la última semana{' (solo Argentina: el objetivo es de usuarios argentinos)' if 'daily_sin_filtrar' in data else ''}:\n"
             f"- Promedio usuarios/día: {avg_users} ({pct}% del objetivo)\n"
             f"- Sesiones totales: {total_sessions_week}\n"
             f"- Dispositivos: {dev_text}\n"
@@ -13376,6 +13394,9 @@ async def _ga4_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     )
     if gpt_recs:
         msg += f"💡 *3 recomendaciones para llegar a 1.000:*\n{md_escape(gpt_recs.replace('**', ''))}"
+    if "daily_sin_filtrar" in data:     # GA4_SOLO_AR: nota al pie con el número sin filtrar (ga4_personas_bot.py)
+        import ga4_personas_bot as _G
+        msg += ("\n\n" if gpt_recs else "") + "_" + md_escape(_G.nota_semanal(daily, data["daily_sin_filtrar"])) + "_"
 
     try:
         await context.bot.send_message(
