@@ -9321,12 +9321,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     i    = int(arg)
                     mask = parts[2]
                     ids  = parts[3]
-                    ml = list(mask)
-                    ml[i] = "0" if ml[i] == "1" else "1"
-                    newmask = "".join(ml)
-                    n = len(ids.split("-"))
-                    await query.edit_message_reply_markup(
-                        reply_markup=_cur._checklist_kb(ids, newmask, n))
+                    if mask and not mask.isdigit():
+                        # «🧭 El editor publicaría»: la casilla se da vuelta EN LA BASE del harness (editor_auto.alternar_casilla,
+                        # atómico) y se repinta con lo guardado; si la base falla no se repinta, así lo que se ve es lo que vale.
+                        await _tog_bloque_editor(query, ids, i)
+                    else:
+                        ml = list(mask)
+                        ml[i] = "0" if ml[i] == "1" else "1"
+                        newmask = "".join(ml)
+                        n = len(ids.split("-"))
+                        await query.edit_message_reply_markup(
+                            reply_markup=_cur._checklist_kb(ids, newmask, n))
                 except Exception:
                     pass
 
@@ -9334,11 +9339,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # aprobar marcadas: h_cur_auto_okm:{mask}:{ids}
                 mask = arg
                 ids  = parts[2] if len(parts) >= 3 else ""
-                # «🧭 El editor publicaría» (harness BRIEFING_EDITOR, 24/11): el mismo checklist con la marca del harness al final de
-                # la máscara. Lo resuelve el harness (editor_auto.aprobar_bloque: aprueba las ☑, descarta las sin marcar, saltea
-                # un bloque viejo o reemplazado); el bot muestra el resultado y no borra el encabezado del briefing de arriba.
-                _marca_ed = getattr(_cur, "MARCA_EDITOR", None)
-                _es_bloque_editor = bool(_marca_ed) and mask.endswith(_marca_ed)
+                # «🧭 El editor publicaría» (harness BRIEFING_EDITOR, 24/11): el mismo checklist, con una máscara que no es solo
+                # 0/1 (la marca del harness al final). Lo resuelve el harness (editor_auto.aprobar_bloque: aprueba las ☑, descarta
+                # las sin marcar, no toca un bloque viejo, reemplazado o sin registro); el bot muestra el resultado y no borra el
+                # encabezado del briefing de arriba. Se reconoce por la máscara y no por una constante del harness: con el harness
+                # viejo en memoria (bot sin reiniciar) NO se aprueba nada, porque la recorrida de siempre dejaba la destildada en
+                # curado para que la aprobara después el editor en vivo.
+                _es_bloque_editor = bool(mask) and not mask.isdigit()
                 _aprobar_bloque = None
                 if _es_bloque_editor:
                     try:
@@ -9347,17 +9354,28 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         _aprobar_bloque = None
                 jids = [x for x in ids.split("-") if x.strip().isdigit()]
-                if _aprobar_bloque is not None:
+                if _es_bloque_editor and _aprobar_bloque is None:
+                    try:
+                        await query.answer("Este bloque es del editor y el bot tiene cargada una versión vieja del harness: "
+                                           "reiniciá el bot. No aprobé nada.", show_alert=True)
+                    except Exception:
+                        pass
+                elif _aprobar_bloque is not None:
                     try:
                         _res_bl = await asyncio.to_thread(_aprobar_bloque, ids, mask)
                     except Exception as _e_bl:
                         logger.warning("aprobar bloque del editor: %s", _e_bl)
                         _res_bl = {"ok": False, "alerta": "No pude aprobar el bloque: probá de nuevo."}
                     if not (_res_bl or {}).get("ok"):
-                        try:   # sin cambios: el teclado queda (marcar de nuevo, o el bloque ya no vale)
+                        try:   # sin cambios: el teclado queda, salvo que el bloque ya no valga
                             await query.answer((_res_bl or {}).get("alerta") or "No pude aprobar el bloque.", show_alert=True)
                         except Exception:
                             pass
+                        if (_res_bl or {}).get("quitar_teclado"):
+                            try:
+                                await query.edit_message_reply_markup(reply_markup=None)
+                            except Exception:
+                                pass
                     else:
                         _apr_bl = [str(x) for x in (_res_bl.get("aprobadas") or [])]
                         if _apr_bl:
@@ -9390,8 +9408,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
                     if done:
-                        await _borrar_cards_briefing(context, query.message.chat_id, jids,
-                                                     encabezado=not _es_bloque_editor)
+                        await _borrar_cards_briefing(context, query.message.chat_id, jids)
                     try:
                         if done:
                             await query.edit_message_text(
@@ -12972,6 +12989,37 @@ async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup={"inline_keyboard": kb_pr},
         disable_web_page_preview=True,
     )
+
+
+async def _tog_bloque_editor(query, ids, i):
+    """Toggle de una casilla de un bloque «🧭 El editor publicaría». La da vuelta el harness EN SU BASE
+    (agents.editor_auto.alternar_casilla, en un hilo: la base puede tardar) y se repinta con el teclado que devuelve, armado con
+    lo guardado. Si la base falla, no se repinta (lo que se ve sigue siendo lo que vale) y se avisa; si el bloque ya no vale, se
+    avisa y se le saca el teclado; con un harness viejo en memoria, «reiniciá el bot»."""
+    try:
+        from agents import editor_auto as _ea_t
+        _alt = getattr(_ea_t, "alternar_casilla", None)
+    except Exception:
+        _alt = None
+    if _alt is None:
+        await query.answer("Este bloque es del editor y el bot tiene cargada una versión vieja del harness: reiniciá el bot.",
+                           show_alert=True)
+        return
+    try:
+        _r = await asyncio.to_thread(_alt, ids, i)
+    except Exception as _e:
+        logger.warning("casilla del bloque del editor: %s", _e)
+        await query.answer("No pude marcar la casilla: probá de nuevo.", show_alert=True)
+        return
+    if (_r or {}).get("ok"):
+        await query.edit_message_reply_markup(reply_markup=_r["kb"])
+        return
+    await query.answer((_r or {}).get("alerta") or "Este bloque ya no vale.", show_alert=True)
+    if (_r or {}).get("quitar_teclado"):
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
 
 async def _borrar_cards_briefing(context, chat_id, jids, encabezado=True):
