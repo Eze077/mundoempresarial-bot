@@ -9355,11 +9355,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         _aprobar_bloque = None
                 jids = [x for x in ids.split("-") if x.strip().isdigit()]
                 if _es_bloque_editor and _aprobar_bloque is None:
-                    try:
-                        await query.answer("Este bloque es del editor y el bot tiene cargada una versión vieja del harness: "
-                                           "reiniciá el bot. No aprobé nada.", show_alert=True)
-                    except Exception:
-                        pass
+                    await _aviso_bloque(query, "Este bloque es del editor y el bot tiene cargada una versión vieja del harness: "
+                                               "reiniciá el bot. No aprobé nada.")
                 elif _aprobar_bloque is not None:
                     try:
                         _res_bl = await asyncio.to_thread(_aprobar_bloque, ids, mask)
@@ -9367,15 +9364,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.warning("aprobar bloque del editor: %s", _e_bl)
                         _res_bl = {"ok": False, "alerta": "No pude aprobar el bloque: probá de nuevo."}
                     if not (_res_bl or {}).get("ok"):
-                        try:   # sin cambios: el teclado queda, salvo que el bloque ya no valga
-                            await query.answer((_res_bl or {}).get("alerta") or "No pude aprobar el bloque.", show_alert=True)
-                        except Exception:
-                            pass
-                        if (_res_bl or {}).get("quitar_teclado"):
-                            try:
+                        # sin cambios en las notas. El teclado: fuera si el bloque ya no vale; repintado con lo guardado si la
+                        # pantalla no coincidía (un repintado que no llegó). Después, el aviso visible.
+                        try:
+                            if (_res_bl or {}).get("quitar_teclado"):
                                 await query.edit_message_reply_markup(reply_markup=None)
-                            except Exception:
-                                pass
+                            elif (_res_bl or {}).get("kb"):
+                                await query.edit_message_reply_markup(reply_markup=_res_bl["kb"])
+                        except Exception as _e_kb:
+                            logger.warning("teclado del bloque del editor: %s", _e_kb)
+                        await _aviso_bloque(query, (_res_bl or {}).get("alerta") or "No pude aprobar el bloque.")
                     else:
                         _apr_bl = [str(x) for x in (_res_bl.get("aprobadas") or [])]
                         if _apr_bl:
@@ -9424,11 +9422,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "h_cur_auto_renew" and arg and not arg.isdigit():
                 # Una máscara que no es solo 0/1 es de un bloque «El editor publicaría» repintado con un curador viejo en memoria
                 # (bot sin reiniciar después de actualizar el harness): «Proponer» rearmaría el briefing con esas notas. No se toca.
-                try:
-                    await query.answer("Este botón es de un bloque del editor: usá «Aprobar marcadas». "
-                                       "Si lo ves, falta reiniciar el bot.", show_alert=True)
-                except Exception:
-                    pass
+                await _aviso_bloque(query, "Este botón es de un bloque del editor: usá «Aprobar marcadas». "
+                                           "Si lo ves, falta reiniciar el bot.")
 
             elif action == "h_cur_auto_renew" and arg is not None:
                 # proponer: conserva las MARCADAS (☑) y reemplaza las sin marcar.
@@ -12995,31 +12990,42 @@ async def _tog_bloque_editor(query, ids, i):
     """Toggle de una casilla de un bloque «🧭 El editor publicaría». La da vuelta el harness EN SU BASE
     (agents.editor_auto.alternar_casilla, en un hilo: la base puede tardar) y se repinta con el teclado que devuelve, armado con
     lo guardado. Si la base falla, no se repinta (lo que se ve sigue siendo lo que vale) y se avisa; si el bloque ya no vale, se
-    avisa y se le saca el teclado; con un harness viejo en memoria, «reiniciá el bot»."""
+    le saca el teclado y después se avisa; con un harness viejo en memoria, «reiniciá el bot». Los avisos, por _aviso_bloque."""
     try:
         from agents import editor_auto as _ea_t
         _alt = getattr(_ea_t, "alternar_casilla", None)
     except Exception:
         _alt = None
     if _alt is None:
-        await query.answer("Este bloque es del editor y el bot tiene cargada una versión vieja del harness: reiniciá el bot.",
-                           show_alert=True)
+        await _aviso_bloque(query, "Este bloque es del editor y el bot tiene cargada una versión vieja del harness: reiniciá el bot.")
         return
     try:
         _r = await asyncio.to_thread(_alt, ids, i)
     except Exception as _e:
         logger.warning("casilla del bloque del editor: %s", _e)
-        await query.answer("No pude marcar la casilla: probá de nuevo.", show_alert=True)
+        await _aviso_bloque(query, "No pude marcar la casilla: probá de nuevo.")
         return
     if (_r or {}).get("ok"):
-        await query.edit_message_reply_markup(reply_markup=_r["kb"])
+        try:
+            await query.edit_message_reply_markup(reply_markup=_r["kb"])
+        except Exception as _e:
+            logger.warning("repintado del bloque del editor: %s", _e)   # quedó guardado: «Aprobar» repinta con lo guardado
         return
-    await query.answer((_r or {}).get("alerta") or "Este bloque ya no vale.", show_alert=True)
     if (_r or {}).get("quitar_teclado"):
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+    await _aviso_bloque(query, (_r or {}).get("alerta") or "Este bloque ya no vale.")
+
+
+async def _aviso_bloque(query, texto):
+    """Aviso de un bloque «🧭 El editor publicaría». handle_button ya contestó la callback al empezar y Telegram acepta UNA
+    respuesta por toque: un query.answer(…, show_alert=True) acá no se vería. Va como mensaje, sin sonido. No lanza."""
+    try:
+        await query.message.reply_text(texto, disable_notification=True)
+    except Exception as _e:
+        logger.warning("aviso del bloque del editor: %s", _e)
 
 
 async def _borrar_cards_briefing(context, chat_id, jids, encabezado=True):
