@@ -9334,6 +9334,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # aprobar marcadas: h_cur_auto_okm:{mask}:{ids}
                 mask = arg
                 ids  = parts[2] if len(parts) >= 3 else ""
+                # «🧭 El editor publicaría» (harness BRIEFING_EDITOR, 24/11): el mismo checklist con la marca del harness al final de
+                # la máscara. Aprueba igual; solo no borra el encabezado del briefing de arriba, que sigue esperando su checklist.
+                _marca_ed = getattr(_cur, "MARCA_EDITOR", None)
+                _es_bloque_editor = bool(_marca_ed) and mask.endswith(_marca_ed)
                 jids = [x for x in ids.split("-") if x.strip().isdigit()]
                 done = 0
                 for idx_j, jid in enumerate(jids):
@@ -9352,7 +9356,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                 if done:
-                    await _borrar_cards_briefing(context, query.message.chat_id, jids)
+                    await _borrar_cards_briefing(context, query.message.chat_id, jids,
+                                                 encabezado=not _es_bloque_editor)
                 try:
                     if done:
                         await query.edit_message_text(
@@ -12926,8 +12931,9 @@ async def cmd_programadas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _borrar_cards_briefing(context, chat_id, jids):
-    """Borra las tarjetas del briefing (card_msg_id) + el encabezado del briefing auto."""
+async def _borrar_cards_briefing(context, chat_id, jids, encabezado=True):
+    """Borra las tarjetas del briefing (card_msg_id) + el encabezado del briefing auto (salvo encabezado=False: lo aprobado
+    viene de un bloque «🧭 El editor publicaría» y el briefing de arriba sigue abierto)."""
     import sqlite3 as _sq, json as _js
     for _jid in jids:
         try:
@@ -12938,6 +12944,8 @@ async def _borrar_cards_briefing(context, chat_id, jids):
                 await context.bot.delete_message(chat_id=chat_id, message_id=_st["card_msg_id"])
         except Exception:
             pass
+    if not encabezado:
+        return
     try:  # encabezado "🤖 Briefing AUTO…" (lo guarda curador.run_briefing_auto)
         _h = _js.load(open("/opt/me-harness/auto_briefing_hdr.json"))
         if _h.get("header_msg_id"):
