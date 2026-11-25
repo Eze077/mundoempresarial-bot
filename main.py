@@ -18497,6 +18497,13 @@ def main():
                             fallback_media=handle_evento_media, pausado=_pausado)
     except Exception as _e_jefe:
         logger.warning(f"directivas al Jefe no registradas: {_e_jefe}")
+    # Criterios del Jefe (Jefe v3, etapa 5, 25/11/2026): botones jcr_ (✅/❌ de los criterios de la semana, 🗑 Retirar) y /criterios.
+    # Los decide el harness (agents/jefe_criterio.py, bandera JEFE_CRITERIO): apagada, contesta «no están activos» y no toca nada.
+    try:
+        import jefe_criterio_bot as _jcr_bot
+        _jcr_bot.registrar(app)
+    except Exception as _e_jcr:
+        logger.warning(f"criterios del Jefe no registrados: {_e_jcr}")
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED, handle_link))
     app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"^/set_frases_base"), cmd_set_frases_base))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
