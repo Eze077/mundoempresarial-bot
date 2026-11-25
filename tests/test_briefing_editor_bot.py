@@ -48,13 +48,31 @@ def test_aprobar_un_bloque_del_editor_no_borra_el_encabezado():
     assert bot.borrados == []
 
 
-def test_el_aprobar_marcadas_reconoce_el_bloque_por_la_marca_del_harness():
-    i = SRC.index('elif action == "h_cur_auto_okm"')
-    tramo = SRC[i:SRC.index('elif action == "h_cur_auto_renew"', i)]
-    assert '_marca_ed = getattr(_cur, "MARCA_EDITOR", None)' in tramo          # sin la constante (harness viejo): como siempre
+def _tramo(desde, hasta):
+    i = SRC.index(desde)
+    return SRC[i:SRC.index(hasta, i + len(desde))]
+
+
+def test_el_aprobar_marcadas_de_un_bloque_lo_resuelve_el_harness():
+    tramo = _tramo('elif action == "h_cur_auto_okm"', 'elif action == "h_cur_auto_renew"')
+    assert '_marca_ed = getattr(_cur, "MARCA_EDITOR", None)' in tramo
     assert "_es_bloque_editor = bool(_marca_ed) and mask.endswith(_marca_ed)" in tramo
-    assert "encabezado=not _es_bloque_editor" in tramo
-    assert tramo.count("_cur.approve(int(jid))") == 1                         # aprueba por el mismo camino, como Leo
+    # el harness decide (aprueba las ☑, descarta las sin marcar, saltea lo viejo): fuera del loop de eventos
+    assert '_aprobar_bloque = getattr(_ea_bl, "aprobar_bloque", None)' in tramo
+    assert "await asyncio.to_thread(_aprobar_bloque, ids, mask)" in tramo
+    assert "encabezado=False" in tramo and "show_alert=True" in tramo
+    # sin aprobar_bloque (harness viejo) o en el checklist de siempre: la recorrida de siempre, por _cur.approve como Leo
+    assert tramo.count("_cur.approve(int(jid))") == 1 and "encabezado=not _es_bloque_editor" in tramo
     # el toggle no cambió: repinta con el teclado que arma el harness (que reconoce la marca)
-    j = SRC.index('elif action == "h_cur_auto_tog"')
-    assert "_cur._checklist_kb(ids, newmask, n)" in SRC[j:i]
+    assert "_cur._checklist_kb(ids, newmask, n)" in _tramo('elif action == "h_cur_auto_tog"', 'elif action == "h_cur_auto_okm"')
+
+
+def test_proponer_no_rearma_el_briefing_con_un_bloque_del_editor():
+    """Bot sin reiniciar con el curador viejo en memoria: el bloque se repinta con «Proponer». La máscara del bloque no es solo
+    0/1, así que ese «Proponer» avisa y no descarta ni rearma nada; el de siempre (solo 0/1) sigue igual."""
+    guardia = 'elif action == "h_cur_auto_renew" and arg and not arg.isdigit():'
+    i, j = SRC.index(guardia), SRC.index('elif action == "h_cur_auto_renew" and arg is not None:')
+    assert i < j                                                               # va antes que el de siempre
+    tramo = SRC[i:j]
+    assert "show_alert=True" in tramo and "reject_job" not in tramo and "run_briefing_auto" not in tramo
+    assert "11111".isdigit() and not "10111e".isdigit()

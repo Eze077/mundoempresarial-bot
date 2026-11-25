@@ -9335,38 +9335,81 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mask = arg
                 ids  = parts[2] if len(parts) >= 3 else ""
                 # «🧭 El editor publicaría» (harness BRIEFING_EDITOR, 24/11): el mismo checklist con la marca del harness al final de
-                # la máscara. Aprueba igual; solo no borra el encabezado del briefing de arriba, que sigue esperando su checklist.
+                # la máscara. Lo resuelve el harness (editor_auto.aprobar_bloque: aprueba las ☑, descarta las sin marcar, saltea
+                # un bloque viejo o reemplazado); el bot muestra el resultado y no borra el encabezado del briefing de arriba.
                 _marca_ed = getattr(_cur, "MARCA_EDITOR", None)
                 _es_bloque_editor = bool(_marca_ed) and mask.endswith(_marca_ed)
+                _aprobar_bloque = None
+                if _es_bloque_editor:
+                    try:
+                        from agents import editor_auto as _ea_bl
+                        _aprobar_bloque = getattr(_ea_bl, "aprobar_bloque", None)
+                    except Exception:
+                        _aprobar_bloque = None
                 jids = [x for x in ids.split("-") if x.strip().isdigit()]
-                done = 0
-                for idx_j, jid in enumerate(jids):
-                    if idx_j < len(mask) and mask[idx_j] == "1":
-                        try:
-                            jb = _br.get_job(int(jid))
-                            if jb and jb.get("stage") == "curado" and _cur.approve(int(jid)):
-                                done += 1
+                if _aprobar_bloque is not None:
+                    try:
+                        _res_bl = await asyncio.to_thread(_aprobar_bloque, ids, mask)
+                    except Exception as _e_bl:
+                        logger.warning("aprobar bloque del editor: %s", _e_bl)
+                        _res_bl = {"ok": False, "alerta": "No pude aprobar el bloque: probá de nuevo."}
+                    if not (_res_bl or {}).get("ok"):
+                        try:   # sin cambios: el teclado queda (marcar de nuevo, o el bloque ya no vale)
+                            await query.answer((_res_bl or {}).get("alerta") or "No pude aprobar el bloque.", show_alert=True)
                         except Exception:
                             pass
-                if done:
+                    else:
+                        _apr_bl = [str(x) for x in (_res_bl.get("aprobadas") or [])]
+                        if _apr_bl:
+                            try:
+                                from agents import cola as _cola_a
+                                import threading as _thr
+                                _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                            except Exception:
+                                pass
+                            await _borrar_cards_briefing(context, query.message.chat_id, _apr_bl, encabezado=False)
+                        try:
+                            await query.edit_message_text(_res_bl.get("texto") or "✅ Listo.", parse_mode="HTML")
+                        except Exception:
+                            pass
+                else:
+                    done = 0
+                    for idx_j, jid in enumerate(jids):
+                        if idx_j < len(mask) and mask[idx_j] == "1":
+                            try:
+                                jb = _br.get_job(int(jid))
+                                if jb and jb.get("stage") == "curado" and _cur.approve(int(jid)):
+                                    done += 1
+                            except Exception:
+                                pass
+                    if done:
+                        try:
+                            from agents import cola as _cola_a
+                            import threading as _thr
+                            _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                        except Exception:
+                            pass
+                    if done:
+                        await _borrar_cards_briefing(context, query.message.chat_id, jids,
+                                                     encabezado=not _es_bloque_editor)
                     try:
-                        from agents import cola as _cola_a
-                        import threading as _thr
-                        _thr.Thread(target=_cola_a.run_once, daemon=True).start()
+                        if done:
+                            await query.edit_message_text(
+                                f"✅ <b>{done} nota(s) aprobadas</b> → cola de redacción.",
+                                parse_mode="HTML")
+                        else:
+                            # 0 marcadas: avisar SIN borrar el teclado (si no, Leo no puede marcar)
+                            await query.answer("No marcaste ninguna. Tocá ☐ para marcar y reintentá.",
+                                               show_alert=True)
                     except Exception:
                         pass
-                if done:
-                    await _borrar_cards_briefing(context, query.message.chat_id, jids,
-                                                 encabezado=not _es_bloque_editor)
+
+            elif action == "h_cur_auto_renew" and arg and not arg.isdigit():
+                # Una máscara que no es solo 0/1 es de un bloque «El editor publicaría» repintado con un curador viejo en memoria
+                # (bot sin reiniciar después de actualizar el harness): «Proponer» rearmaría el briefing con esas notas. No se toca.
                 try:
-                    if done:
-                        await query.edit_message_text(
-                            f"✅ <b>{done} nota(s) aprobadas</b> → cola de redacción.",
-                            parse_mode="HTML")
-                    else:
-                        # 0 marcadas: avisar SIN borrar el teclado (si no, Leo no puede marcar)
-                        await query.answer("No marcaste ninguna. Tocá ☐ para marcar y reintentá.",
-                                           show_alert=True)
+                    await query.answer("Este botón es de un bloque del editor: usá «Aprobar marcadas». "
+                                       "Si lo ves, falta reiniciar el bot.", show_alert=True)
                 except Exception:
                     pass
 
