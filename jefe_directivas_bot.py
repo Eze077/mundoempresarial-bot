@@ -23,6 +23,10 @@ Audios: fuera de la reunión el bot no transcribía ningún audio suelto (handle
 que acá se transcribe UNA vez con el mismo `_whisper_from_file` y, si no es para el Jefe, el audio sigue su camino sin haberlo
 molestado (con Leo fuera de otro flujo, ese camino no hace nada).
 
+Jefe v3 (25/11/2026): los botones del tablero fijo del Jefe (`jen_ver`, `jen_fr`, `jen_re`) entran por `hacer_handler_tablero` y los
+resuelve el harness (agents/jefe_encargos.boton). El tablero lo manda y lo edita el harness (bandera JEFE_TABLERO, apagada por
+defecto): sin tablero, ningún mensaje lleva esos botones.
+
 El estado vive en harness.db (tabla jefe_directivas): un reinicio del bot no corta nada. Sin claves ni datos personales: repo público.
 """
 import asyncio
@@ -67,6 +71,11 @@ class _Harness:
             sys.path.insert(0, HARNESS_DIR)
         from agents import jefe_directivas
         self.dir = jefe_directivas
+        try:                                    # Jefe v3 (25/11/2026): el tablero; un harness anterior no lo tiene
+            from agents import jefe_encargos
+            self.encargos = jefe_encargos
+        except Exception:
+            self.encargos = None
 
 
 _H = None
@@ -319,6 +328,55 @@ def hacer_handler_boton():
     return handle
 
 
+async def _contestar(q, texto=None):
+    """query.answer sin explotar (Telegram deja contestar una sola vez y un callback viejo ya no se puede contestar)."""
+    try:
+        await q.answer((texto or "")[:190] or None)
+    except Exception as e:
+        logger.debug("tablero: answer: %s", e)
+
+
+def hacer_handler_tablero():
+    """Botones del tablero fijo del Jefe v3 (harness agents/jefe_encargos.boton): `jen_ver:<id>` 👉 Ver, `jen_fr:<id>` ⛔ Frenar y
+    `jen_re:<id>` 🔁 Reintentar. Lo que hacen lo decide el harness, por los caminos que ya existen (jfd_no, jfd_un, el «⛔ Frenar» de
+    la nota, el Jefe otra vez). Si el harness devuelve `nuevo`, el mensaje del Jefe sale aparte SIN sonido y queda registrado como
+    suyo (un reply le sigue hablando al Jefe); si devuelve `editar`, se repinta el tablero en el mismo mensaje (nunca suena).
+    Con JEFE_TABLERO apagada en el harness, contesta eso y no toca nada."""
+    async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        data = q.data or ""
+        enc = getattr(harness(), "encargos", None)
+        if enc is None:
+            await _contestar(q, "El tablero del Jefe no está en este harness.")
+            return
+        try:
+            res = await asyncio.wait_for(asyncio.to_thread(enc.boton, data), PLAZO_BOTON_S)
+        except asyncio.TimeoutError:
+            await _contestar(q, "Está tardando: sigue en segundo plano.")
+            return
+        except Exception as e:
+            logger.exception("tablero del Jefe %s: %s", data, e)
+            await _contestar(q, "No pude resolver el botón (%s). No toqué nada." % str(e)[:80])
+            return
+        await _contestar(q, res.get("toast"))
+        if not res.get("ok") or not res.get("texto"):
+            return
+        if res.get("nuevo"):
+            pedazos = _AB.partir(res["texto"])
+            for i, t in enumerate(pedazos):
+                sent = await q.message.reply_text(t, parse_mode="HTML", reply_markup=res.get("botones") if i == len(pedazos) - 1 else None,
+                                                  disable_web_page_preview=True, disable_notification=True)
+                _registrar(sent, res)
+            return
+        if res.get("editar"):
+            try:
+                await q.edit_message_text(res["texto"][:_AB.LIMITE_TG], parse_mode="HTML", reply_markup=res.get("botones"),
+                                          disable_web_page_preview=True)
+            except Exception as e:      # «message is not modified»: el tablero ya decía eso
+                logger.debug("tablero: editar: %s", e)
+    return handle
+
+
 def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None):
     """Registra los handlers. Llamar DESPUÉS de registrar agenda_reunion_bot y ANTES de `handle_link` y `handle_evento_media`:
     dentro de un mismo grupo gana el primero que coincide, y estos solo coinciden con lo que es para el Jefe."""
@@ -329,4 +387,6 @@ def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None)
                                    hacer_handler_texto(fallback_texto, pausado)))
     app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.UpdateType.EDITED & privado & FiltroVoz(),
                                    hacer_handler_voz(transcribir, fallback_media, pausado)))
+    # Jefe v3 (25/11/2026): los botones del tablero fijo. Sin tablero en el harness (JEFE_TABLERO apagada) ningún mensaje los lleva.
+    app.add_handler(CallbackQueryHandler(hacer_handler_tablero(), pattern=r"^jen_(ver|fr|re):\d+$"))
     logger.info("directivas al Jefe registradas (JEFE_DIRECTIVAS=%s)", modo())

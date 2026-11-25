@@ -376,6 +376,62 @@ def test_un_error_del_boton_no_toca_nada_y_se_dice(h):
     assert "No toqué nada" in q.message.respuestas[0][0]
 
 
+# ── Jefe v3: botones del tablero fijo ─────────────────────────────────────────
+
+class FakeEncargos:
+    def __init__(self, resp):
+        self.resp, self.llamadas = resp, []
+
+    def boton(self, data, db=None, ahora=None):
+        self.llamadas.append(data)
+        return self.resp
+
+
+def test_tablero_ver_manda_el_mensaje_del_jefe_aparte_sin_sonido_y_lo_registra(h):
+    h.encargos = FakeEncargos({"ok": True, "toast": "Te lo mando abajo", "nuevo": True, "texto": "🧑‍💼 <b>Jefe</b> · directiva 7",
+                               "botones": {"inline_keyboard": [[{"text": "✅", "callback_data": "jfd_si:7:0:0"}]]}, "directiva_id": 7})
+    q = Query("jen_ver:3")
+    run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
+    assert h.encargos.llamadas == ["jen_ver:3"] and q.contestado == [("Te lo mando abajo", False)]
+    texto, kw = q.message.respuestas[0]
+    assert texto.startswith("🧑‍💼") and kw["disable_notification"] is True and kw["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "jfd_si:7:0:0"
+    assert h.dir.registrados and h.dir.registrados[0][1] == 7 and q.editado is None
+
+
+def test_tablero_frenar_repinta_el_mismo_mensaje(h):
+    h.encargos = FakeEncargos({"ok": True, "toast": "No sale", "editar": True, "texto": "🧭 <b>Tablero del Jefe</b>", "botones": None})
+    q = Query("jen_fr:3")
+    run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
+    assert q.editado[0] == "🧭 <b>Tablero del Jefe</b>" and q.editado[1]["parse_mode"] == "HTML" and not q.message.respuestas
+
+
+def test_tablero_con_un_harness_sin_encargos_o_que_falla_no_toca_nada(h):
+    q = Query("jen_fr:3")
+    run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
+    assert q.contestado[0][0] == "El tablero del Jefe no está en este harness." and q.editado is None
+    class Roto:
+        def boton(self, data):
+            raise RuntimeError("base caída")
+    h.encargos = Roto()
+    q = Query("jen_re:3")
+    run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
+    assert "No toqué nada" in q.contestado[0][0] and not q.message.respuestas and q.editado is None
+
+
+def test_el_patron_del_tablero_solo_toma_sus_botones(h):
+    from telegram.ext import Application
+    app = Application.builder().token("123456:ABC-fake-token-for-tests").build()
+    fb, _ = _fb()
+    B.registrar(app, transcribir=lambda p, c: "", fallback_texto=fb, fallback_media=fb)
+    tab = app.handlers[0][-1]
+    from telegram import Update
+    def cb(data):
+        return Update.de_json({"update_id": 1, "callback_query": {"id": "1", "chat_instance": "1", "data": data,
+                                                                    "from": {"id": 1, "is_bot": False, "first_name": "L"}}}, None)
+    assert tab.check_update(cb("jen_ver:12")) and tab.check_update(cb("jen_fr:1")) and tab.check_update(cb("jen_re:9"))
+    assert not tab.check_update(cb("jen_borrar:1")) and not tab.check_update(cb("jfd_si:1:0")) and not tab.check_update(cb("jen_fr:1:2"))
+
+
 # ── registro: orden y filtros reales ──────────────────────────────────────────
 
 def _upd_json(**kw):
@@ -391,7 +447,7 @@ def test_los_handlers_registrados_son_del_chat_privado_y_van_antes_que_handle_li
     fb, _ = _fb()
     B.registrar(app, transcribir=lambda p, c: "", fallback_texto=fb, fallback_media=fb)
     hs = app.handlers[0]
-    assert [type(x) for x in hs] == [CommandHandler, CallbackQueryHandler, MessageHandler, MessageHandler]
+    assert [type(x) for x in hs] == [CommandHandler, CallbackQueryHandler, MessageHandler, MessageHandler, CallbackQueryHandler]
     texto_h, voz_h = hs[2], hs[3]
     assert texto_h.check_update(_upd_json(text="Jefe, hoy nada de Milei"))
     assert not texto_h.check_update(_upd_json(text="hola"))
