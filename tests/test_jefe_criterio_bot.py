@@ -143,3 +143,33 @@ def test_integracion_con_el_harness_real(tmp_path, monkeypatch):
     assert "Política fuera de la capa 2" in m.respuestas[0][0]
     for k in [k for k in sys.modules if k == "agents" or k.startswith("agents.") or k == "core" or k.startswith("core.")]:
         monkeypatch.delitem(sys.modules, k)
+
+
+# ── revisión adversarial (25/11, ⚪5): /criterios con muchos vigentes pasa los 4000 y un corte a lo bruto rompe el HTML ──
+
+def _lista_larga(n=45, largo=75):
+    L = ["🧠 <b>Criterios vigentes del Jefe</b> (%d)" % n, ""]
+    for i in range(n):
+        L.append("<b>#%d</b> Criterio %02d %s · <i>curador</i> · desde el 23/11" % (i, i, "y" * largo))
+    return "\n".join(L)
+
+
+@pytest.mark.parametrize("largo", list(range(60, 90, 3)))
+def test_rev5_criterios_largo_sale_en_pedazos_con_el_html_entero(largo):
+    texto = _lista_larga(largo=largo)
+    assert len(texto) > 4000
+    kb = {"inline_keyboard": [[{"text": "🗑 Retirar #1", "callback_data": "jcr_rtl:1"}]]}
+    m = Msg()
+    mod = types.SimpleNamespace(lista_vigentes=lambda: {"ok": True, "texto": texto, "botones": kb})
+    asyncio.run(B.hacer_cmd_criterios(lambda: mod)(types.SimpleNamespace(message=m), None))
+    assert len(m.respuestas) >= 2 and "\n".join(t for t, _ in m.respuestas) == texto        # no se pierde nada
+    for t, kw in m.respuestas:
+        assert len(t) <= 4000 and t.count("<b>") == t.count("</b>") and t.count("<i>") == t.count("</i>")
+    assert [kw["reply_markup"] for _t, kw in m.respuestas] == [None] * (len(m.respuestas) - 1) + [kb]   # botones en el último
+
+
+def test_rev5_un_boton_con_un_repintado_largo_tambien_va_en_pedazos():
+    texto = _lista_larga()
+    q = Q("jcr_rtl:3")
+    _boton(q, types.SimpleNamespace(boton=lambda d: {"ok": True, "texto": texto, "botones": None, "toast": "🗑 Retirado"}))
+    assert q.editado is None and len(q.message.respuestas) >= 2 and all(len(t) <= 4000 for t, _ in q.message.respuestas)

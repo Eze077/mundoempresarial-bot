@@ -30,6 +30,21 @@ PLAZO_S = 30                   # todo es local (sqlite): si tarda más, algo and
 LIMITE_TG = 4000
 
 
+def partir(texto, n=LIMITE_TG) -> list:
+    """Pedazos de hasta `n` caracteres cortando en saltos de línea (los tags HTML del harness no cruzan líneas), como
+    agenda_reunion_bot.partir: un corte a lo bruto puede dejar «<i>cura» abierto y Telegram rechaza el mensaje entero."""
+    import agenda_reunion_bot as _AB          # el mismo corte que usan las respuestas del Jefe (jefe_directivas_bot)
+    return _AB.partir(texto, n)
+
+
+async def _mandar(message, texto, botones):
+    """Uno o más mensajes (los botones van en el último pedazo)."""
+    pedazos = partir(texto or "")
+    for i, t in enumerate(pedazos):
+        await message.reply_text(t, parse_mode="HTML", reply_markup=botones if i == len(pedazos) - 1 else None,
+                                 disable_web_page_preview=True)
+
+
 def cargar():
     """El módulo del harness (inyectable en las pruebas)."""
     if HARNESS_DIR not in sys.path:
@@ -71,7 +86,7 @@ def hacer_handler_boton(cargar_fn=None):
                 return
             except Exception as e:      # «message is not modified» u otro: se manda aparte
                 logger.debug("jcr editar: %s", e)
-        await q.message.reply_text(texto[:LIMITE_TG], parse_mode="HTML", reply_markup=r.get("botones"), disable_web_page_preview=True)
+        await _mandar(q.message, texto, r.get("botones"))
     return handle
 
 
@@ -88,8 +103,7 @@ def hacer_cmd_criterios(cargar_fn=None):
         if not r.get("ok"):
             await m.reply_text(r.get("toast") or "Los criterios del Jefe no están activos.")
             return
-        await m.reply_text((r.get("texto") or "")[:LIMITE_TG], parse_mode="HTML", reply_markup=r.get("botones"),
-                           disable_web_page_preview=True)
+        await _mandar(m, r.get("texto") or "", r.get("botones"))
     return cmd
 
 
