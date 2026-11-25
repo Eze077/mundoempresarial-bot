@@ -392,7 +392,7 @@ def test_tablero_ver_manda_el_mensaje_del_jefe_aparte_sin_sonido_y_lo_registra(h
                                "botones": {"inline_keyboard": [[{"text": "✅", "callback_data": "jfd_si:7:0:0"}]]}, "directiva_id": 7})
     q = Query("jen_ver:3")
     run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
-    assert h.encargos.llamadas == ["jen_ver:3"] and q.contestado == [("Te lo mando abajo", False)]
+    assert h.encargos.llamadas == ["jen_ver:3"] and q.contestado == [(None, False)]          # se contesta antes de trabajar
     texto, kw = q.message.respuestas[0]
     assert texto.startswith("🧑‍💼") and kw["disable_notification"] is True and kw["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "jfd_si:7:0:0"
     assert h.dir.registrados and h.dir.registrados[0][1] == 7 and q.editado is None
@@ -415,7 +415,30 @@ def test_tablero_con_un_harness_sin_encargos_o_que_falla_no_toca_nada(h):
     h.encargos = Roto()
     q = Query("jen_re:3")
     run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
-    assert "No toqué nada" in q.contestado[0][0] and not q.message.respuestas and q.editado is None
+    assert q.contestado == [(None, False)] and q.editado is None
+    texto, kw = q.message.respuestas[0]
+    assert "No toqué nada" in texto and kw["disable_notification"] is True
+
+
+def test_tablero_contesta_antes_de_trabajar_y_lo_que_no_pudo_lo_dice_sin_sonido(h):
+    orden = []
+
+    class Lento:
+        def boton(self, data):
+            orden.append("harness")
+            return {"ok": False, "toast": "Ya lo estoy reintentando."}
+    h.encargos = Lento()
+    q = Query("jen_re:3")
+    original = q.answer
+
+    async def answer(texto=None, show_alert=False):
+        orden.append("answer")
+        await original(texto, show_alert)
+    q.answer = answer
+    run(B.hacer_handler_tablero()(Upd(query=q), Ctx()))
+    assert orden == ["answer", "harness"]
+    texto, kw = q.message.respuestas[0]
+    assert texto == "Ya lo estoy reintentando." and kw["disable_notification"] is True
 
 
 def test_el_patron_del_tablero_solo_toma_sus_botones(h):

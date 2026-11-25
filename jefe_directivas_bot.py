@@ -336,12 +336,21 @@ async def _contestar(q, texto=None):
         logger.debug("tablero: answer: %s", e)
 
 
+async def _avisar(q, texto):
+    """Lo que no se pudo hacer desde el tablero, en un mensaje aparte SIN sonido (el callback ya se contestó)."""
+    try:
+        await q.message.reply_text(texto, disable_notification=True)
+    except Exception as e:
+        logger.debug("tablero: aviso: %s", e)
+
+
 def hacer_handler_tablero():
     """Botones del tablero fijo del Jefe v3 (harness agents/jefe_encargos.boton): `jen_ver:<id>` 👉 Ver, `jen_fr:<id>` ⛔ Frenar y
     `jen_re:<id>` 🔁 Reintentar. Lo que hacen lo decide el harness, por los caminos que ya existen (jfd_no, jfd_un, el «⛔ Frenar» de
     la nota, el Jefe otra vez). Si el harness devuelve `nuevo`, el mensaje del Jefe sale aparte SIN sonido y queda registrado como
     suyo (un reply le sigue hablando al Jefe); si devuelve `editar`, se repinta el tablero en el mismo mensaje (nunca suena).
-    Con JEFE_TABLERO apagada en el harness, contesta eso y no toca nada."""
+    El callback se contesta ANTES de trabajar (un segundo toque no queda colgado y el harness tiene su candado); lo que no se
+    pudo hacer se dice en un mensaje aparte sin sonido. Con JEFE_TABLERO apagada en el harness, lo dice y no toca nada."""
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
         data = q.data or ""
@@ -349,17 +358,19 @@ def hacer_handler_tablero():
         if enc is None:
             await _contestar(q, "El tablero del Jefe no está en este harness.")
             return
+        await _contestar(q)
         try:
             res = await asyncio.wait_for(asyncio.to_thread(enc.boton, data), PLAZO_BOTON_S)
         except asyncio.TimeoutError:
-            await _contestar(q, "Está tardando: sigue en segundo plano.")
+            await _avisar(q, "⏱ Está tardando más de %d s. Sigue en segundo plano." % PLAZO_BOTON_S)
             return
         except Exception as e:
             logger.exception("tablero del Jefe %s: %s", data, e)
-            await _contestar(q, "No pude resolver el botón (%s). No toqué nada." % str(e)[:80])
+            await _avisar(q, "⚠️ No pude resolver el botón (%s). No toqué nada." % str(e)[:80])
             return
-        await _contestar(q, res.get("toast"))
         if not res.get("ok") or not res.get("texto"):
+            if res.get("toast"):
+                await _avisar(q, res["toast"])
             return
         if res.get("nuevo"):
             pedazos = _AB.partir(res["texto"])
