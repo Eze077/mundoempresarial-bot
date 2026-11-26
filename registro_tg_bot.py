@@ -20,6 +20,15 @@ Mismas garantías que el gancho del harness: solo encola (tg_registro no toca la
 tira al bot (todo va en try/except y devuelve lo mismo que habría devuelto PTB), y con la bandera GUARDIA apagada no hace
 nada. Si el harness no está o no tiene core/tg_registro.py, el bot sigue igual: no se anota nada.
 Sin claves ni datos personales: el repo del bot es público.
+
+Silencio real (Jefe v3, etapa 3a, v1.1 · 26/11/2026; Leo: «silenciá el bot»): con JEFE_SILENCIO (y GUARDIA) prendidas en el env del
+bot, `RequestConRegistro.do_request` le pregunta al harness (core/silencio.puerta_bot) por cada envío NUEVO al chat de Leo: lo
+que sale hasta 60 s después de un botón, un mensaje o un comando de Leo va sin sonido (disable_notification), salvo lo que el
+criterio del Jefe dice que siempre suena (core/entrega.siempre_sonido), que va con sonido y con el rótulo «🔴 IMPORTANTE» como
+primera línea. Fuera de esa ventana, como hoy. El cambio del pedido usa la API interna de PTB 21.6 (RequestData/RequestParameter)
+y vive aislado en `con_cambios`, que se verifica a sí mismo: si algo no da, sale el pedido original. Si Telegram rechaza con un
+400 el pedido cambiado, sale el original. Con la bandera en 0, o un harness viejo sin core/silencio.puerta_bot, byte a byte
+como antes.
 """
 import json
 import logging
@@ -31,8 +40,8 @@ from telegram.request import HTTPXRequest
 
 logger = logging.getLogger("registro_tg_bot")
 
-VERSION = "v1.0"
-FECHA_VERSION = "22/11/2026"
+VERSION = "v1.1"
+FECHA_VERSION = "26/11/2026"
 HARNESS_DIR = os.environ.get("HARNESS_DIR", "/opt/me-harness")
 _RE_TOKEN_URL = re.compile(r"/bot([^/]+)/")
 
@@ -78,16 +87,71 @@ def _anotar(url, request_data, respuesta=None, error=None):
         pass
 
 
+def _silencio():
+    """core.silencio del harness si tiene la puerta del bot (etapa 3a), o None (un harness viejo: el bot sale como siempre)."""
+    try:
+        if _registro() is None:
+            return None
+        from core import silencio
+        return silencio if callable(getattr(silencio, "puerta_bot", None)) else None
+    except Exception:
+        return None
+
+
+def con_cambios(request_data, cambios):
+    """Un RequestData NUEVO con los parámetros de `request_data` y `cambios` ({nombre: valor}) encima, o None si no se pudo armar
+    igual (entonces sale el original). Es la única parte que usa la API interna de python-telegram-bot 21.6 (RequestData(...) y
+    RequestParameter.from_input): por eso se verifica a sí mismo antes de devolver. Nunca toca el original. Nunca lanza."""
+    try:
+        if request_data is None or not cambios:
+            return None
+        from telegram.request import RequestData
+        from telegram.request._requestparameter import RequestParameter
+        viejos = list(request_data._parameters)
+        nuevos = [x for x in viejos if x.name not in cambios] + [RequestParameter.from_input(k, v) for k, v in cambios.items()]
+        nueva = RequestData(nuevos)
+        esperado = dict(request_data.parameters)
+        esperado.update(cambios)
+        if nueva.parameters != esperado or nueva.contains_files != request_data.contains_files:
+            return None
+        return nueva
+    except Exception:
+        return None
+
+
+def _cambiado(url, request_data):
+    """El pedido con lo que pide la puerta del silencio (sin sonido o con el rótulo), o el MISMO objeto si sale como hoy."""
+    try:
+        if request_data is None:
+            return request_data
+        s = _silencio()
+        if s is None:
+            return request_data
+        u = str(url or "")
+        m = _RE_TOKEN_URL.search(u)
+        cambios = s.puerta_bot(u.rstrip("/").rsplit("/", 1)[-1], m.group(1) if m else "", dict(request_data.parameters))
+        if not cambios:
+            return request_data
+        return con_cambios(request_data, cambios) or request_data
+    except Exception:
+        return request_data
+
+
 class RequestConRegistro(HTTPXRequest):
-    """HTTPXRequest que, además, anota en tg_registro lo que manda el bot (ver arriba). El pedido es el mismo."""
+    """HTTPXRequest que, además, anota en tg_registro lo que manda el bot (ver arriba) y, con JEFE_SILENCIO, silencia lo que
+    responde a Leo (ver arriba). Con la bandera en 0, el pedido es el mismo."""
 
     async def do_request(self, url, method, request_data=None, **kw):
+        enviar = _cambiado(url, request_data)
         try:
-            res = await super().do_request(url, method, request_data=request_data, **kw)
+            res = await super().do_request(url, method, request_data=enviar, **kw)
+            if enviar is not request_data and res and res[0] == 400:
+                enviar = request_data                      # Telegram no aceptó lo cambiado: sale el original, tal cual
+                res = await super().do_request(url, method, request_data=enviar, **kw)
         except Exception as e:
-            _anotar(url, request_data, error=e)
+            _anotar(url, enviar, error=e)
             raise
-        _anotar(url, request_data, respuesta=res)
+        _anotar(url, enviar, respuesta=res)
         return res
 
 
