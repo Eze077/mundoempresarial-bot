@@ -23,10 +23,12 @@ Sin claves ni datos personales: el repo del bot es público.
 
 Silencio real (Jefe v3, etapa 3a, v1.1 · 26/11/2026; Leo: «silenciá el bot»): con JEFE_SILENCIO (y GUARDIA) prendidas en el env del
 bot, `RequestConRegistro.do_request` le pregunta al harness (core/silencio.puerta_bot) por cada envío NUEVO al chat de Leo: lo
-que sale hasta 60 s después de un botón, un mensaje o un comando de Leo va sin sonido (disable_notification), salvo lo que el
+que sale a su chat privado hasta 60 s después de un botón, un mensaje o un comando de Leo EN ESE CHAT (un grupo no cuenta) va
+sin sonido (disable_notification), salvo lo que el
 criterio del Jefe dice que siempre suena (core/entrega.siempre_sonido), que va con sonido y con el rótulo «🔴 IMPORTANTE» como
 primera línea. Fuera de esa ventana, como hoy. El cambio del pedido usa la API interna de PTB 21.6 (RequestData/RequestParameter)
-y vive aislado en `con_cambios`, que se verifica a sí mismo: si algo no da, sale el pedido original. Si Telegram rechaza con un
+y vive aislado en `con_cambios`, que se verifica a sí mismo: si algo no da, sale el pedido original. La puerta no abre
+la base desde el event loop (usa solo lo que el harness ya tiene en memoria). Si Telegram rechaza con un
 400 el pedido cambiado, sale el original. Con la bandera en 0, o un harness viejo sin core/silencio.puerta_bot, byte a byte
 como antes.
 """

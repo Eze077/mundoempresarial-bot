@@ -202,3 +202,18 @@ def test_un_harness_viejo_o_ninguno_sale_como_hoy(harness, monkeypatch):
         m.setattr(R, "_registro", lambda: None)
         assert R._silencio() is None
         assert _mandar(_dos) == hoy
+
+
+def test_la_ventana_es_por_chat_solo_el_privado_de_leo(harness, monkeypatch):
+    """Solo cuenta lo que Leo hizo en SU chat privado (ADMIN_CHAT_ID), y solo se calla lo que va a ese mismo chat."""
+    tr, _s = harness
+    monkeypatch.setattr(tr, "ultimo_leo", None)
+    tr.anotar_entrante("callback", chat_id=999, prefijo="h_cur_ok")                  # un grupo u otro chat: no abre la ventana
+    assert not any("disable_notification" in c for _m, c in _mandar(_dos))
+    tr.anotar_entrante("callback", chat_id=ADMIN, prefijo="h_cur_ok")                # en su chat: sí
+    vistos = _mandar(_dos)
+    assert _json(vistos[0][1]).get("disable_notification") is True
+
+    async def a_otro(bot):
+        await bot.send_message(chat_id=999, text="✅ listo")
+    assert not any("disable_notification" in c for _m, c in _mandar(a_otro))         # a otro chat: como hoy
