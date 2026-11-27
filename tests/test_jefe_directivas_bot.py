@@ -604,3 +604,22 @@ def test_main_registra_la_foto_para_el_jefe_antes_que_handle_photo_message(h):
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
     assert "fallback_foto=handle_photo_message" in src
     assert src.index("_jefe_bot.registrar(") < src.index("app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))")
+
+
+def test_un_boton_que_tarda_de_mas_manda_igual_el_mensaje_con_sus_botones(h, monkeypatch):
+    # revisión 2: si «✅ Esa» tarda buscando fotos, el mensaje con «✅ Poner esta» llega igual, aparte y registrado
+    import time
+    monkeypatch.setattr(B, "PLAZO_BOTON_S", 0.05)
+    h.dir.boton_resp = {"ok": True, "toast": "Listo", "texto": "<b>Fotos</b>", "editar": True, "directiva_id": 7,
+                        "botones": {"inline_keyboard": [[{"text": "✅ Poner esta", "callback_data": "jfd_pf:7:0:0"}]]}}
+    h.dir.boton = lambda data, **k: time.sleep(0.3) or h.dir.boton_resp
+    q = Query("jfd_nt:7:0:1")
+
+    async def todo():
+        await B.hacer_handler_boton()(Upd(query=q), Ctx())
+        assert "Está tardando" in q.message.respuestas[0][0]
+        await asyncio.gather(*list(AB._TAREAS))
+    run(todo())
+    texto, kw = q.message.respuestas[1]
+    assert texto == "<b>Fotos</b>" and kw["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "jfd_pf:7:0:0"
+    assert (q.message.respuestas and h.dir.registrados)

@@ -217,12 +217,13 @@ async def _contestar_res(message, res) -> bool:
     return True
 
 
-def _tarde(message, fut):
-    """La respuesta del Jefe que llegó después del tope de espera: se manda igual, con sus botones (como _AB._TAREAS)."""
+def _tarde(message, fut, contestar=None):
+    """La respuesta del Jefe que llegó después del tope de espera: se manda igual, con sus botones (como _AB._TAREAS).
+    `contestar(message, res)`: cómo se manda (por defecto, la respuesta de un mensaje; los botones pasan la suya)."""
     async def tarea():
         try:
             res = await fut
-            await _contestar_res(message, res)
+            await (contestar or _contestar_res)(message, res)
         except Exception as e:
             logger.warning("respuesta tardía del Jefe: %s", e)
             try:
@@ -390,10 +391,14 @@ def hacer_handler_boton():
             await q.answer("Las directivas al Jefe no están activas.", show_alert=False)
             return
         await q.answer()
+        fut = asyncio.ensure_future(asyncio.to_thread(harness().dir.boton, data))
         try:
-            res = await asyncio.wait_for(asyncio.to_thread(harness().dir.boton, data), PLAZO_BOTON_S)
+            res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_BOTON_S)
         except asyncio.TimeoutError:
-            await q.message.reply_text("⏱ Está tardando más de %d s. Sigue en segundo plano; si llega, te lo mando aparte." % PLAZO_BOTON_S)
+            # revisión 2 (27/11): como en procesar, la respuesta llega igual cuando termina, en un mensaje aparte y con sus
+            # botones (si «✅ Esa» tarda buscando fotos, el «✅ Poner esta» no se pierde)
+            await q.message.reply_text("⏱ Está tardando más de %d s. Sigue trabajando: te lo mando acá cuando termine." % PLAZO_BOTON_S)
+            _tarde(q.message, fut, _contestar_boton_tarde)
             return
         except Exception as e:
             logger.exception("botón del Jefe %s: %s", data, e)
@@ -413,6 +418,14 @@ def hacer_handler_boton():
                 logger.debug("editar: %s", e)
         await responder(q.message, res)
     return handle
+
+
+async def _contestar_boton_tarde(message, res) -> None:
+    """La respuesta tardía de un botón: el mensaje nuevo con sus botones (el original puede haber cambiado), o el aviso."""
+    if res.get("ok") and res.get("texto"):
+        await responder(message, res)
+    elif res.get("toast"):
+        await message.reply_text(res["toast"])
 
 
 async def _contestar(q, texto=None):
