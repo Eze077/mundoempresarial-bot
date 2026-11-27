@@ -519,3 +519,81 @@ def test_integracion_con_el_harness_real_reinicio_incluido(tmp_path, monkeypatch
     fecha = A.fecha_de()
     assert [(i["tema"], i["estado"]) for i in A.listar_items(fecha, db=db)] == [("reforma laboral", "vetado")] or         [i["estado"] for i in A.listar_items(fecha, db=db)] == ["vetado"]
     B.set_harness(None)
+
+
+# ── 27/11/2026: la foto con epígrafe «Jefe, …» y el tope de tiempo ─────────────
+
+class Foto:
+    file_unique_id = "u27"
+
+    def __init__(self, contenido=b"\xff\xd8jpeg"):
+        self.contenido = contenido
+
+    async def get_file(self, **kw):
+        foto = self
+
+        class F:
+            async def download_to_drive(self, path):
+                with open(path, "wb") as f:
+                    f.write(foto.contenido)
+        return F()
+
+
+def _msg_foto(caption, reply_a=None):
+    m = Msg(None, reply_a=reply_a)
+    m.caption, m.photo = caption, [Foto(b"chica"), Foto()]
+    return m
+
+
+def test_una_foto_con_epigrafe_jefe_va_al_jefe_con_la_foto_y_el_temporal_se_borra(h):
+    vistos = []
+
+    def procesar(texto, tipo="texto", canal="jefe", foto=None, **kw):
+        vistos.append((texto, canal, foto, open(foto, "rb").read()))
+        return h.dir.resp
+    h.dir.procesar = procesar
+    fb, fbs = _fb()
+    m = _msg_foto("Jefe, poné esta foto en https://mundoempresarial.ar/senado-emergencia-pyme/")
+    assert B.FiltroFoto().filter(m) is True
+    run(B.hacer_handler_foto(fb)(Upd(m), Ctx()))
+    (texto, canal, foto, contenido), = vistos
+    assert texto.startswith("Jefe, poné esta foto") and canal == "jefe" and contenido == b"\xff\xd8jpeg"   # la más grande
+    assert not os.path.exists(foto) and fbs == [] and len(m.respuestas) == 1
+
+
+def test_una_foto_sin_epigrafe_para_el_jefe_sigue_su_camino(h):
+    assert B.FiltroFoto().filter(_msg_foto(None)) is False
+    assert B.FiltroFoto().filter(_msg_foto("la portada del evento")) is False
+    assert B.FiltroFoto().filter(_msg_foto("esta", reply_a=del_bot())) is True                 # contesta a un mensaje del Jefe
+    fb, fbs = _fb()
+    run(B.hacer_handler_foto(fb)(Upd(_msg_foto("Jefe, esta")), Ctx({"waiting_for_edit_photo": True})))   # /editar esperando la foto
+    assert len(fbs) == 1 and h.dir.llamadas == []
+
+
+def test_un_harness_que_no_recibe_fotos_lo_dice_y_no_toca_nada(h):
+    m = _msg_foto("Jefe, poné esta foto en la del Senado")
+    run(B.hacer_handler_foto(_fb()[0])(Upd(m), Ctx()))                    # FakeDir.procesar no acepta `foto`
+    assert "todavía no sabe recibir fotos" in m.respuestas[0][0] and h.dir.llamadas == []
+
+
+def test_si_el_jefe_tarda_de_mas_se_dice_y_no_queda_colgado(h, monkeypatch):
+    import time
+    monkeypatch.setattr(B, "PLAZO_PROCESAR_S", 0.05)
+    h.dir.procesar = lambda *a, **k: time.sleep(0.3) or h.dir.resp
+    m = Msg("Jefe, cargá esta nota https://www.ambito.com/x")
+    run(B.hacer_handler_texto(_fb()[0])(Upd(m), Ctx()))
+    assert "está tardando" in m.respuestas[0][0] and len(m.respuestas) == 1
+
+
+def test_main_registra_la_foto_para_el_jefe_antes_que_handle_photo_message(h):
+    from telegram.ext import Application, MessageHandler
+    app = Application.builder().token("123456:ABC-fake-token-for-tests").build()
+    fb, _ = _fb()
+    B.registrar(app, transcribir=lambda p, c: "", fallback_texto=fb, fallback_media=fb, fallback_foto=fb)
+    foto_h = app.handlers[0][4]
+    assert isinstance(foto_h, MessageHandler)
+    foto = {"photo": [{"file_id": "a", "file_unique_id": "b", "width": 1, "height": 1}], "caption": "Jefe, poné esta"}
+    assert foto_h.check_update(_upd_json(**foto)) and not foto_h.check_update(_upd_json(chat="group", **foto))
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+    assert "fallback_foto=handle_photo_message" in src
+    assert src.index("_jefe_bot.registrar(") < src.index("app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))")

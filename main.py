@@ -18494,7 +18494,7 @@ def main():
     try:
         import jefe_directivas_bot as _jefe_bot
         _jefe_bot.registrar(app, transcribir=_whisper_from_file, fallback_texto=handle_link,
-                            fallback_media=handle_evento_media, pausado=_pausado)
+                            fallback_media=handle_evento_media, pausado=_pausado, fallback_foto=handle_photo_message)
     except Exception as _e_jefe:
         logger.warning(f"directivas al Jefe no registradas: {_e_jefe}")
     # Criterios del Jefe (Jefe v3, etapa 5, 25/11/2026): botones jcr_ (✅/❌ de los criterios de la semana, 🗑 Retirar) y /criterios.

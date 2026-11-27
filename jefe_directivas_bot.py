@@ -23,6 +23,10 @@ Audios: fuera de la reunión el bot no transcribía ningún audio suelto (handle
 que acá se transcribe UNA vez con el mismo `_whisper_from_file` y, si no es para el Jefe, el audio sigue su camino sin haberlo
 molestado (con Leo fuera de otro flujo, ese camino no hace nada).
 
+Fotos (27/11/2026): una foto con epígrafe «Jefe, …» (o que contesta, con epígrafe, a un mensaje del Jefe) va al Jefe con la foto:
+«Jefe, poné esta foto en <link>» → el encargo al subagente de fotos del harness usa ESA foto (se pone con un clic de Leo). Sin
+epígrafe para el Jefe, la foto sigue a `handle_photo_message` como siempre.
+
 Jefe v3 (25/11/2026): los botones del tablero fijo del Jefe (`jen_ver`, `jen_fr`, `jen_re`) entran por `hacer_handler_tablero` y los
 resuelve el harness (agents/jefe_encargos.boton). El tablero lo manda y lo edita el harness (bandera JEFE_TABLERO, apagada por
 defecto): sin tablero, ningún mensaje lleva esos botones.
@@ -45,6 +49,7 @@ logger = logging.getLogger("jefe_directivas_bot")
 
 HARNESS_DIR = os.environ.get("HARNESS_DIR", "/opt/me-harness")
 PLAZO_BOTON_S = 150            # frases del día baja páginas y llama modelos; el resto contesta al instante
+PLAZO_PROCESAR_S = 240         # razonar (Opus o el respaldo) + lo que el Jefe deriva (un link a procesar, las fotos candidatas)
 _CONTEXTO_AUDIO = "directivas del director de un diario de negocios para pymes argentinas a su jefe de redacción: temas, empresas, políticos"
 
 # «Jefe, …» / «jefe: …». «Jefe de Gabinete dijo…» NO es un llamado al Jefe (salvo «Jefe de redacción»).
@@ -140,6 +145,21 @@ class FiltroTexto(filters.MessageFilter):
             return False
 
 
+class FiltroFoto(filters.MessageFilter):
+    """Una foto para el Jefe: el epígrafe empieza con «Jefe» o contesta (con epígrafe) a un mensaje suyo. Lo demás sigue a
+    handle_photo_message (la foto de /editar, de un evento, de una encuesta…)."""
+    name = "jefe_directivas_foto"
+
+    def filter(self, message) -> bool:
+        try:
+            if modo() == "0" or reunion_abierta():
+                return False
+            t = (getattr(message, "caption", None) or "").strip()
+            return bool(t) and (empieza_con_jefe(t) or es_respuesta_al_jefe(message))
+        except Exception:
+            return False
+
+
 class FiltroVoz(filters.MessageFilter):
     """Cualquier audio del chat privado con la bandera prendida y sin reunión abierta. El handler decide si es para el Jefe
     (reply a un mensaje suyo o transcripción que empieza con «Jefe») y, si no, lo devuelve a su camino."""
@@ -187,15 +207,27 @@ def hilo_kw(message) -> dict:
         return {}
 
 
-async def _procesar_y_responder(message, texto, tipo, canal) -> bool:
-    """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino."""
+async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
+    """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino.
+    `foto`: el archivo de la foto que mandó Leo (el harness la copia). En un hilo y con tope de PLAZO_PROCESAR_S (27/11)."""
     kw = hilo_kw(message)
+    if foto:
+        kw["foto"] = foto
     try:
-        res = await asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **kw)
-    except TypeError:
-        if not kw:
-            raise
-        res = await asyncio.to_thread(harness().dir.procesar, texto, tipo, canal)      # un harness anterior a la v2.0 no sigue hilos
+        try:
+            res = await asyncio.wait_for(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **kw), PLAZO_PROCESAR_S)
+        except TypeError:
+            if foto:
+                await message.reply_text("⚠️ El harness todavía no sabe recibir fotos para el Jefe. No toqué nada.")
+                return True
+            if not kw:
+                raise
+            # un harness anterior a la v2.0 no sigue hilos
+            res = await asyncio.wait_for(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal), PLAZO_PROCESAR_S)
+    except asyncio.TimeoutError:
+        await message.reply_text("⏱ El Jefe está tardando más de %d s. Sigue en segundo plano: lo que haga queda en el parte de "
+                                 "las 20:00." % PLAZO_PROCESAR_S)
+        return True
     if not res.get("ok"):
         if res.get("motivo") == "vacio" and res.get("texto"):
             await message.reply_text(res["texto"], parse_mode="HTML")
@@ -272,6 +304,34 @@ def hacer_handler_voz(transcribir, fallback, pausado=None):
         except Exception as e:
             logger.exception("directiva al Jefe (audio): %s", e)
             await m.reply_text("⚠️ No pude pasarle tu audio al Jefe (%s). No toqué nada." % str(e)[:80])
+    return handle
+
+
+def hacer_handler_foto(fallback, pausado=None):
+    """La foto con epígrafe para el Jefe: se baja la más grande a un temporal, se le pasa al Jefe con el epígrafe y se borra."""
+    async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if (pausado and pausado()) or _AB.en_otro_flujo(context.user_data):
+            return await fallback(update, context)
+        m = update.message
+        texto = (m.caption or "").strip()
+        canal = "jefe" if empieza_con_jefe(texto) else "respuesta"
+        path = None
+        try:
+            foto = m.photo[-1]
+            f = await foto.get_file(read_timeout=60, connect_timeout=30)
+            path = os.path.join(tempfile.gettempdir(), "jfd_foto_%s.jpg" % foto.file_unique_id)
+            await f.download_to_drive(path)
+            if not await _procesar_y_responder(m, texto, "texto", canal, foto=path):
+                return await fallback(update, context)
+        except Exception as e:
+            logger.exception("foto para el Jefe: %s", e)
+            await m.reply_text("⚠️ No pude pasarle tu foto al Jefe (%s). No toqué nada." % str(e)[:80])
+        finally:
+            if path:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
     return handle
 
 
@@ -388,7 +448,7 @@ def hacer_handler_tablero():
     return handle
 
 
-def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None):
+def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None, fallback_foto=None):
     """Registra los handlers. Llamar DESPUÉS de registrar agenda_reunion_bot y ANTES de `handle_link` y `handle_evento_media`:
     dentro de un mismo grupo gana el primero que coincide, y estos solo coinciden con lo que es para el Jefe."""
     app.add_handler(CommandHandler("jefe", cmd_jefe))
@@ -398,6 +458,9 @@ def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None)
                                    hacer_handler_texto(fallback_texto, pausado)))
     app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.UpdateType.EDITED & privado & FiltroVoz(),
                                    hacer_handler_voz(transcribir, fallback_media, pausado)))
+    if fallback_foto is not None:            # 27/11: «Jefe, poné esta foto en <link>» con la foto adjunta
+        app.add_handler(MessageHandler(filters.PHOTO & ~filters.UpdateType.EDITED & privado & FiltroFoto(),
+                                       hacer_handler_foto(fallback_foto, pausado)))
     # Jefe v3 (25/11/2026): los botones del tablero fijo. Sin tablero en el harness (JEFE_TABLERO apagada) ningún mensaje los lleva.
     app.add_handler(CallbackQueryHandler(hacer_handler_tablero(), pattern=r"^jen_(ver|fr|re):\d+$"))
     logger.info("directivas al Jefe registradas (JEFE_DIRECTIVAS=%s)", modo())
