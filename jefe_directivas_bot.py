@@ -31,6 +31,12 @@ Jefe v3 (25/11/2026): los botones del tablero fijo del Jefe (`jen_ver`, `jen_fr`
 resuelve el harness (agents/jefe_encargos.boton). El tablero lo manda y lo edita el harness (bandera JEFE_TABLERO, apagada por
 defecto): sin tablero, ningún mensaje lleva esos botones.
 
+Deriva (27/11/2026, Leo: «quiero que el jefe se ocupe de derivar las gestiones a quien corresponda»): cuando el Jefe deriva un
+link de X, YouTube o Instagram (`derivar_bot` en su respuesta o en la de un botón), el bot lo corre por el camino del link pegado
+solo (handle_link: tweet a nota, agente social, duplicados, LINK_LEO_DIRECTO) con SOLO el link, después de la respuesta del Jefe;
+antes el Jefe le decía «ese mandalo solo». La respuesta a un botón de los links de la reunión de agenda (`aparte`) sale en un
+mensaje nuevo y no pisa el plan. Los comandos del bot (/editar, /borrar…) siguen como estaban.
+
 El estado vive en harness.db (tabla jefe_directivas): un reinicio del bot no corta nada. Sin claves ni datos personales: repo público.
 """
 import asyncio
@@ -53,6 +59,8 @@ PLAZO_PROCESAR_S = 240         # razonar (Opus o el respaldo) + lo que el Jefe d
 _CONTEXTO_AUDIO = "directivas del director de un diario de negocios para pymes argentinas a su jefe de redacción: temas, empresas, políticos"
 
 # «Jefe, …» / «jefe: …». «Jefe de Gabinete dijo…» NO es un llamado al Jefe (salvo «Jefe de redacción»).
+_LINK = {"f": None}            # handle_link del bot (lo pone `registrar`): el camino de los links que deriva el Jefe
+
 _RE_JEFE = re.compile(r"^\s*jefe\b(?!\s+de\s+(?!redacci[oó]n))[\s,:;.\-–—¡!]*\S", re.I)
 
 
@@ -236,13 +244,60 @@ def _tarde(message, fut, contestar=None):
     return t
 
 
-async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
+class _MsgConLink:
+    """El mensaje de Leo con SOLO el link (los de Telegram no se pueden modificar): lo demás es el mensaje de verdad."""
+    def __init__(self, base, url):
+        self._base, self.text = base, url
+
+    def __getattr__(self, k):
+        return getattr(self._base, k)
+
+
+class _UpdConLink:
+    def __init__(self, update, message):
+        self._u, self.message, self.effective_message = update, message, message
+
+    def __getattr__(self, k):
+        return getattr(self._u, k)
+
+
+async def derivar_links(message, update, context, urls, link) -> None:
+    """Los links de X, YouTube e Instagram que el Jefe derivó (27/11, `derivar_bot`): se corren uno por uno por el camino del link
+    pegado solo (`link` = handle_link del bot: tweet a nota, agente social, duplicados, LINK_LEO_DIRECTO), como si Leo los hubiera
+    pegado solos. Antes el Jefe le decía «ese mandalo solo». Lo que pase lo cuenta ese camino. Nunca lanza."""
+    for u in urls or []:
+        try:
+            if link is None or context is None:
+                await message.reply_text("⚠️ No tengo a mano el camino de los links de X, YouTube e Instagram: %s queda pendiente." % u,
+                                         disable_web_page_preview=True)
+                continue
+            if _AB.en_otro_flujo(getattr(context, "user_data", None)):
+                await message.reply_text("⏸ Estás en medio de otro flujo del bot: %s quedó pendiente. Cuando termines, decime "
+                                         "«Jefe, cargá este link» y lo mando." % u, disable_web_page_preview=True)
+                continue
+            await link(_UpdConLink(update, _MsgConLink(message, u)), context)
+        except Exception as e:
+            logger.warning("derivar link %s: %s", u, e)
+            try:
+                await message.reply_text("⚠️ No pude pasar %s a su camino (%s). No se cargó nada." % (u, str(e)[:80]), disable_web_page_preview=True)
+            except Exception:
+                pass
+
+
+async def _procesar_y_responder(message, texto, tipo, canal, foto=None, derivar=None) -> bool:
     """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino.
     `foto`: el archivo de la foto que mandó Leo (el harness la copia). En un hilo y con tope de espera PLAZO_PROCESAR_S: si el Jefe
-    tarda más, se le avisa a Leo y la respuesta (con sus botones) llega igual cuando termina (revisión 1, 27/11)."""
+    tarda más, se le avisa a Leo y la respuesta (con sus botones) llega igual cuando termina (revisión 1, 27/11).
+    `derivar(urls)`: corre los links que el Jefe derivó al camino del bot (X, YouTube, Instagram), después de su respuesta."""
     kw = hilo_kw(message)
     if foto:
         kw["foto"] = foto
+
+    async def contestar(m, res):
+        ok = await _contestar_res(m, res)
+        if ok and derivar is not None and res.get("derivar_bot"):
+            await derivar(res["derivar_bot"])
+        return ok
 
     def lanzar(**k):
         return asyncio.ensure_future(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **k))
@@ -260,21 +315,26 @@ async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
             res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_PROCESAR_S)
     except asyncio.TimeoutError:
         await message.reply_text("⏱ El Jefe está tardando más de %d s. Sigue trabajando: te contesto acá cuando termine." % PLAZO_PROCESAR_S)
-        _tarde(message, fut)
+        _tarde(message, fut, contestar)
         return True
-    return await _contestar_res(message, res)
+    return await contestar(message, res)
 
 
 # ── handlers ──────────────────────────────────────────────────────────────────
 
-def hacer_handler_texto(fallback, pausado=None):
+def _derivador(update, context, link):
+    return lambda urls: derivar_links(update.message, update, context, urls, link)
+
+
+def hacer_handler_texto(fallback, pausado=None, link=None):
+    """`link`: el camino del link pegado solo (handle_link); por defecto, `fallback` (en main.py es el mismo)."""
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (pausado and pausado()) or _AB.en_otro_flujo(context.user_data):
             return await fallback(update, context)
         texto = (update.message.text or "").strip()
         canal = "jefe" if empieza_con_jefe(texto) else "respuesta"
         try:
-            if await _procesar_y_responder(update.message, texto, "texto", canal):
+            if await _procesar_y_responder(update.message, texto, "texto", canal, derivar=_derivador(update, context, link or fallback)):
                 return
         except Exception as e:
             logger.exception("directiva al Jefe (texto): %s", e)
@@ -287,7 +347,7 @@ def hacer_handler_texto(fallback, pausado=None):
     return handle
 
 
-def hacer_handler_voz(transcribir, fallback, pausado=None):
+def hacer_handler_voz(transcribir, fallback, pausado=None, link=None):
     """`transcribir(path, contexto) -> str` es `_whisper_from_file` del bot. Se transcribe una sola vez."""
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (pausado and pausado()) or _AB.en_otro_flujo(context.user_data):
@@ -327,7 +387,7 @@ def hacer_handler_voz(transcribir, fallback, pausado=None):
         await status.edit_text("🎙️ Entendí: «%s»" % texto[:900])
         canal = "jefe" if empieza_con_jefe(texto) else "respuesta"
         try:
-            if not await _procesar_y_responder(m, texto, "audio", canal):
+            if not await _procesar_y_responder(m, texto, "audio", canal, derivar=_derivador(update, context, link)):
                 return await fallback(update, context)
         except Exception as e:
             logger.exception("directiva al Jefe (audio): %s", e)
@@ -335,7 +395,7 @@ def hacer_handler_voz(transcribir, fallback, pausado=None):
     return handle
 
 
-def hacer_handler_foto(fallback, pausado=None):
+def hacer_handler_foto(fallback, pausado=None, link=None):
     """La foto con epígrafe para el Jefe: se baja la más grande a un temporal, se le pasa al Jefe con el epígrafe y se borra."""
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (pausado and pausado()) or _AB.en_otro_flujo(context.user_data):
@@ -349,7 +409,7 @@ def hacer_handler_foto(fallback, pausado=None):
             f = await foto.get_file(read_timeout=60, connect_timeout=30)
             path = os.path.join(tempfile.gettempdir(), "jfd_foto_%s.jpg" % foto.file_unique_id)
             await f.download_to_drive(path)
-            if not await _procesar_y_responder(m, texto, "texto", canal, foto=path):
+            if not await _procesar_y_responder(m, texto, "texto", canal, foto=path, derivar=_derivador(update, context, link)):
                 return await fallback(update, context)
         except Exception as e:
             logger.exception("foto para el Jefe: %s", e)
@@ -375,15 +435,17 @@ async def cmd_jefe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reunion_abierta() and texto:       # con la reunión abierta, todo sigue como hoy: la deliberación de la agenda
             if await _AB._deliberar_y_responder(update, texto, "texto"):
                 return
-        if not await _procesar_y_responder(m, texto, "texto", "comando"):
+        if not await _procesar_y_responder(m, texto, "texto", "comando", derivar=_derivador(update, context, _LINK.get("f"))):
             return
     except Exception as e:
         logger.exception("/jefe: %s", e)
         await m.reply_text("⚠️ No pude pasarle tu mensaje al Jefe (%s). No toqué nada." % str(e)[:80])
 
 
-def hacer_handler_boton():
-    """Botones `jfd_si` (el clic), `jfd_no` (descartar) y `jfd_un` (deshacer). Se contesta el callback primero y recién ahí se trabaja."""
+def hacer_handler_boton(link=None):
+    """Botones `jfd_si` (el clic), `jfd_no` (descartar) y `jfd_un` (deshacer). Se contesta el callback primero y recién ahí se trabaja.
+    27/11 (deriva): si el clic derivó un link de X, YouTube o Instagram (`derivar_bot`), se corre por `link` (handle_link); si la
+    directiva es de la reunión de agenda (`aparte`), la respuesta va en un mensaje aparte y no pisa el plan."""
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
         data = q.data or ""
@@ -391,6 +453,12 @@ def hacer_handler_boton():
             await q.answer("Las directivas al Jefe no están activas.", show_alert=False)
             return
         await q.answer()
+        derivar = lambda urls: derivar_links(q.message, update, context, urls, link or _LINK.get("f"))   # noqa: E731
+
+        async def tarde(message, res):
+            await _contestar_boton_tarde(message, res)
+            if res.get("ok") and res.get("derivar_bot"):
+                await derivar(res["derivar_bot"])
         fut = asyncio.ensure_future(asyncio.to_thread(harness().dir.boton, data))
         try:
             res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_BOTON_S)
@@ -398,7 +466,7 @@ def hacer_handler_boton():
             # revisión 2 (27/11): como en procesar, la respuesta llega igual cuando termina, en un mensaje aparte y con sus
             # botones (si «✅ Esa» tarda buscando fotos, el «✅ Poner esta» no se pierde)
             await q.message.reply_text("⏱ Está tardando más de %d s. Sigue trabajando: te lo mando acá cuando termine." % PLAZO_BOTON_S)
-            _tarde(q.message, fut, _contestar_boton_tarde)
+            _tarde(q.message, fut, tarde)
             return
         except Exception as e:
             logger.exception("botón del Jefe %s: %s", data, e)
@@ -409,14 +477,18 @@ def hacer_handler_boton():
                 await q.message.reply_text(res["toast"])
             return
         texto, botones = res["texto"], res.get("botones")
-        if len(texto) <= _AB.LIMITE_TG:
+        editado = False
+        if len(texto) <= _AB.LIMITE_TG and not res.get("aparte"):
             try:
                 await q.edit_message_text(texto, parse_mode="HTML", reply_markup=botones, disable_web_page_preview=True)
                 _registrar(q.message, res)
-                return
+                editado = True
             except Exception as e:      # «message is not modified» u otro: se manda aparte
                 logger.debug("editar: %s", e)
-        await responder(q.message, res)
+        if not editado:
+            await responder(q.message, res)
+        if res.get("derivar_bot"):
+            await derivar(res["derivar_bot"])
     return handle
 
 
@@ -491,16 +563,17 @@ def hacer_handler_tablero():
 def registrar(app, *, transcribir, fallback_texto, fallback_media, pausado=None, fallback_foto=None):
     """Registra los handlers. Llamar DESPUÉS de registrar agenda_reunion_bot y ANTES de `handle_link` y `handle_evento_media`:
     dentro de un mismo grupo gana el primero que coincide, y estos solo coinciden con lo que es para el Jefe."""
+    _LINK["f"] = fallback_texto                  # el camino del link pegado solo (handle_link): los links que deriva el Jefe
     app.add_handler(CommandHandler("jefe", cmd_jefe))
-    app.add_handler(CallbackQueryHandler(hacer_handler_boton(), pattern=r"^jfd_"))
+    app.add_handler(CallbackQueryHandler(hacer_handler_boton(fallback_texto), pattern=r"^jfd_"))
     privado = filters.ChatType.PRIVATE
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED & privado & FiltroTexto(),
-                                   hacer_handler_texto(fallback_texto, pausado)))
+                                   hacer_handler_texto(fallback_texto, pausado, link=fallback_texto)))
     app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.UpdateType.EDITED & privado & FiltroVoz(),
-                                   hacer_handler_voz(transcribir, fallback_media, pausado)))
+                                   hacer_handler_voz(transcribir, fallback_media, pausado, link=fallback_texto)))
     if fallback_foto is not None:            # 27/11: «Jefe, poné esta foto en <link>» con la foto adjunta
         app.add_handler(MessageHandler(filters.PHOTO & ~filters.UpdateType.EDITED & privado & FiltroFoto(),
-                                       hacer_handler_foto(fallback_foto, pausado)))
+                                       hacer_handler_foto(fallback_foto, pausado, link=fallback_texto)))
     # Jefe v3 (25/11/2026): los botones del tablero fijo. Sin tablero en el harness (JEFE_TABLERO apagada) ningún mensaje los lleva.
     app.add_handler(CallbackQueryHandler(hacer_handler_tablero(), pattern=r"^jen_(ver|fr|re):\d+$"))
     logger.info("directivas al Jefe registradas (JEFE_DIRECTIVAS=%s)", modo())

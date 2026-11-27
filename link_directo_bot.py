@@ -11,6 +11,12 @@ la apagan y vuelve la tarjeta de siempre. Si el harness todavía no tiene `tomar
 harness se baja a mano) tampoco pasa nada: se manda la tarjeta de siempre.
 
 Lo que NO cambia: notas escritas a mano o PDF, tweets, YouTube/Instagram y eventos (cada uno tiene su camino).
+
+«⛔ Frenar» de una nota que YA SALIÓ (27/11/2026, Leo: «quiero que el jefe se ocupe de derivar las gestiones a quien
+corresponda»): en vez de «usá /editar o /borrar», el Jefe del harness (`agents/jefe_directivas.derivar_retiro`) se la deriva al
+subagente de notas publicadas y le manda a Leo, en un mensaje aparte y suyo, «📝 Pasar a borrador» / «🗑 A la papelera» (1 clic,
+nunca un borrado definitivo). Con el Jefe apagado (JEFE_DIRECTIVAS=0) o un harness que no lo tiene, el aviso es el de antes.
+Los comandos /editar y /borrar siguen como estaban.
 Sin claves ni datos personales: el repo del bot es público.
 """
 import asyncio
@@ -25,6 +31,9 @@ logger = logging.getLogger("link_directo_bot")
 
 HARNESS_DIR = os.environ.get("HARNESS_DIR", "/opt/me-harness")
 PLAZO_S = 50                     # tope de espera de tomar_directo (corre la cola con un modelo); pasado, se mira en qué quedó
+PLAZO_JEFE_S = 60                # tope de espera del Jefe para armar el «sacarla de la web» (lee la nota en WordPress); pasado,
+                                 # su mensaje llega igual, aparte
+_TAREAS = set()                  # las respuestas tardías (si no, el recolector puede matarlas)
 _APAGADO = {"0", "false", "no", "off", "apagado", "n"}
 
 
@@ -62,6 +71,59 @@ def set_harness(h):
     """Para las pruebas: reemplaza el acceso al harness."""
     global _H
     _H = h
+
+
+def _jefe(h):
+    """El Jefe del harness (agents/jefe_directivas), o None si este harness no lo tiene. Nunca lanza."""
+    j = getattr(h, "jefe", None)
+    if j is not None or not isinstance(h, _Harness):
+        return j
+    try:
+        from agents import jefe_directivas
+        h.jefe = jefe_directivas
+        return jefe_directivas
+    except Exception as e:
+        logger.warning("frenar: no pude cargar el Jefe del harness: %s", e)
+        return None
+
+
+async def _mandar_jefe(query, der) -> None:
+    """El mensaje del Jefe (con sus botones), aparte y registrado como suyo: un reply le sigue hablando al Jefe."""
+    msg = getattr(query, "message", None)
+    if msg is None:
+        return
+    sent = await msg.reply_text(der.get("texto") or "", parse_mode="HTML", reply_markup=der.get("botones"), disable_web_page_preview=True)
+    try:
+        j = _jefe(harness())
+        if j is not None and getattr(sent, "message_id", None):
+            j.registrar_mensaje(sent.message_id, der.get("directiva_id"))
+    except Exception as e:
+        logger.debug("frenar: registrar el mensaje del Jefe: %s", e)
+
+
+async def _retiro(query, job_id) -> dict:
+    """Le pide al Jefe que derive el retiro de la web (en un hilo y con tope). Si tarda, el mensaje del Jefe llega igual, tarde."""
+    j = _jefe(harness())
+    if j is None or not hasattr(j, "derivar_retiro"):
+        return {"ok": False, "motivo": "sin_jefe"}
+    fut = asyncio.ensure_future(asyncio.to_thread(j.derivar_retiro, job_id))
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), PLAZO_JEFE_S) or {}
+    except asyncio.TimeoutError:
+        async def tarde():
+            try:
+                der = await fut
+                if (der or {}).get("ok"):
+                    await _mandar_jefe(query, der)
+            except Exception as e:
+                logger.warning("frenar #%s: respuesta tardía del Jefe: %s", job_id, e)
+        t = asyncio.ensure_future(tarde())
+        _TAREAS.add(t)
+        t.add_done_callback(_TAREAS.discard)
+        return {"ok": False, "motivo": "tarde"}
+    except Exception as e:
+        logger.warning("frenar #%s: el Jefe no pudo armar el retiro: %s", job_id, e)
+        return {"ok": False, "motivo": str(e)[:80]}
 
 
 def puede_directo() -> bool:
@@ -162,15 +224,36 @@ async def frenar(query, job_id) -> None:
         if estado == "frenada" and res.get("etapa") == "publicacion":
             texto += "\n<i>Estaba en publicación: si justo se había subido a WordPress, la paso a borrador y no sale a redes.</i>"
     elif estado == "publicada":
-        await _responder(query, "Ya se publicó: usá /editar o /borrar.", True)
         url = res.get("wp_url") or ""
-        texto = ("✅ <b>Ya se publicó:</b> «%s»%s\nPara corregirla usá /editar; para sacarla, /borrar." %
-                 (t, "\n" + html.escape(url, quote=False) if url else ""))
+        enlace = "\n" + html.escape(url, quote=False) if url else ""
+        der = await _retiro(query, job_id)
+        if der.get("ok") or der.get("motivo") == "tarde":
+            await _responder(query, "Ya se publicó: te pregunto abajo si la saco de la web.")
+            texto = "✅ <b>Ya se publicó:</b> «%s»%s\nNo se puede frenar: %s" % (
+                t, enlace, "abajo te pregunto si la saco de la web." if der.get("ok") else
+                "estoy armando cómo sacarla de la web; te lo mando abajo cuando termine.")
+            try:
+                await query.edit_message_text(texto, parse_mode="HTML", disable_web_page_preview=True)
+            except Exception as e:
+                logger.debug("frenar #%s: no pude editar el aviso: %s", job_id, e)
+            if der.get("ok"):
+                try:
+                    await _mandar_jefe(query, der)
+                except Exception as e:
+                    logger.warning("frenar #%s: no pude mandar el mensaje del Jefe: %s", job_id, e)
+            return
+        if der.get("motivo") in ("bandera", "sin_jefe"):      # el Jefe apagado (o un harness sin él): el aviso de antes
+            await _responder(query, "Ya se publicó: usá /editar o /borrar.", True)
+            texto = "✅ <b>Ya se publicó:</b> «%s»%s\nPara corregirla usá /editar; para sacarla, /borrar." % (t, enlace)
+        else:
+            await _responder(query, "Ya se publicó: no pude armar cómo sacarla de la web.", True)
+            texto = ("✅ <b>Ya se publicó:</b> «%s»%s\nNo se puede frenar y no pude armar cómo sacarla de la web (%s): decime "
+                     "«Jefe, sacá esta nota de la web» y lo hago." % (t, enlace, html.escape(der.get("motivo") or "sin detalle", quote=False)))
     elif estado == "no_existe":
         await _responder(query, "No encontré esa nota.", True)
         return
     else:      # 'error': no se pudo frenar y no se sabe por qué; no decir lo que no es cierto
-        await _responder(query, "No pude frenarla (falló). Probá de nuevo o usá /borrar si ya salió.", True)
+        await _responder(query, "No pude frenarla (falló): tocá ⛔ Frenar de nuevo.", True)
         return
     try:
         await query.edit_message_text(texto, parse_mode="HTML", disable_web_page_preview=True)   # sin teclado: el botón se va
