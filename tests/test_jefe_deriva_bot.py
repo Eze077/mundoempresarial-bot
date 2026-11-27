@@ -139,14 +139,15 @@ RETIRO = {"ok": True, "directiva_id": 31, "texto": "🧑‍💼 <b>Jefe</b> · �
                                           [{"text": "🗑 A la papelera", "callback_data": "jfd_pr:31:0:1"}]]}}
 
 
-def _harness(retiro=None, lento=0.0):
+def _harness(retiro=None, lento=0.0, modo="1"):
     registrados = []
 
     def derivar(jid):
         if lento:
             time.sleep(lento)
         return retiro
-    jefe = types.SimpleNamespace(derivar_retiro=derivar, registrar_mensaje=lambda mid, did=None: registrados.append((mid, did)))
+    jefe = types.SimpleNamespace(derivar_retiro=derivar, registrar_mensaje=lambda mid, did=None: registrados.append((mid, did)),
+                                 modo=lambda: modo)
     cur = types.SimpleNamespace(frenar_directo=lambda jid: {"ok": False, "estado": "publicada", "titulo": "Nota", "wp_url": "https://mundoempresarial.ar/nota"})
     return types.SimpleNamespace(curador=cur, broker=None, jefe=jefe), registrados
 
@@ -172,11 +173,55 @@ def test_frenar_una_que_ya_salio_manda_el_retiro_del_jefe_sin_comandos():
 
 
 def test_frenar_con_el_jefe_apagado_es_el_aviso_de_antes():
-    hh, _ = _harness({"ok": False, "motivo": "bandera"})
+    hh, _ = _harness({"ok": False, "motivo": "bandera"}, modo="0")
     L.set_harness(hh)
     q = Consulta()
     run(L.frenar(q, 5))
-    assert "/editar" in q.ediciones[0][0] and q.message.respuestas == []
+    assert "/editar" in q.ediciones[0][0] and q.message.respuestas == [] and q.respuestas == [("Ya se publicó: usá /editar o /borrar.", True)]
+
+
+def test_frenar_contesta_el_callback_antes_de_esperar_al_jefe():
+    orden = []
+    hh, _ = _harness(RETIRO)
+    jefe = hh.jefe
+    jefe.derivar_retiro = lambda jid: orden.append("jefe") or RETIRO
+    L.set_harness(hh)
+
+    class Q(Consulta):
+        async def answer(self, texto=None, show_alert=False):
+            orden.append("answer")
+            await super().answer(texto, show_alert)
+    q = Q()
+    run(L.frenar(q, 5))
+    assert orden[:2] == ["answer", "jefe"] and len(q.respuestas) == 1
+
+
+def test_frenar_dos_veces_mientras_lo_arma_no_arma_otra():
+    hh, _ = _harness(RETIRO, lento=0.3)
+    L.set_harness(hh)
+    q1, q2 = Consulta(), Consulta()
+
+    async def todo():
+        t = asyncio.ensure_future(L.frenar(q1, 6))
+        await asyncio.sleep(0.05)
+        await L.frenar(q2, 6)
+        await t
+    run(todo())
+    assert q2.respuestas == [("Ya lo estoy armando: te lo mando abajo.", False)] and q2.ediciones == []
+    assert len(q1.message.respuestas) == 1 and 6 not in L._EN_CURSO
+
+
+def test_frenar_si_la_respuesta_tardia_falla_lo_avisa(monkeypatch):
+    monkeypatch.setattr(L, "PLAZO_JEFE_S", 0.05)
+    hh, _ = _harness({"ok": False, "motivo": "WordPress no contestó"}, lento=0.3)
+    L.set_harness(hh)
+    q = Consulta()
+
+    async def todo():
+        await L.frenar(q, 7)
+        await asyncio.gather(*list(L._TAREAS))
+    run(todo())
+    assert "No pude armar cómo sacarla de la web (WordPress no contestó)" in q.message.respuestas[0][0] and 7 not in L._EN_CURSO
 
 
 def test_frenar_si_el_jefe_falla_lo_dice_sin_comandos():

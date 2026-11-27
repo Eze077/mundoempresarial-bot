@@ -34,6 +34,7 @@ PLAZO_S = 50                     # tope de espera de tomar_directo (corre la col
 PLAZO_JEFE_S = 60                # tope de espera del Jefe para armar el «sacarla de la web» (lee la nota en WordPress); pasado,
                                  # su mensaje llega igual, aparte
 _TAREAS = set()                  # las respuestas tardías (si no, el recolector puede matarlas)
+_EN_CURSO = set()                # jobs cuyo «sacarla de la web» se está armando: un doble toque no arma otra
 _APAGADO = {"0", "false", "no", "off", "apagado", "n"}
 
 
@@ -101,27 +102,49 @@ async def _mandar_jefe(query, der) -> None:
         logger.debug("frenar: registrar el mensaje del Jefe: %s", e)
 
 
+def _jefe_activo(j) -> bool:
+    """¿El Jefe de este harness puede derivar el retiro? (está, lo tiene y la bandera no está en 0). Nunca lanza."""
+    try:
+        if j is None or not hasattr(j, "derivar_retiro"):
+            return False
+        return not hasattr(j, "modo") or j.modo() == "1"
+    except Exception:
+        return False
+
+
 async def _retiro(query, job_id) -> dict:
-    """Le pide al Jefe que derive el retiro de la web (en un hilo y con tope). Si tarda, el mensaje del Jefe llega igual, tarde."""
+    """Le pide al Jefe que derive el retiro de la web (en un hilo y con tope). Si tarda, el mensaje del Jefe llega igual, tarde
+    (y si al final no pudo, también se dice). Mientras tanto, otro toque del mismo job no arma otro."""
     j = _jefe(harness())
     if j is None or not hasattr(j, "derivar_retiro"):
         return {"ok": False, "motivo": "sin_jefe"}
+    _EN_CURSO.add(job_id)
     fut = asyncio.ensure_future(asyncio.to_thread(j.derivar_retiro, job_id))
     try:
-        return await asyncio.wait_for(asyncio.shield(fut), PLAZO_JEFE_S) or {}
+        res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_JEFE_S) or {}
+        _EN_CURSO.discard(job_id)
+        return res
     except asyncio.TimeoutError:
         async def tarde():
             try:
                 der = await fut
                 if (der or {}).get("ok"):
                     await _mandar_jefe(query, der)
+                else:
+                    msg = getattr(query, "message", None)
+                    if msg is not None:
+                        await msg.reply_text("⚠️ No pude armar cómo sacarla de la web (%s): decime «Jefe, sacá esta nota de la web» y "
+                                             "lo hago." % ((der or {}).get("motivo") or "sin detalle"))
             except Exception as e:
                 logger.warning("frenar #%s: respuesta tardía del Jefe: %s", job_id, e)
+            finally:
+                _EN_CURSO.discard(job_id)
         t = asyncio.ensure_future(tarde())
         _TAREAS.add(t)
         t.add_done_callback(_TAREAS.discard)
         return {"ok": False, "motivo": "tarde"}
     except Exception as e:
+        _EN_CURSO.discard(job_id)
         logger.warning("frenar #%s: el Jefe no pudo armar el retiro: %s", job_id, e)
         return {"ok": False, "motivo": str(e)[:80]}
 
@@ -226,9 +249,15 @@ async def frenar(query, job_id) -> None:
     elif estado == "publicada":
         url = res.get("wp_url") or ""
         enlace = "\n" + html.escape(url, quote=False) if url else ""
-        der = await _retiro(query, job_id)
+        if job_id in _EN_CURSO:                              # un doble toque mientras el Jefe lo arma: no se arma otra
+            await _responder(query, "Ya lo estoy armando: te lo mando abajo.")
+            return
+        if _jefe_activo(_jefe(harness())):
+            await _responder(query, "Ya se publicó: te pregunto abajo si la saco de la web.")   # ANTES de esperar al Jefe
+            der = await _retiro(query, job_id)
+        else:
+            der = {"ok": False, "motivo": "sin_jefe"}
         if der.get("ok") or der.get("motivo") == "tarde":
-            await _responder(query, "Ya se publicó: te pregunto abajo si la saco de la web.")
             texto = "✅ <b>Ya se publicó:</b> «%s»%s\nNo se puede frenar: %s" % (
                 t, enlace, "abajo te pregunto si la saco de la web." if der.get("ok") else
                 "estoy armando cómo sacarla de la web; te lo mando abajo cuando termine.")
@@ -245,8 +274,7 @@ async def frenar(query, job_id) -> None:
         if der.get("motivo") in ("bandera", "sin_jefe"):      # el Jefe apagado (o un harness sin él): el aviso de antes
             await _responder(query, "Ya se publicó: usá /editar o /borrar.", True)
             texto = "✅ <b>Ya se publicó:</b> «%s»%s\nPara corregirla usá /editar; para sacarla, /borrar." % (t, enlace)
-        else:
-            await _responder(query, "Ya se publicó: no pude armar cómo sacarla de la web.", True)
+        else:                                                # el callback ya se contestó: lo dice el aviso editado
             texto = ("✅ <b>Ya se publicó:</b> «%s»%s\nNo se puede frenar y no pude armar cómo sacarla de la web (%s): decime "
                      "«Jefe, sacá esta nota de la web» y lo hago." % (t, enlace, html.escape(der.get("motivo") or "sin detalle", quote=False)))
     elif estado == "no_existe":
