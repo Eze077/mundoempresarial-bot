@@ -207,27 +207,7 @@ def hilo_kw(message) -> dict:
         return {}
 
 
-async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
-    """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino.
-    `foto`: el archivo de la foto que mandó Leo (el harness la copia). En un hilo y con tope de PLAZO_PROCESAR_S (27/11)."""
-    kw = hilo_kw(message)
-    if foto:
-        kw["foto"] = foto
-    try:
-        try:
-            res = await asyncio.wait_for(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **kw), PLAZO_PROCESAR_S)
-        except TypeError:
-            if foto:
-                await message.reply_text("⚠️ El harness todavía no sabe recibir fotos para el Jefe. No toqué nada.")
-                return True
-            if not kw:
-                raise
-            # un harness anterior a la v2.0 no sigue hilos
-            res = await asyncio.wait_for(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal), PLAZO_PROCESAR_S)
-    except asyncio.TimeoutError:
-        await message.reply_text("⏱ El Jefe está tardando más de %d s. Sigue en segundo plano: lo que haga queda en el parte de "
-                                 "las 20:00." % PLAZO_PROCESAR_S)
-        return True
+async def _contestar_res(message, res) -> bool:
     if not res.get("ok"):
         if res.get("motivo") == "vacio" and res.get("texto"):
             await message.reply_text(res["texto"], parse_mode="HTML")
@@ -235,6 +215,53 @@ async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
         return False
     await responder(message, res)
     return True
+
+
+def _tarde(message, fut):
+    """La respuesta del Jefe que llegó después del tope de espera: se manda igual, con sus botones (como _AB._TAREAS)."""
+    async def tarea():
+        try:
+            res = await fut
+            await _contestar_res(message, res)
+        except Exception as e:
+            logger.warning("respuesta tardía del Jefe: %s", e)
+            try:
+                await message.reply_text("⚠️ El Jefe no pudo terminar (%s). No toqué nada más." % str(e)[:80])
+            except Exception:
+                pass
+    t = asyncio.ensure_future(tarea())
+    _AB._TAREAS.add(t)
+    t.add_done_callback(_AB._TAREAS.discard)
+    return t
+
+
+async def _procesar_y_responder(message, texto, tipo, canal, foto=None) -> bool:
+    """Pasa el mensaje al Jefe y contesta. False si el Jefe no lo tomó (bandera apagada justo antes): el llamador sigue su camino.
+    `foto`: el archivo de la foto que mandó Leo (el harness la copia). En un hilo y con tope de espera PLAZO_PROCESAR_S: si el Jefe
+    tarda más, se le avisa a Leo y la respuesta (con sus botones) llega igual cuando termina (revisión 1, 27/11)."""
+    kw = hilo_kw(message)
+    if foto:
+        kw["foto"] = foto
+
+    def lanzar(**k):
+        return asyncio.ensure_future(asyncio.to_thread(harness().dir.procesar, texto, tipo, canal, **k))
+    fut = lanzar(**kw)
+    try:
+        try:
+            res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_PROCESAR_S)
+        except TypeError:
+            if foto:
+                await message.reply_text("⚠️ El harness todavía no sabe recibir fotos para el Jefe. No toqué nada.")
+                return True
+            if not kw:
+                raise
+            fut = lanzar()                                # un harness anterior a la v2.0 no sigue hilos
+            res = await asyncio.wait_for(asyncio.shield(fut), PLAZO_PROCESAR_S)
+    except asyncio.TimeoutError:
+        await message.reply_text("⏱ El Jefe está tardando más de %d s. Sigue trabajando: te contesto acá cuando termine." % PLAZO_PROCESAR_S)
+        _tarde(message, fut)
+        return True
+    return await _contestar_res(message, res)
 
 
 # ── handlers ──────────────────────────────────────────────────────────────────

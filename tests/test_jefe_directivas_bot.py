@@ -576,13 +576,20 @@ def test_un_harness_que_no_recibe_fotos_lo_dice_y_no_toca_nada(h):
     assert "todavía no sabe recibir fotos" in m.respuestas[0][0] and h.dir.llamadas == []
 
 
-def test_si_el_jefe_tarda_de_mas_se_dice_y_no_queda_colgado(h, monkeypatch):
+def test_si_el_jefe_tarda_de_mas_se_dice_y_la_respuesta_llega_igual_con_sus_botones(h, monkeypatch):
     import time
     monkeypatch.setattr(B, "PLAZO_PROCESAR_S", 0.05)
     h.dir.procesar = lambda *a, **k: time.sleep(0.3) or h.dir.resp
     m = Msg("Jefe, cargá esta nota https://www.ambito.com/x")
-    run(B.hacer_handler_texto(_fb()[0])(Upd(m), Ctx()))
-    assert "está tardando" in m.respuestas[0][0] and len(m.respuestas) == 1
+
+    async def todo():
+        await B.hacer_handler_texto(_fb()[0])(Upd(m), Ctx())
+        assert "está tardando" in m.respuestas[0][0] and len(m.respuestas) == 1
+        assert AB._TAREAS                                        # queda esperando la respuesta, no se pierde
+        await asyncio.gather(*list(AB._TAREAS))
+    run(todo())
+    assert len(m.respuestas) == 2 and m.respuestas[1][0] == "<b>Entendí</b>" and m.respuestas[1][1]["reply_markup"]["inline_keyboard"]
+    assert h.dir.registrados                                     # y queda registrada como del Jefe
 
 
 def test_main_registra_la_foto_para_el_jefe_antes_que_handle_photo_message(h):
